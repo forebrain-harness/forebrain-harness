@@ -97,6 +97,7 @@ var commands = []Command{
 	{Name: "plan", Description: "switch to Plan mode, optionally starting toward a description", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: true, ArgumentHint: "[description]", Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "agent", Description: "switch to another primary agent and its workspace", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewHidden},
 	{Name: "status", Description: "show current session configuration and usage", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, AvailableInSideConversation: true, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
+	{Name: "project", Description: "show this project's type and change it", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "mcp", Description: "manage MCP servers: status, tools, authentication", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "lsp", Description: "language servers: status, enable, restart, diagnostics", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
 	{Name: "peers", Description: "agents on this machine you can message, and held messages", AllowedSurfaces: []Surface{SurfaceTUI}, SupportsInlineArgs: false, Visibility: VisibilityPublic, SubagentView: SubagentViewGlobal},
@@ -258,7 +259,7 @@ func defaultCategory(name string) string {
 		return "ui"
 	case "skills", "mcp", "lsp", "sandbox":
 		return "tools"
-	case "status":
+	case "status", "project":
 		return "ui"
 	default:
 		return "general"
@@ -267,7 +268,7 @@ func defaultCategory(name string) string {
 
 func defaultActionKind(name string) string {
 	switch name {
-	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "mcp", "lsp", "config":
+	case "permissions", "skills", "model", "resume", "memories", "connect", "migrate", "status", "project", "mcp", "lsp", "config":
 		return "open-panel"
 	case "plan", "init", "goal":
 		return "inject-prompt"

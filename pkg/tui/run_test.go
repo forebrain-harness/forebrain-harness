@@ -8480,6 +8480,33 @@ func TestBatchSlashLineOnlyObeysTheWhitelist(t *testing.T) {
 	}
 }
 
+// /project is one of the few commands a batch execution may still run: the type
+// is visible and changeable from the read-only viewer, which is how a terminal
+// left in a batch project gets out of it (owner 2026-11-25, decision 2).
+func TestBatchViewerAdmitsProject(t *testing.T) {
+	home := t.TempDir()
+	session := &batchTypeSession{
+		fakeSession: &fakeSession{},
+		types:       map[string]string{"s1": statepkg.ProjectTypeBatch},
+	}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	state := &streamState{sessionID: "s1", session: session, home: home, workspaceRoot: home}
+	cmds := newCommandController(session, renderer, nil, nil, home)
+
+	handled, _, _, _ := dispatchStreamSlashCommand(context.Background(), cmds, renderer, NewTracker(), state, "/project", ComposerSubmission{})
+	if !handled {
+		t.Fatal("/project must be answered, not refused by the read-only rule")
+	}
+	for _, content := range rendererFrameContents(renderer) {
+		if content == batchReadOnlyNotice {
+			t.Fatal("/project hit the read-only notice")
+		}
+	}
+	if !batchViewerCommands["project"] {
+		t.Fatal("/project must be in the viewer's whitelist")
+	}
+}
+
 // With no sandbox the terminal has no approval preset to offer, so /permissions
 // is answered the way any other command this surface does not have is — it
 // never reaches the preset picker (owner 2026-10-31, plan 215 §3.4).

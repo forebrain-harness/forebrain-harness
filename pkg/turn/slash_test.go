@@ -455,6 +455,7 @@ func TestEveryBuiltinCommandHasASubagentViewScope(t *testing.T) {
 		"compact": SubagentViewHidden,
 		// Runs exactly as it does in the conversation's view.
 		"status":      SubagentViewGlobal,
+		"project":     SubagentViewGlobal,
 		"mcp":         SubagentViewGlobal,
 		"lsp":         SubagentViewGlobal,
 		"permissions": SubagentViewGlobal,

@@ -276,7 +276,8 @@ func (s *ChatSession) AvailableSkillToggleOptions() []skill.Entry {
 	if s == nil || strings.TrimSpace(s.home()) == "" {
 		return nil
 	}
-	infos, err := skill.DiscoverForWorkspace(strings.TrimSpace(s.home()), strings.TrimSpace(s.skillLifecycleService().WorkspaceRoot), s.LaunchProject.Project.Root)
+	svc := s.skillLifecycleService()
+	infos, err := svc.Discover()
 	if err != nil || len(infos) == 0 {
 		return nil
 	}
@@ -344,7 +345,7 @@ func (s *ChatSession) ApplySkillEnabledSelection(enabledPaths []string) (string,
 	if err := svc.SetEnabledPaths(enabledPaths); err != nil {
 		return "", err
 	}
-	entries, err := skill.DiscoverForWorkspace(strings.TrimSpace(s.home()), strings.TrimSpace(svc.WorkspaceRoot), svc.ProjectRoot)
+	entries, err := svc.Discover()
 	if err != nil {
 		return "skills: updated" + skillToggleNextSessionNote, nil
 	}
@@ -1090,6 +1091,12 @@ func (s *ChatSession) skillLifecycleService() *skill.Service {
 			svc := skill.NewServiceForWorkspace(strings.TrimSpace(s.home()), strings.TrimSpace(active.WorkspaceRoot))
 			svc.ProjectKey = projectKey
 			svc.ProjectRoot = launch.Project.Root
+			// The trust decision this terminal already holds: a batch project
+			// is trusted by its type and has no record (owner 2026-11-25). The
+			// launch context of a batch folder is resolved by type at startup,
+			// so the folder test covers a launch project whose context did not
+			// come from a project row.
+			svc.ProjectTrusted = launch.IsTrusted() || s.BatchFolderProject(launch.Project.Root)
 			svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), launch) }
 			svc.IsBuiltin = turn.IsBuiltinName
 			return svc
@@ -1098,6 +1105,7 @@ func (s *ChatSession) skillLifecycleService() *skill.Service {
 	svc := skill.NewService(strings.TrimSpace(s.home()))
 	svc.ProjectKey = projectKey
 	svc.ProjectRoot = launch.Project.Root
+	svc.ProjectTrusted = launch.IsTrusted() || s.BatchFolderProject(launch.Project.Root)
 	svc.OnRefresh = func() error { return turn.RefreshSkills(svc.Home, svc.Workspace(), launch) }
 	svc.IsBuiltin = turn.IsBuiltinName
 	return svc

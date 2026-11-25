@@ -345,6 +345,102 @@ func (s *ChatSession) BatchProject(ctx context.Context) bool {
 	return state.NormalizeProjectType(p.ProjectType) == state.ProjectTypeBatch
 }
 
+// ProjectTypeSnapshot is what /project shows: the launch project as it stands
+// now and the type the conversation on screen was born with. Born is false
+// while that conversation has no session row: it has frozen nothing and follows
+// the project's current type.
+type ProjectTypeSnapshot struct {
+	ProjectID, Name, ProjectType string
+	SessionType                  string
+	Born                         bool
+}
+
+// ProjectTypeState reads the snapshot /project displays. A surface with no
+// project registry has nothing to show, and says so with an error rather than
+// an empty snapshot.
+func (s *ChatSession) ProjectTypeState(ctx context.Context, sessionID string) (ProjectTypeSnapshot, error) {
+	store := s.projectStoreFor()
+	if store == nil {
+		return ProjectTypeSnapshot{}, fmt.Errorf("this session has no project registry")
+	}
+	projectID := strings.TrimSpace(s.ProjectID)
+	if projectID == "" {
+		return ProjectTypeSnapshot{}, nil
+	}
+	p, err := store.Get(ctx, projectID)
+	if err != nil {
+		return ProjectTypeSnapshot{}, err
+	}
+	sessionType, born, err := store.SessionProjectTypeKnown(ctx, sessionID)
+	if err != nil {
+		return ProjectTypeSnapshot{}, err
+	}
+	st := ProjectTypeSnapshot{
+		ProjectID:   p.ID,
+		Name:        p.Name,
+		ProjectType: state.NormalizeProjectType(p.ProjectType),
+		Born:        born,
+	}
+	if born {
+		st.SessionType = state.NormalizeProjectType(sessionType)
+	}
+	return st, nil
+}
+
+// SetProjectType changes the project's type and answers what to tell the
+// operator. A conversation that has not started is re-bound to the new type's
+// runner: its first turn freezes the project's current type in its row, so the
+// runner that serves it has to be that type's as well. A conversation that is
+// already born keeps the runner it froze with — the change reaches the
+// conversations started after it.
+//
+// Nothing here writes a trust record, and nothing checks for one: a batch
+// project needs none (owner 2026-11-25).
+func (s *ChatSession) SetProjectType(ctx context.Context, sessionID, projectType string) (string, error) {
+	store := s.projectStoreFor()
+	if store == nil {
+		return "", fmt.Errorf("this session has no project registry")
+	}
+	projectID := strings.TrimSpace(s.ProjectID)
+	if projectID == "" {
+		return "", fmt.Errorf("this conversation has no project")
+	}
+	current, err := store.Get(ctx, projectID)
+	if err != nil {
+		return "", fmt.Errorf("project type was not changed: %w", err)
+	}
+	sandboxDefault := appcfg.BatchSection{}.EffectiveSandboxDefault()
+	if cfg := s.cfg(); cfg != nil {
+		sandboxDefault = cfg.Batch.EffectiveSandboxDefault()
+	}
+	in, err := process.ProjectTypeInput(current.ProjectType, projectType, sandboxDefault)
+	if err != nil {
+		return "", fmt.Errorf("project type was not changed: %w", err)
+	}
+	// Read before the write: if a transaction creates the row between the two
+	// (a queued follow-up message), that row freezes the NEW type, and only a
+	// re-bind keeps the runner consistent with it. Reading after the write would
+	// take such a conversation for a born one and leave it on the old entry.
+	sessionType, born, err := store.SessionProjectTypeKnown(ctx, sessionID)
+	if err != nil {
+		return "", fmt.Errorf("project type was not changed: %w", err)
+	}
+	updated, err := store.Update(ctx, projectID, in)
+	if err != nil {
+		return "", fmt.Errorf("project type was not changed: %w", err)
+	}
+	if !born {
+		r, bindErr := s.Env.RebindConversation(ctx, sessionID, projectID)
+		if bindErr != nil {
+			err = fmt.Errorf("project type changed, but the conversation's runtime was not re-bound: %w", bindErr)
+		} else if r != nil {
+			_ = r.ReconcileSessionMCP()
+			s.WatchMCPStartup(sessionID)
+		}
+	}
+	return projectTypeReply(sessionType, born, state.NormalizeProjectType(updated.ProjectType)), err
+}
+
 // BatchFolderProject reports whether dir is the root of a batch project this
 // agent has registered (plans/216 §3.5). The launch asks before the folder is
 // adopted as a project, so the answer comes from the registry by root rather

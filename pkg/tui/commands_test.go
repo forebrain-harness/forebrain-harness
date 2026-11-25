@@ -5394,3 +5394,199 @@ func TestModelPickerEffortListArmsNoRemove(t *testing.T) {
 	require.Empty(t, selector.labels)
 	require.Equal(t, []turn.SlashChoice{{Command: "model-effort", Value: "high"}}, session.choices)
 }
+
+// projectTypeFakeSession is a session that carries /project's two methods on top
+// of the ordinary fake: the capability is optional, so the flow is tested
+// against a session that asserts it and one that does not.
+type projectTypeFakeSession struct {
+	*fakeSession
+	snapshot  ProjectTypeSnapshot
+	stateErr  error
+	written   []string
+	reply     string
+	setErr    error
+	stateCall []string
+}
+
+func (f *projectTypeFakeSession) ProjectTypeState(ctx context.Context, sessionID string) (ProjectTypeSnapshot, error) {
+	_, _ = ctx, sessionID
+	f.stateCall = append(f.stateCall, sessionID)
+	return f.snapshot, f.stateErr
+}
+
+func (f *projectTypeFakeSession) SetProjectType(ctx context.Context, sessionID, projectType string) (string, error) {
+	_, _ = ctx, sessionID
+	f.written = append(f.written, projectType)
+	return f.reply, f.setErr
+}
+
+func projectTypeFrame(t *testing.T, renderer *Renderer, title string) (Frame, bool) {
+	t.Helper()
+	for _, block := range renderer.vm.blocks {
+		if block.frame.Kind == FrameSystem && block.frame.Title == title {
+			return block.frame, true
+		}
+	}
+	return Frame{}, false
+}
+
+// The words /project says are the design's, verbatim: the plan's copy table is
+// the contract the terminal and the prototype share.
+func TestProjectTypeCopy(t *testing.T) {
+	unstarted := ProjectTypeSnapshot{ProjectID: "prj-1", Name: "monthly", ProjectType: state.ProjectTypeOffice}
+	born := ProjectTypeSnapshot{ProjectID: "prj-1", Name: "monthly", ProjectType: state.ProjectTypeOffice, SessionType: state.ProjectTypeOffice, Born: true}
+	batchScreen := ProjectTypeSnapshot{ProjectID: "prj-1", Name: "monthly", ProjectType: state.ProjectTypeBatch, SessionType: state.ProjectTypeBatch, Born: true}
+
+	require.Equal(t, "this one has not started, so it takes the new type.", projectTypeScope(unstarted, false, state.ProjectTypeCoding))
+	require.Equal(t, "this one keeps Office work.", projectTypeScope(born, false, state.ProjectTypeCoding))
+	require.Equal(t, "this screen keeps replaying a batch execution.", projectTypeScope(batchScreen, false, state.ProjectTypeCoding))
+	require.Equal(t,
+		"this screen keeps replaying a batch execution; restart Forebrain Harness to start a Coding conversation.",
+		projectTypeScope(batchScreen, true, state.ProjectTypeCoding))
+
+	require.Equal(t,
+		"Project type\nmonthly. A change reaches conversations started after it; this one has not started, so it takes the new type.",
+		projectTypePickerLabel(unstarted))
+	require.Equal(t,
+		"Change project type\nChange monthly from Office work to Coding? Only conversations started after the change get the new type; this one keeps Office work.",
+		projectTypeConfirmLabel(born, state.ProjectTypeCoding))
+	require.Equal(t,
+		"Change project type\nChange monthly from Office work to Batch runs? Only conversations started after the change get the new type; this one has not started, so it takes the new type. Batch projects take tasks created on the web; the terminal only views them.",
+		projectTypeConfirmLabel(unstarted, state.ProjectTypeBatch))
+	require.Equal(t,
+		"Change project type\nChange monthly from Batch runs to Coding? Only conversations started after the change get the new type; this screen keeps replaying a batch execution; restart Forebrain Harness to start a Coding conversation. The task page and task notifications stop for this project; tasks already created stay readable.",
+		projectTypeConfirmLabel(batchScreen, state.ProjectTypeCoding))
+
+	require.Equal(t, "Project type is now Batch runs. Batch projects take tasks created on the web; the terminal only views them.",
+		projectTypeReply(state.ProjectTypeOffice, false, state.ProjectTypeBatch))
+	require.Equal(t, "Project type is now Batch runs. Batch projects take tasks created on the web; the terminal only views them. This conversation keeps Office work.",
+		projectTypeReply(state.ProjectTypeOffice, true, state.ProjectTypeBatch))
+	require.Equal(t, "Project type is now Office work. This conversation takes the new type when it starts.",
+		projectTypeReply("", false, state.ProjectTypeOffice))
+	require.Equal(t, "Project type is now Coding. Tasks already created stay readable. Restart Forebrain Harness to start a Coding conversation.",
+		projectTypeReply(state.ProjectTypeBatch, true, state.ProjectTypeCoding))
+	require.Equal(t, "Project type is now Coding. This conversation keeps Office work; /new starts a Coding conversation.",
+		projectTypeReply(state.ProjectTypeOffice, true, state.ProjectTypeCoding))
+
+	// A project with no name still reads as a sentence.
+	require.Equal(t, "Project type\nprj-1. A change reaches conversations started after it; this one has not started, so it takes the new type.",
+		projectTypePickerLabel(ProjectTypeSnapshot{ProjectID: "prj-1", ProjectType: state.ProjectTypeCoding}))
+}
+
+// A confirmed change writes once and answers one frame; the picker opens on the
+// type in force and marks it.
+func TestHandleProjectWritesAfterConfirmation(t *testing.T) {
+	session := &projectTypeFakeSession{
+		fakeSession: &fakeSession{},
+		snapshot:    ProjectTypeSnapshot{ProjectID: "prj-1", Name: "monthly", ProjectType: state.ProjectTypeOffice},
+		reply:       "Project type is now Coding. This conversation takes the new type when it starts.",
+	}
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	selector := &scriptedSelector{richSteps: []richStep{{label: "Coding", ok: true}, {label: "Yes, change to Coding", ok: true}}}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+
+	if !ctrl.handleProject("s1") {
+		t.Fatal("/project must always answer")
+	}
+	require.Equal(t, []string{state.ProjectTypeCoding}, session.written)
+	require.Len(t, selector.richLabels, 2)
+	require.Contains(t, selector.richLabels[0], "Project type\nmonthly.")
+	require.Equal(t, "Change project type", strings.SplitN(selector.richLabels[1], "\n", 2)[0])
+	require.Len(t, selector.richItems[0], 3)
+	require.Equal(t, "Office work", selector.richItems[0][0].Label)
+	require.Equal(t, "✓", selector.richItems[0][0].Mark, "the type in force carries the mark")
+	require.Empty(t, selector.richItems[0][1].Mark)
+	frame, ok := projectTypeFrame(t, renderer, "project")
+	require.True(t, ok)
+	require.Equal(t, session.reply, frame.Content)
+}
+
+// Cancel is a no-op at both pages: nothing is written, nothing is said, and the
+// picker comes back on the row the operator had chosen.
+func TestHandleProjectCancelWritesNothing(t *testing.T) {
+	session := &projectTypeFakeSession{
+		fakeSession: &fakeSession{},
+		snapshot:    ProjectTypeSnapshot{ProjectID: "prj-1", Name: "monthly", ProjectType: state.ProjectTypeOffice},
+	}
+
+	// Esc on the picker.
+	var out bytes.Buffer
+	renderer := NewRenderer(&out, &out)
+	ctrl := newCommandController(session, renderer, &scriptedSelector{richSteps: []richStep{{ok: false}}}, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	require.Empty(t, session.written)
+	_, framed := projectTypeFrame(t, renderer, "project")
+	require.False(t, framed)
+
+	// Esc on the confirmation: back to the picker on the row just chosen, then
+	// Esc there closes.
+	selector := &scriptedSelector{richSteps: []richStep{{label: "Coding", ok: true}, {ok: false}, {ok: false}}}
+	ctrl = newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	require.Empty(t, session.written)
+	require.Len(t, selector.richLabels, 3)
+	require.Contains(t, selector.richLabels[2], "Project type\nmonthly.")
+
+	// "No, go back" is the same path.
+	selector = &scriptedSelector{richSteps: []richStep{{label: "Coding", ok: true}, {label: "No, go back", ok: true}, {ok: false}}}
+	ctrl = newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	require.Empty(t, session.written)
+
+	// Choosing the type in force closes without a confirmation page at all.
+	selector = &scriptedSelector{richSteps: []richStep{{label: "Office work", ok: true}}}
+	ctrl = newCommandController(session, NewRenderer(&out, &out), selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	require.Empty(t, session.written)
+	require.Len(t, selector.richLabels, 1)
+}
+
+// A conversation with no project says so instead of opening a picker, and a
+// session without the capability reports it rather than answering silence.
+func TestHandleProjectWithoutAProjectOrTheCapability(t *testing.T) {
+	session := &projectTypeFakeSession{fakeSession: &fakeSession{}}
+	renderer := NewRenderer(nil, nil)
+	selector := &scriptedSelector{}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	frame, ok := projectTypeFrame(t, renderer, "project")
+	require.True(t, ok)
+	require.Equal(t, "This conversation has no project.", frame.Content)
+	require.Empty(t, selector.richLabels)
+
+	plain := &fakeSession{}
+	renderer = NewRenderer(nil, nil)
+	ctrl = newCommandController(plain, renderer, selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	require.NotEmpty(t, renderer.vm.blocks, "a session without the registry reports it")
+}
+
+// A write that failed before changing anything answers an error frame and no
+// reply; one that changed the type but could not re-bind answers both.
+func TestHandleProjectReportsAFailedWrite(t *testing.T) {
+	session := &projectTypeFakeSession{
+		fakeSession: &fakeSession{},
+		snapshot:    ProjectTypeSnapshot{ProjectID: "prj-1", Name: "monthly", ProjectType: state.ProjectTypeOffice},
+		setErr:      errors.New("project type was not changed: disk is full"),
+	}
+	renderer := NewRenderer(nil, nil)
+	selector := &scriptedSelector{richSteps: []richStep{{label: "Coding", ok: true}, {label: "Yes, change to Coding", ok: true}}}
+	ctrl := newCommandController(session, renderer, selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	require.Len(t, session.written, 1)
+	_, framed := projectTypeFrame(t, renderer, "project")
+	require.False(t, framed, "a failed write sends no reply frame")
+	require.NotEmpty(t, renderer.vm.blocks, "the error is on screen")
+
+	// Changed, but re-bound failed: the reply still lands, beside the error.
+	session.setErr = errors.New("project type changed, but the conversation's runtime was not re-bound: pool closed")
+	session.reply = "Project type is now Coding. This conversation takes the new type when it starts."
+	renderer = NewRenderer(nil, nil)
+	selector = &scriptedSelector{richSteps: []richStep{{label: "Coding", ok: true}, {label: "Yes, change to Coding", ok: true}}}
+	ctrl = newCommandController(session, renderer, selector, nil, "")
+	require.True(t, ctrl.handleProject("s1"))
+	frame, framed := projectTypeFrame(t, renderer, "project")
+	require.True(t, framed)
+	require.Equal(t, session.reply, frame.Content)
+}

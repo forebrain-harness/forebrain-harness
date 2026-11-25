@@ -2693,6 +2693,208 @@ func (c *commandController) handlePermissions(sessionID string) bool {
 	return true
 }
 
+// projectTypeOption is one row of /project's picker: the stored type, the words
+// the web's project pages use for it (frontend/src/locales/index.ts), and the
+// one-line description under the label. Two sources for a label mean the two
+// have to be changed together.
+type projectTypeOption struct {
+	ID          string
+	Label       string
+	Description string
+}
+
+var projectTypeOptions = []projectTypeOption{
+	{ID: state.ProjectTypeOffice, Label: "Office work", Description: "Documents, spreadsheets, slide decks"},
+	{ID: state.ProjectTypeCoding, Label: "Coding", Description: "Code and software projects"},
+	{ID: state.ProjectTypeBatch, Label: "Batch runs", Description: "Runs tasks for a business system"},
+}
+
+// projectTypeOptionFor answers the row for a stored type; an unknown value reads
+// as coding, the way every other type reader does.
+func projectTypeOptionFor(projectType string) projectTypeOption {
+	id := state.NormalizeProjectType(projectType)
+	for _, option := range projectTypeOptions {
+		if option.ID == id {
+			return option
+		}
+	}
+	return projectTypeOptions[1]
+}
+
+// projectTypeScope is the sentence that says what the change does to the
+// conversation on screen. The three states are the only ones a terminal can be
+// in: nothing said yet, a born conversation, and a batch execution being
+// replayed read-only.
+func projectTypeScope(st ProjectTypeSnapshot, confirm bool, next string) string {
+	switch {
+	case !st.Born:
+		return "this one has not started, so it takes the new type."
+	case state.NormalizeProjectType(st.SessionType) == state.ProjectTypeBatch:
+		if confirm {
+			return "this screen keeps replaying a batch execution; restart Forebrain Harness to start a " +
+				projectTypeOptionFor(next).Label + " conversation."
+		}
+		return "this screen keeps replaying a batch execution."
+	default:
+		return "this one keeps " + projectTypeOptionFor(st.SessionType).Label + "."
+	}
+}
+
+// projectTypePickerLabel is the picker's label: the panel title, then the
+// project and what a change reaches.
+func projectTypePickerLabel(st ProjectTypeSnapshot) string {
+	return "Project type\n" + projectNameForLabel(st) +
+		". A change reaches conversations started after it; " + projectTypeScope(st, false, "")
+}
+
+// projectTypeConfirmLabel is the confirmation's label: what changes, for whom,
+// and the consequence the new type carries.
+func projectTypeConfirmLabel(st ProjectTypeSnapshot, next string) string {
+	return "Change project type\nChange " + projectNameForLabel(st) + " from " +
+		projectTypeOptionFor(st.ProjectType).Label + " to " + projectTypeOptionFor(next).Label +
+		"? Only conversations started after the change get the new type; " +
+		projectTypeScope(st, true, next) + projectTypeChangeNote(st.ProjectType, next)
+}
+
+// projectTypeChangeNote is the consequence sentence a type switch carries: what
+// a batch project is, and what stopping being one stops.
+func projectTypeChangeNote(from, to string) string {
+	next := state.NormalizeProjectType(to)
+	current := state.NormalizeProjectType(from)
+	switch {
+	case next == state.ProjectTypeBatch && current != state.ProjectTypeBatch:
+		return " Batch projects take tasks created on the web; the terminal only views them."
+	case current == state.ProjectTypeBatch && next != state.ProjectTypeBatch:
+		return " The task page and task notifications stop for this project; tasks already created stay readable."
+	}
+	return ""
+}
+
+// projectTypeReply is what /project says after the write: the new type, then
+// what happens to the conversation on screen and what to do next.
+func projectTypeReply(sessionType string, born bool, to string) string {
+	next := projectTypeOptionFor(to)
+	reply := "Project type is now " + next.Label + "."
+	if next.ID == state.ProjectTypeBatch {
+		reply += " Batch projects take tasks created on the web; the terminal only views them."
+		if born && state.NormalizeProjectType(sessionType) != state.ProjectTypeBatch {
+			reply += " This conversation keeps " + projectTypeOptionFor(sessionType).Label + "."
+		}
+		return reply
+	}
+	switch {
+	case !born:
+		return reply + " This conversation takes the new type when it starts."
+	case state.NormalizeProjectType(sessionType) == state.ProjectTypeBatch:
+		return reply + " Tasks already created stay readable. Restart Forebrain Harness to start a " + next.Label + " conversation."
+	default:
+		return reply + " This conversation keeps " + projectTypeOptionFor(sessionType).Label +
+			"; /new starts a " + next.Label + " conversation."
+	}
+}
+
+// projectNameForLabel names the project in a panel label, falling back to the
+// project id so the sentence never reads "Change  from".
+func projectNameForLabel(st ProjectTypeSnapshot) string {
+	if name := strings.TrimSpace(st.Name); name != "" {
+		return name
+	}
+	if id := strings.TrimSpace(st.ProjectID); id != "" {
+		return id
+	}
+	return "this project"
+}
+
+// projectTypeEditor is the session's project-type half: what /project shows, and
+// the one write it makes. An optional capability, the way the config panel and
+// the memory settings assert theirs.
+type projectTypeEditor interface {
+	ProjectTypeState(ctx context.Context, sessionID string) (ProjectTypeSnapshot, error)
+	SetProjectType(ctx context.Context, sessionID, projectType string) (reply string, err error)
+}
+
+// handleProject runs /project: pick a type, confirm the change, then say what it
+// did. Every path answers, so the command is never mistaken for text meant for
+// the model.
+func (c *commandController) handleProject(sessionID string) bool {
+	if c == nil || c.session == nil || c.selector == nil {
+		return true
+	}
+	editor, ok := c.session.(projectTypeEditor)
+	if !ok {
+		c.renderer.PrintError(fmt.Errorf("/project is unavailable: this session has no project registry mounted"))
+		return true
+	}
+	ctx := context.Background()
+	st, err := editor.ProjectTypeState(ctx, sessionID)
+	if err != nil {
+		c.renderer.PrintError(err)
+		return true
+	}
+	if strings.TrimSpace(st.ProjectID) == "" {
+		c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "project", Content: "This conversation has no project.", Final: true})
+		return true
+	}
+	current := projectTypeOptionFor(st.ProjectType)
+	items := make([]SelectItem, 0, len(projectTypeOptions))
+	cursor := 0
+	for i, option := range projectTypeOptions {
+		item := SelectItem{Label: option.Label, Description: option.Description}
+		if option.ID == current.ID {
+			// The mark says which row is the type in force. It is drawn at every
+			// width, unlike the dimmer status column.
+			item.Mark = "✓"
+			cursor = i
+		}
+		items = append(items, item)
+	}
+	for {
+		picked, ok, err := c.selector.SelectRich(projectTypePickerLabel(st), items, cursor)
+		if err != nil {
+			c.renderer.PrintError(err)
+			return true
+		}
+		if !ok {
+			return true
+		}
+		if picked < 0 || picked >= len(projectTypeOptions) {
+			return true
+		}
+		if projectTypeOptions[picked].ID == current.ID {
+			// Choosing the type in force is a no-op: nothing is written and
+			// nothing is said.
+			return true
+		}
+		next := projectTypeOptions[picked].ID
+		confirmItems := []SelectItem{
+			{Label: "No, go back"},
+			{Label: "Yes, change to " + projectTypeOptionFor(next).Label},
+		}
+		choice, ok, err := c.selector.SelectRich(projectTypeConfirmLabel(st, next), confirmItems, 0)
+		if err != nil {
+			c.renderer.PrintError(err)
+			return true
+		}
+		if !ok || choice != 1 {
+			// Back to the picker with the cursor on the row just chosen, so Esc
+			// from the confirmation never loses the selection.
+			cursor = picked
+			continue
+		}
+		reply, setErr := editor.SetProjectType(ctx, sessionID, next)
+		if setErr != nil {
+			c.renderer.PrintError(setErr)
+			if strings.TrimSpace(reply) == "" {
+				return true
+			}
+		}
+		if text := strings.TrimSpace(reply); text != "" {
+			c.renderer.RenderFrame(Frame{Kind: FrameSystem, Title: "project", Content: text, Final: true})
+		}
+		return true
+	}
+}
+
 func (c *commandController) handleStatus(sessionID string) bool {
 	// Interactive surface: the panel replaces the report frame. Non-TTY
 	// callers keep the markdown report as a plain frame.

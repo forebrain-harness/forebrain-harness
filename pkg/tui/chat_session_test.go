@@ -33191,3 +33191,149 @@ func TestSettlingAnotherAgentsViewKeepsTheActiveViewsPointerState(t *testing.T) 
 			r.vpHoverRow, r.selectStartRow, r.selectEndRow)
 	}
 }
+
+// newProjectTypeSession opens a session whose launch project is a fresh plain
+// directory (office, by the launch default) and returns it with its project
+// store, so a test can drive /project's two reads and its one write.
+func newProjectTypeSession(t *testing.T) (*ChatSession, *state.ProjectStore, context.Context) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	s, err := OpenChatSessionWithConfigForProject(context.Background(), testConfig(), t.TempDir())
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, s.AdoptLaunchProject(ctx))
+	t.Cleanup(func() { s.Close() })
+	return s, state.NewProjectStore(s.Env.SQL, s.Env.Deps.AgentName), ctx
+}
+
+// TestProjectTypeStateTellsABornConversationFromOneThatHasNotStarted pins the
+// two facts /project's sentences depend on: a conversation with no row has
+// frozen nothing, and one with a row carries the type it was born with.
+func TestProjectTypeStateTellsABornConversationFromOneThatHasNotStarted(t *testing.T) {
+	s, sessions, ctx := newProjectTypeSession(t)
+
+	st, err := s.ProjectTypeState(ctx, "not-started")
+	require.NoError(t, err)
+	require.Equal(t, s.ProjectID, st.ProjectID)
+	require.Equal(t, state.ProjectTypeOffice, st.ProjectType)
+	require.False(t, st.Born, "a conversation with no row has not started")
+	require.Empty(t, st.SessionType, "it has frozen nothing")
+
+	// A row exists: born, with the project's type at that moment.
+	require.NoError(t, s.sessStore().Ensure(ctx, "born-office", "born-office"))
+	require.NoError(t, sessions.BindSession(ctx, "born-office", s.ProjectID))
+	born, err := s.ProjectTypeState(ctx, "born-office")
+	require.NoError(t, err)
+	require.True(t, born.Born)
+	require.Equal(t, state.ProjectTypeOffice, born.SessionType)
+
+	// The project's type moves; the born conversation keeps its own.
+	coding := state.ProjectTypeCoding
+	_, err = sessions.Update(ctx, s.ProjectID, state.UpdateProjectInput{ProjectType: &coding})
+	require.NoError(t, err)
+	moved, err := s.ProjectTypeState(ctx, "born-office")
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeCoding, moved.ProjectType)
+	require.Equal(t, state.ProjectTypeOffice, moved.SessionType)
+
+	// A session with no project at all reads as one.
+	s.ProjectID = ""
+	none, err := s.ProjectTypeState(ctx, "born-office")
+	require.NoError(t, err)
+	require.Empty(t, none.ProjectID)
+}
+
+// TestSetProjectTypeKeepsABornConversationOnItsBirthType pins the freeze: the
+// project's row moves, the conversation's runtime does not, and the reply says
+// which conversation does get the new type.
+func TestSetProjectTypeKeepsABornConversationOnItsBirthType(t *testing.T) {
+	s, sessions, ctx := newProjectTypeSession(t)
+	require.NoError(t, s.sessStore().Ensure(ctx, "born-office", "born-office"))
+	require.NoError(t, sessions.BindSession(ctx, "born-office", s.ProjectID))
+	// The surface binds the conversation it opens, which is what the pool
+	// answers from; a born conversation resolves by its own frozen type.
+	require.NoError(t, s.BindConversationRuntime(ctx, "born-office"))
+	bound, ok := s.Env.BoundRunnerForSession(ctx, "born-office")
+	require.True(t, ok)
+	require.NotNil(t, bound)
+	require.Equal(t, state.ProjectTypeOffice, bound.ProjectType())
+
+	reply, err := s.SetProjectType(ctx, "born-office", state.ProjectTypeCoding)
+	require.NoError(t, err)
+	require.Equal(t, "Project type is now Coding. This conversation keeps Office work; /new starts a Coding conversation.", reply)
+
+	project, err := sessions.Get(ctx, s.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeCoding, project.ProjectType)
+	kept, ok := s.Env.BoundRunnerForSession(ctx, "born-office")
+	require.True(t, ok)
+	require.Same(t, bound, kept, "a born conversation keeps the runner it froze with")
+	require.Equal(t, state.ProjectTypeOffice, kept.ProjectType())
+}
+
+// TestSetProjectTypeRebindsAConversationThatHasNotStarted pins the other half:
+// a conversation with no row follows the project, so its runner is re-bound to
+// the new type — the row its first turn writes freezes that type.
+func TestSetProjectTypeRebindsAConversationThatHasNotStarted(t *testing.T) {
+	s, sessions, ctx := newProjectTypeSession(t)
+	const sid = "not-started"
+	require.NoError(t, s.BindConversationRuntime(ctx, sid))
+	before, ok := s.Env.BoundRunnerForSession(ctx, sid)
+	require.True(t, ok)
+	require.Equal(t, state.ProjectTypeOffice, before.ProjectType())
+
+	reply, err := s.SetProjectType(ctx, sid, state.ProjectTypeCoding)
+	require.NoError(t, err)
+	require.Equal(t, "Project type is now Coding. This conversation takes the new type when it starts.", reply)
+
+	after, ok := s.Env.BoundRunnerForSession(ctx, sid)
+	require.True(t, ok)
+	require.NotSame(t, before, after, "an unstarted conversation is re-bound")
+	require.Equal(t, state.ProjectTypeCoding, after.ProjectType())
+
+	// The conversation is still unborn: nothing was frozen by the change.
+	st, err := s.ProjectTypeState(ctx, sid)
+	require.NoError(t, err)
+	require.False(t, st.Born)
+	require.Equal(t, state.ProjectTypeCoding, st.ProjectType)
+	_ = sessions
+}
+
+// TestSetProjectTypeToBatchSeedsTheSwitchAndWritesNoTrustRecord pins the batch
+// half of the write: the sandbox switch is seeded from the install default, and
+// no trust record is written — a batch project needs none (owner 2026-11-25).
+func TestSetProjectTypeToBatchSeedsTheSwitchAndWritesNoTrustRecord(t *testing.T) {
+	s, sessions, ctx := newProjectTypeSession(t)
+	reply, err := s.SetProjectType(ctx, "not-started", state.ProjectTypeBatch)
+	require.NoError(t, err)
+	require.Equal(t, "Project type is now Batch runs. Batch projects take tasks created on the web; the terminal only views them.", reply)
+
+	project, err := sessions.Get(ctx, s.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeBatch, project.ProjectType)
+	require.True(t, project.BatchSandbox, "a project that becomes batch takes the install default")
+	trusted, err := safety.IsTrusted(s.home(), safety.Project{Root: project.Root})
+	require.NoError(t, err)
+	require.False(t, trusted, "the change writes no trust record")
+
+	// And back out: the switch and the row's task settings stay, the type moves.
+	out, err := s.SetProjectType(ctx, "not-started", state.ProjectTypeCoding)
+	require.NoError(t, err)
+	require.Contains(t, out, "This conversation takes the new type when it starts.")
+	project, err = sessions.Get(ctx, s.ProjectID)
+	require.NoError(t, err)
+	require.Equal(t, state.ProjectTypeCoding, project.ProjectType)
+	require.True(t, project.BatchSandbox, "the switch stays with the project")
+}
+
+// TestSetProjectTypeFailureChangesNothing pins the failure path: the store error
+// reaches the caller with no reply to render, and the row is untouched.
+func TestSetProjectTypeFailureChangesNothing(t *testing.T) {
+	s, _, ctx := newProjectTypeSession(t)
+	s.ProjectID = "prj-missing"
+	reply, err := s.SetProjectType(ctx, "not-started", state.ProjectTypeCoding)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "project type was not changed")
+	require.Empty(t, reply, "a failed write answers no reply frame")
+}

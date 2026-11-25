@@ -1417,6 +1417,9 @@ func dispatchStreamSlashCommand(ctx context.Context, cmds *commandController, re
 	case "status":
 		_ = cmds.handleStatus(state.sessionID)
 		return true, false, ComposerSubmission{}, false
+	case "project":
+		_ = cmds.handleProject(state.sessionID)
+		return true, false, ComposerSubmission{}, false
 	case "mcp":
 		_ = cmds.handleMCP(state.sessionID)
 		return true, false, ComposerSubmission{}, false

@@ -281,6 +281,7 @@ const (
 var batchViewerCommands = map[string]bool{
 	"resume":   true,
 	"status":   true,
+	"project":  true,
 	"help":     true,
 	"exit":     true,
 	"continue": true,
