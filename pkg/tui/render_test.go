@@ -2551,14 +2551,17 @@ func TestProcessStartCardBodyDoesNotRepeatTheCommand(t *testing.T) {
 	if !strings.Contains(body, "Id: 3") {
 		t.Fatalf("the start body lost the fields it owns:\n%s", body)
 	}
-	// The log card's head names the id, so its body keeps the command and drops
-	// the id.
+	// The log card's head names the command too (plan 380, owner 2026-11-24), so
+	// its body drops both the command and the id.
 	logged := `{"bytes":12,"command":"npm run dev","id":3,"lines":1,"log":"/state/process/3.log","running":true,"tail":"hi"}`
 	got := formatToolContentWithInput("process", logged, "", map[string]any{"action": "log", "id": 3})
-	if !strings.Contains(got, "Command: npm run dev") {
-		t.Fatalf("the log body lost the command its head never names:\n%s", got)
+	if strings.Contains(got, "Command: npm run dev") {
+		t.Fatalf("the log body repeats the command its head already names:\n%s", got)
 	}
 	if strings.Contains(got, "Id: 3") {
-		t.Fatalf("the log body repeats the id its head already names:\n%s", got)
+		t.Fatalf("the log body repeats the id:\n%s", got)
+	}
+	if !strings.Contains(got, "Log: /state/process/3.log") {
+		t.Fatalf("the log body lost the fields it owns:\n%s", got)
 	}
 }
