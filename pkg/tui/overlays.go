@@ -611,6 +611,25 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 			}
 			writeLine("%s", approvalSeparatorLine(width))
 		}
+		// A review this approval collected is shown in full above; when it
+		// collected none, the conclusion of the review it is answering — the
+		// one the planner already absorbed — is the whole of what the user
+		// needs to decide.
+		if v := o.req.LatestReviewVerdict; v != nil {
+			writeLine("")
+			writeLine("\x1b[1mReview by %s\x1b[0m", planReviewModelDisplay(v.Provider, v.Model))
+			bodyWidth := width - 4
+			if bodyWidth < 20 {
+				bodyWidth = 20
+			}
+			md := renderAssistantMarkdownWithWidth(strings.TrimSpace(v.Line), bodyWidth, DiffThemeUnknown)
+			if md == "" {
+				md = strings.TrimSpace(v.Line)
+			}
+			for _, l := range strings.Split(md, "\n") {
+				writeLine("%s", l)
+			}
+		}
 		// A reviewer picker asks its question in the verdict line's place
 		// instead of below it: the panel asks one thing at a time, and the
 		// proceed question cannot be answered while the model list holds
@@ -629,7 +648,7 @@ func (o *approvalOverlay) buildApprovalContent(width int) ([]string, int) {
 		case o.planReviewPicking:
 			o.planReviewTopRow = lineCount
 			writeLine("Which model should review this plan? (Esc to go back)")
-		case planContent != "" || len(o.req.PlanReviews) > 0:
+		case planContent != "" || len(o.req.PlanReviews) > 0 || o.req.LatestReviewVerdict != nil:
 			writeLine("Would you like to proceed?")
 		}
 	} else if isApprovalWebSearch(o.req) {

@@ -11214,6 +11214,42 @@ func TestExitPlanOverlayRendersPickerAndCollectedReviews(t *testing.T) {
 	}
 }
 
+// A re-submitted plan's approval collected no review of its own — the delivery
+// closed the action that did — so it shows the conclusion line of the review
+// the planner just absorbed, and it still asks whether to proceed on a plan
+// whose file the panel could not read.
+func TestExitPlanOverlayRendersLatestReviewVerdict(t *testing.T) {
+	req := exitPlanReviewRequest(t, "# Plan\n\nStep one.\n")
+	req.LatestReviewVerdict = &turn.PlanReviewVerdict{
+		Provider: "openai",
+		Model:    "gpt-5.1",
+		Line:     "**Verdict: approve with changes** — one test needs its expected output pinned.",
+	}
+	overlay := newApprovalOverlay(context.Background(), io.Discard, nil, req, nil)
+
+	lines, _ := overlay.buildApprovalContent(100)
+	plain := stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{
+		"Review by openai/gpt-5.1",
+		"Verdict: approve with changes",
+		"one test needs its expected output pinned",
+		"Would you like to proceed?",
+	} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("overlay missing %q:\n%s", want, plain)
+		}
+	}
+
+	// The verdict is what the panel has to ask about when the plan file is
+	// gone: the question belongs to the conclusion line, not to the file.
+	empty := exitPlanReviewRequest(t, "")
+	empty.LatestReviewVerdict = req.LatestReviewVerdict
+	lines, _ = newApprovalOverlay(context.Background(), io.Discard, nil, empty, nil).buildApprovalContent(100)
+	if plain := stripANSI(strings.Join(lines, "\n")); !strings.Contains(plain, "Would you like to proceed?") {
+		t.Fatalf("verdict-only panel must still ask to proceed:\n%s", plain)
+	}
+}
+
 // The picker asks its own question in the verdict line's place instead of below
 // it: the panel asks one thing at a time, and the proceed question is not
 // answerable while the model list holds the keys. A blank line separates the
