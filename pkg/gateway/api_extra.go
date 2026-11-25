@@ -4606,6 +4606,11 @@ func (s *Server) handleSessionApprovalRequest(w http.ResponseWriter, r *http.Req
 		PlanText: planText, PlanReviewModels: models, PlanReviews: reviews,
 		HandOffAvailable: req.HandOffAvailable,
 	}
+	if v := req.LatestReviewVerdict; v != nil {
+		out.LatestReviewVerdict = &planReviewVerdictWire{
+			Provider: v.Provider, Model: v.Model, ModelName: v.ModelName, Line: v.Line,
+		}
+	}
 	if prev := req.PreviousPlanReview; prev != nil {
 		out.PreviousPlanReview = &previousPlanReviewWire{
 			ReviewID: prev.ReviewID, AgentID: prev.AgentID,
@@ -4640,7 +4645,10 @@ type sessionApprovalRequestWire struct {
 	PlanReviews        []planReviewNoteWire    `json:"plan_reviews"`
 	PlanReviewActive   *planReviewInFlightWire `json:"plan_review_active"`
 	PreviousPlanReview *previousPlanReviewWire `json:"previous_plan_review"`
-	HandOffAvailable   bool                    `json:"hand_off_available"`
+	// LatestReviewVerdict is the conclusion line of the review a re-submitted
+	// plan answers, when that approval collected no review of its own.
+	LatestReviewVerdict *planReviewVerdictWire `json:"latest_review_verdict,omitempty"`
+	HandOffAvailable    bool                   `json:"hand_off_available"`
 }
 
 // previousPlanReviewWire is the review a "review it again" would continue:
@@ -4681,6 +4689,15 @@ type planReviewNoteWire struct {
 	ModelName  string `json:"model_name,omitempty"`
 	Text       string `json:"text"`
 	DurationMs int64  `json:"duration_ms,omitempty"`
+}
+
+// planReviewVerdictWire is the latest completed review's conclusion line,
+// shown on a re-submitted approval; absent when there is none.
+type planReviewVerdictWire struct {
+	Provider  string `json:"provider"`
+	Model     string `json:"model"`
+	ModelName string `json:"model_name,omitempty"`
+	Line      string `json:"line"`
 }
 
 type planReviewInFlightWire struct {

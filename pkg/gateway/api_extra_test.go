@@ -5449,6 +5449,51 @@ func TestSessionApprovalRequestCarriesTheExitPlanCard(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, idleRec.Code)
 }
 
+// A plan re-submitted after a review delivered itself carries that review's
+// conclusion line across the wire: the review stayed keyed to the action the
+// delivery closed, so the card has no review of its own to draw and the
+// verdict is what it shows in its place.
+func TestSessionApprovalRequestCarriesLatestReviewVerdict(t *testing.T) {
+	cfg := &appcfg.Root{LLMModels: []appcfg.LLMModelConfig{
+		{ID: "row-1", Provider: "openai", Model: "gpt-5.1", APIKey: "sk-test", BaseURL: "http://one.test/v1"},
+	}}
+	s, runs, _, _, _ := exitPlanServer(t, cfg)
+	// A review of an earlier approval, not of the parked one.
+	reviewPayload, err := json.Marshal(event.PlanReviewedPayload{
+		ActionID: "act-old", ReviewID: "plan-review:old",
+		Provider: "zhipuai", Model: "glm-5.3-flash",
+		Text:    "Verdict: rework — the mechanism claim is falsified.\n\n## Problems\n1. Step 3 reads nothing.",
+		Outcome: "done",
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: "plan-review:old:reviewed", SessionID: "s1",
+		Type: event.RunEventPlanReviewed, Payload: reviewPayload,
+	})
+	require.NoError(t, err)
+
+	rec := cronRequest(t, s, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, s.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	verdict, ok := out["latest_review_verdict"].(map[string]any)
+	require.True(t, ok, "the card needs the verdict of the review it answers: %v", out)
+	require.Equal(t, "Verdict: rework — the mechanism claim is falsified.", verdict["line"],
+		"the conclusion crosses as its first line, verbatim")
+	require.Equal(t, "zhipuai", verdict["provider"])
+	require.Equal(t, "glm-5.3-flash", verdict["model"])
+	require.Empty(t, out["plan_reviews"], "an earlier approval's review is not this card's review")
+
+	// No review anywhere: the key is absent rather than an empty object.
+	fresh, _, _, _, _ := exitPlanServer(t, cfg)
+	idle := cronRequest(t, fresh, http.MethodGet, "/api/chat/sessions/s1/approval-request", nil, fresh.handleSessionApprovalRequest, "id", "s1")
+	require.Equal(t, http.StatusOK, idle.Code, idle.Body.String())
+	var without map[string]any
+	require.NoError(t, json.Unmarshal(idle.Body.Bytes(), &without))
+	_, present := without["latest_review_verdict"]
+	require.False(t, present, "no review, no verdict key: %v", without)
+}
+
 // The plan-review endpoint validates before it starts anything: the action
 // must be a parked exit-plan approval, and the model must be one the session
 // is configured with. A valid request is accepted for background work and
