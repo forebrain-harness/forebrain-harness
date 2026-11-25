@@ -5611,19 +5611,31 @@ func (r *Renderer) renderFanout(f Frame) {
 }
 
 // fanoutHeaderLine is a subagent card's header row: its marker and summary. A
-// settled card wears the amber every finished tool card wears. A card whose
-// agents are still at work has its summary in a steady orchid nothing else in
-// the transcript uses, and its dot breathes, so a background agent reads as
-// alive at a glance rather than as one more finished call. Without colour the
-// running card keeps its hollow marker: the breath is all colour, and the
-// glyph is what is left to tell the two apart.
+// settled card wears the amber every finished tool card wears — except a card
+// whose call failed (red) or was canceled (gray), which wear what
+// toolHeaderColor gives a tool card in the same state. A card whose agents are
+// still at work has its summary in a steady orchid nothing else in the
+// transcript uses, and its dot breathes, so a background agent reads as alive
+// at a glance rather than as one more finished call. Without colour the running
+// card keeps its hollow marker: the breath is all colour, and the glyph is what
+// is left to tell the two apart.
 func fanoutHeaderLine(f Frame, summary string, phase int, theme DiffTheme) string {
 	if f.Final || noColorActive() {
 		marker := "○"
 		if f.Final {
 			marker = "●"
 		}
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(ordinaryToolHeaderColor)).Bold(true)
+		color := ordinaryToolHeaderColor
+		switch f.FanoutCallStatus {
+		case "failed":
+			// "Failed to check 1 task" in the settled amber read as one more
+			// finished call; 203 is the red toolHeaderColor gives a failed one.
+			color = "203"
+		case "canceled":
+			// The gray of a canceled tool card (toolHeaderColor), owner 2026-11-25.
+			color = "244"
+		}
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Bold(true)
 		return style.Render(marker) + " " + style.Render(summary)
 	}
 	header, breath := fanoutRunningDarkHeader, fanoutRunningDarkBreath

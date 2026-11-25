@@ -129,8 +129,17 @@ type Frame struct {
 	// as the first line under the card header: the one place it belongs,
 	// instead of a copy on every task row.
 	FanoutCallError string
-	Summary         string // Phase 1 redesign: pre-rendered one-line summary.
-	ToolMeta        tool.ToolMeta
+	// FanoutCallStatus is how the card's own call ended — "failed", "canceled",
+	// or "" while it is in flight or ended well — in the vocabulary a tool
+	// frame's ToolMeta.Status uses, so the header takes the colour
+	// toolHeaderColor gives a tool card in the same state. The header's words
+	// already say it ("Failed to check 1 task"); this is what lets the renderer
+	// paint them without reading its own text back. It is not FanoutCallError:
+	// a dispatch whose agent failed says why on its task row and draws no call
+	// error, and its head is a failed one all the same.
+	FanoutCallStatus string
+	Summary          string // Phase 1 redesign: pre-rendered one-line summary.
+	ToolMeta         tool.ToolMeta
 	// FilePath is the file path extracted from tool input (e.g. read_file file_path).
 	// Carried separately from ToolMeta.Input so the renderer always has a reliable
 	// path for syntax highlighting even when ToolMeta.Input is nil or malformed.
@@ -1165,6 +1174,7 @@ func (r *Reducer) emitFanoutFrame(fs *fanoutState) Frame {
 		Duration:         duration,
 		FanoutQuery:      fs.Query,
 		FanoutCallError:  fanoutDrawnCallError(fs),
+		FanoutCallStatus: fanoutCallStatus(fs),
 	}
 }
 
@@ -1225,6 +1235,20 @@ func fanoutCardPhase(fs *fanoutState) string {
 		return "running"
 	}
 	return "done"
+}
+
+// fanoutCallStatus is how the card's own call ended, in the vocabulary a tool
+// frame's ToolMeta.Status uses: "failed", "canceled", or "" while the call is
+// still in flight or ended well. It rides the Frame so the header can take the
+// colour toolHeaderColor gives a tool card in the same state.
+func fanoutCallStatus(fs *fanoutState) string {
+	switch fanoutCardPhase(fs) {
+	case "failed":
+		return "failed"
+	case "canceled":
+		return "canceled"
+	}
+	return ""
 }
 
 // fanoutAnyTaskTerminal reports whether any task already reached an outcome.

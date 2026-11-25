@@ -2151,6 +2151,127 @@ func TestFailedDispatchCardSaysWhyOnceOnTheTaskRow(t *testing.T) {
 	}
 }
 
+// A subagent card's header follows how its own call ended, the way a tool
+// card's follows its status (toolHeaderColor): failed is red, canceled is
+// gray, a call that ended well keeps the amber. "Failed to check 1 task" in
+// amber read as one more finished call (owner 2026-11-25, who also asked for
+// the canceled card to match a canceled tool card's gray). The colour follows
+// the frame's own status, never the drawn call error — a dispatch whose agent
+// failed says why on its task row and draws no call error, and its head is red
+// all the same. Live reduces the started and the completed message; a replay
+// reduces the completed row alone.
+func TestSubagentCardHeaderColourFollowsItsCallStatus(t *testing.T) {
+	forceColorProfile(t)
+	statusInput := map[string]any{"task_id": "nope"}
+	const notFound = "tool subagent_status: subagent not found"
+	statusDone := func(err string) Message {
+		return subagentStepMessage("status", tool.StepEvent{
+			Kind: tool.StepKindToolCompleted, ToolName: "subagent_status", Input: statusInput, Error: err,
+			Duration: 200 * time.Millisecond,
+		})
+	}
+	runInput := map[string]any{
+		"title": "执行计划 137 shell 正文", "task": "执行 plans/137",
+		"subagent_type": "general-purpose",
+	}
+	const described = "The usage limit has been reached (HTTP 429 Too Many Requests)"
+	const raw = `tool subagent_run: error, status code: 429`
+	agentFailed := func(t *testing.T) Frame {
+		t0 := time.Unix(1790000000, 0).UTC()
+		var r Reducer
+		_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("run", tool.StepEvent{
+			Kind: tool.StepKindToolStarted, ToolName: "subagent_run", Input: runInput,
+		})})
+		_ = r.Reduce(SubagentSpawnedMsg{
+			AgentID: "subagent-137", AgentType: "general-purpose", TaskID: "subagent-137",
+			Title: "执行计划 137 shell 正文", Task: "执行 plans/137",
+			ParentToolCallID: "run", TaskIndex: 0, ExecutionID: "exec-137", Timestamp: t0,
+		})
+		_ = r.Reduce(SubagentEndedMsg{
+			AgentID: "subagent-137", AgentType: "general-purpose", TaskID: "subagent-137",
+			Status: "failed", Error: described,
+			ParentToolCallID: "run", TaskIndex: 0, ExecutionID: "exec-137",
+			FinishedAt: t0.Add(754 * time.Second), Timestamp: t0.Add(754 * time.Second),
+		})
+		return lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: subagentStepMessage("run", tool.StepEvent{
+			Kind: tool.StepKindToolCompleted, ToolName: "subagent_run", Input: runInput, Error: raw,
+			Duration: 754 * time.Second,
+		})}))
+	}
+	cases := []struct {
+		name   string
+		status string
+		// header is the text the head must start with; the canceled label
+		// names a task the started row never titled, so only its verb is pinned.
+		header string
+		sgr    string
+		card   func(t *testing.T) Frame
+	}{
+		{"status failed, live", "failed", "Failed to check 1 task", "1;38;5;203", func(t *testing.T) Frame {
+			var r Reducer
+			_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("status", tool.StepEvent{
+				Kind: tool.StepKindToolStarted, ToolName: "subagent_status", Input: statusInput,
+			})})
+			return lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: statusDone(notFound)}))
+		}},
+		{"status failed, replay", "failed", "Failed to check 1 task", "1;38;5;203", func(t *testing.T) Frame {
+			var r Reducer
+			return lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: statusDone(notFound)}))
+		}},
+		{"agent failed, reason on the row", "failed", "Failed to run 1 general-purpose task", "1;38;5;203", agentFailed},
+		{"call canceled", "canceled", "Canceled ", "1;38;5;244", func(t *testing.T) Frame {
+			var r Reducer
+			_ = r.Reduce(RunStartedMsg{RunID: "run-c"})
+			_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("wait-c", tool.StepEvent{
+				Kind: tool.StepKindToolStarted, ToolName: "subagent_wait",
+				Input: map[string]any{"task_id": "subagent-6e5c"},
+			})})
+			return lastFanoutFrame(t, r.Reduce(RunEndedMsg{RunID: "run-c"}))
+		}},
+		{"call completed", "", "Checked 1 task", "1;38;5;214", func(t *testing.T) Frame {
+			var r Reducer
+			return lastFanoutFrame(t, r.Reduce(NewMessageMsg{Msg: statusDone("")}))
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			card := tc.card(t)
+			if card.FanoutCallStatus != tc.status {
+				t.Fatalf("FanoutCallStatus = %q, want %q", card.FanoutCallStatus, tc.status)
+			}
+			if !card.Final || !strings.HasPrefix(card.Summary, tc.header) {
+				t.Fatalf("summary = %q final=%v, want a settled card starting %q", card.Summary, card.Final, tc.header)
+			}
+			vm := viewModel{}
+			vm.append(card)
+			vr := renderViewport(&vm, 120, 42, 0, DiffThemeDark)
+			for _, row := range vr.lines {
+				if !strings.HasPrefix(stripANSI(row), "● "+tc.header) {
+					continue
+				}
+				cells, _ := rowColumnStates(row, "")
+				colored := 0
+				for i, c := range cells {
+					switch c {
+					case "":
+					case tc.sgr:
+						colored++
+					default:
+						t.Fatalf("cell %d wears SGR %q, want only %q on this row: %q", i, c, tc.sgr, row)
+					}
+				}
+				// The marker and every rune of the head wear the state colour.
+				if cells[0] != tc.sgr || colored < 1+len([]rune(tc.header)) {
+					t.Fatalf("marker SGR %q, %d colored cells for %q, want the marker and the whole head in %q: %q",
+						cells[0], colored, tc.header, tc.sgr, row)
+				}
+				return
+			}
+			t.Fatalf("header row %q not found:\n%s", tc.header, stripANSI(strings.Join(vr.lines, "\n")))
+		})
+	}
+}
+
 func TestCancelledTasksAreCountedOnTheCard(t *testing.T) {
 	t0 := time.Unix(1790000000, 0).UTC()
 	input := map[string]any{"tasks": []any{
