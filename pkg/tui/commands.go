@@ -2839,14 +2839,16 @@ func (c *commandController) handleProject(sessionID string) bool {
 	items := make([]SelectItem, 0, len(projectTypeOptions))
 	cursor := 0
 	for i, option := range projectTypeOptions {
-		item := SelectItem{Label: option.Label, Description: option.Description}
+		label := option.Label
 		if option.ID == current.ID {
-			// The mark says which row is the type in force. It is drawn at every
-			// width, unlike the dimmer status column.
-			item.Mark = "✓"
+			// The type in force carries the mark, one space right of its label.
+			// It goes in the label rather than in SelectItem.Mark: a row with a
+			// description drops the mark (panel_columns.go columnRows), and
+			// these rows all have one.
+			label += " ✓"
 			cursor = i
 		}
-		items = append(items, item)
+		items = append(items, SelectItem{Label: label, Description: option.Description})
 	}
 	for {
 		picked, ok, err := c.selector.SelectRich(projectTypePickerLabel(st), items, cursor)
