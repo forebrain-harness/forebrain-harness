@@ -862,7 +862,30 @@ func (p *configPanel) save(doc any) error {
 	} else {
 		p.raw[p.section] = raw
 	}
+	// features.copy_on_select is a renderer flag, not a setting a running turn
+	// re-reads (a running turn never sees its configuration move), so the
+	// panel applies it to the renderer itself the moment the write lands —
+	// this is what makes the switch take effect without a turn in between. A
+	// section the write erased (an empty document) means the default, on.
+	if p.section == "features" {
+		p.renderer.SetCopyOnSelect(copyOnSelectFromStoredDoc(raw))
+	}
 	return nil
+}
+
+// copyOnSelectFromStoredDoc resolves features.copy_on_select from a stored
+// features row the way the loader's accessor does: a missing, empty or
+// undecodable row means the default, on — the flag never stops at a stale
+// value because the stored document could not be read.
+func copyOnSelectFromStoredDoc(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var f appcfg.FeaturesSection
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return true
+	}
+	return (&appcfg.Root{Features: f}).EffectiveFeatures().CopyOnSelect
 }
 
 // reloadSection re-reads the open page's document from what the store still

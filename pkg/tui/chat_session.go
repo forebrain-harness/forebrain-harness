@@ -933,6 +933,28 @@ func (s *ChatSession) cfg() *appcfg.Root {
 	return d.Config()
 }
 
+// CopyOnSelectEnabled reports features.copy_on_select as the composed
+// configuration resolves it (unset means on). The surface reads it once at
+// startup to seed the renderer's flag; later values arrive through
+// CopyOnSelectMsg at the turn boundaries.
+func (s *ChatSession) CopyOnSelectEnabled() bool {
+	return s.cfg().EffectiveFeatures().CopyOnSelect
+}
+
+// syncConfigAtBoundary is the turn boundary's configuration sync: it adopts
+// the composed configuration and then reports where features.copy_on_select
+// now stands. The report is unconditional — even when the composed snapshot
+// matches the adopted one and the adoption itself short-circuits — because a
+// /config write moves the renderer flag without an adoption, and the boundary
+// is where the adopted value gets the last word.
+func (s *ChatSession) syncConfigAtBoundary(ctx context.Context) error {
+	if err := s.Env.SyncConfigFromDB(ctx); err != nil {
+		return err
+	}
+	s.notifyUI(CopyOnSelectMsg{Enabled: s.cfg().EffectiveFeatures().CopyOnSelect})
+	return nil
+}
+
 func (s *ChatSession) sandbox() *safety.Manager {
 	if s == nil || s.Env == nil {
 		return nil

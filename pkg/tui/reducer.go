@@ -8074,8 +8074,8 @@ func (r *Renderer) ViewportSelectEnd(col, row int) bool {
 // reports where in the overlay it landed, so the modal can place its own caret
 // there. A click whose press was made in a view since left does nothing, and a
 // release with no press on record is taken at its own cell on the screen shown
-// at `at`. A drag copies the selection, unless an edit would take it (see
-// selectionIsEditTargetLocked).
+// at `at`. A drag copies the selection, unless it sits in an edit target and
+// copy on select is off (see selectionIsEditTargetLocked).
 func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 	if r == nil {
 		return viewportClick{}
@@ -8143,12 +8143,14 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 		return click
 	}
 	text := r.extractSelectedTextLocked()
-	if r.selectionIsEditTargetLocked() {
-		// Text selected in a field is the target of the edit that follows —
-		// Delete, a typed key or a paste replaces it — so, as in a native text
-		// field, selecting it leaves the clipboard alone: copying here would put
-		// the selection where the user's own copy was, and the paste that
-		// follows the Delete would bring the deleted text back.
+	if r.selectionIsEditTargetLocked() && !r.copyOnSelect {
+		// features.copy_on_select off (owner ruling 2026-11-25 makes on the
+		// default). Text selected in a field is the target of the edit that
+		// follows — Delete, a typed key or a paste replaces it — so, as in a
+		// native text field with copy on select off, selecting it leaves the
+		// clipboard alone: copying here would put the selection where the
+		// user's own copy was, and the paste that follows the Delete would
+		// bring the deleted text back.
 		text = ""
 	}
 	// Persist the selection: keep the anchors so the highlight stays after the
@@ -8194,8 +8196,9 @@ func (r *Renderer) hasSelectionLocked() bool {
 // CopySelectionForCtrlC is Ctrl+C with text selected, which copies instead of
 // cancelling, as in Claude Code: a selection its release already copied is
 // dropped and its copy announced again; any other — one in a field, which the
-// release left off the clipboard — is copied and then dropped. It reports
-// whether there was a selection, in which case Ctrl+C does nothing else.
+// release left off the clipboard when copy on select is off — is copied and
+// then dropped. It reports whether there was a selection, in which case Ctrl+C
+// does nothing else.
 func (r *Renderer) CopySelectionForCtrlC() bool {
 	if r == nil {
 		return false

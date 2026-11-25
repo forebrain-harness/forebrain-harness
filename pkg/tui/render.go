@@ -263,6 +263,12 @@ type Renderer struct {
 	// it, because a posture that asks nothing is worth saying out loud (plan
 	// 215 §3.6).
 	fullAccess bool
+	// copyOnSelect is whether releasing a mouse-dragged selection inside an
+	// edit target (the composer or an overlay field) copies it to the
+	// clipboard (features.copy_on_select, owner ruling 2026-11-25, default
+	// on). The conversation area always copies on release; only edit targets
+	// consult this flag.
+	copyOnSelect bool
 	// modeCycleFixed is whether shift+tab is inert in this process (--yolo):
 	// the footer then drops the key's hint from both segments above.
 	modeCycleFixed bool
@@ -709,7 +715,7 @@ func newRendererAt(out io.Writer, err io.Writer, cwd string) *Renderer {
 	if err == nil {
 		err = out
 	}
-	return &Renderer{out: out, err: err, cwd: cwd, vpHoverRow: -1, selectStartRow: -1, selectEndRow: -1, selectStartCol: -1, selectEndCol: -1, publishedComposerSelection: [2]int{-1, -1}, overlayFocusRow: -1}
+	return &Renderer{out: out, err: err, cwd: cwd, vpHoverRow: -1, selectStartRow: -1, selectEndRow: -1, selectStartCol: -1, selectEndCol: -1, publishedComposerSelection: [2]int{-1, -1}, overlayFocusRow: -1, copyOnSelect: true}
 }
 
 // OutputWriter returns a writer that puts status text on screen through the
@@ -4381,6 +4387,18 @@ func (r *Renderer) SetFullAccess(on bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.fullAccess = on
+}
+
+// SetCopyOnSelect says whether releasing a selection inside an edit target
+// copies it (features.copy_on_select). The nil guard follows SetFullAccess:
+// the config panel can be built without a renderer (sectionPanel in tests).
+func (r *Renderer) SetCopyOnSelect(on bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.copyOnSelect = on
 }
 
 // SetPeerCount says how many other agents are working in the conversation's

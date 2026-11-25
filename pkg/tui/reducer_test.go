@@ -5456,14 +5456,17 @@ func pinNativeClipboardTextMethod(t *testing.T) {
 	t.Cleanup(func() { clipboardTextMethod = prev })
 }
 
-// TestComposerDragSelectionLeavesTheClipboardAlone is the reported bug: with
-// text copied elsewhere, a drag over the draft, Delete, then a paste brought
-// back the deleted text instead, because releasing the drag had copied it over
-// the user's own copy. A selection in the draft is the next edit's target, as in
-// a native text field, so it is not copied; one in the conversation still is.
+// TestComposerDragSelectionLeavesTheClipboardAlone keeps the 2026-11-07 bug's
+// behavior available as features.copy_on_select's off state: with the switch
+// off and text copied elsewhere, a drag over the draft, Delete, then a paste
+// must not bring back the deleted text, because releasing the drag would have
+// copied it over the user's own copy. A selection in the draft is the next
+// edit's target, as in a native text field, so it is not copied; one in the
+// conversation still is.
 func TestComposerDragSelectionLeavesTheClipboardAlone(t *testing.T) {
 	pinNativeClipboardTextMethod(t)
 	r := newComposerRenderer(t, 80, 24)
+	r.SetCopyOnSelect(false)
 	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
 	cursor := 0
 	r.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor})
@@ -5501,14 +5504,101 @@ func TestComposerDragSelectionLeavesTheClipboardAlone(t *testing.T) {
 	}
 }
 
+// clipboardCapture swaps clipboardWriteText for a stub that records the text
+// of every write. writeClipboard copies on a background goroutine, so a test
+// must wait for the write to land before asserting, and the seam is restored
+// by cleanup only after the test had its chance to wait (the seam is read on
+// the caller's goroutine, so a write started before the restore stays safe).
+type clipboardCapture struct {
+	writes chan string
+}
+
+func captureClipboardWrites(t *testing.T) *clipboardCapture {
+	t.Helper()
+	cap := &clipboardCapture{writes: make(chan string, 8)}
+	prev := clipboardWriteText
+	clipboardWriteText = func(_ context.Context, text string) error {
+		cap.writes <- text
+		return nil
+	}
+	t.Cleanup(func() { clipboardWriteText = prev })
+	return cap
+}
+
+// wait returns the next write's text, failing the test if none lands in time.
+func (c *clipboardCapture) wait(t *testing.T) string {
+	t.Helper()
+	select {
+	case text := <-c.writes:
+		return text
+	case <-time.After(2 * time.Second):
+		t.Fatal("no clipboard write landed")
+		return ""
+	}
+}
+
+// pending reports writes recorded but not yet waited for, so a test can
+// assert that a step copied nothing.
+func (c *clipboardCapture) pending() int {
+	return len(c.writes)
+}
+
+// TestComposerDragSelectionCopiesByDefault pins features.copy_on_select's
+// default: releasing a drag over the composer's text copies it to the
+// clipboard and still hands the range to the next edit — the copy and the edit
+// target are decoupled. A drag over the conversation keeps copying as before.
+func TestComposerDragSelectionCopiesByDefault(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
+	clip := captureClipboardWrites(t)
+	r := newComposerRenderer(t, 80, 24)
+	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
+	cursor := 0
+	r.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row := composerTextRowScreen(r, 0)
+	prefix := r.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r, prefix+6, row, prefix+11, row)
+	if notice := copyNotice(r); notice != "copied 5 chars to clipboard" {
+		t.Fatalf("the default release should copy \"world\", got notice %q", notice)
+	}
+	if got := clip.wait(t); got != "world" {
+		t.Fatalf("the default release should write \"world\" to the clipboard, got %q", got)
+	}
+	if got := publishedSelection(); got != [2]int{6, 11} {
+		t.Fatalf("the copied selection should still be the next edit's target, got %v", got)
+	}
+
+	transcriptRow := -1
+	for i, line := range r.vpLastRender.lines {
+		if strings.Contains(stripANSI(line), "transcript line") {
+			transcriptRow = i
+		}
+	}
+	if transcriptRow < 0 {
+		t.Fatalf("no transcript row painted:\n%s", stripANSI(strings.Join(r.vpLastRender.lines, "\n")))
+	}
+	dragComposer(r, 0, transcriptRow, 20, transcriptRow)
+	if notice := copyNotice(r); !strings.HasPrefix(notice, "copied ") {
+		t.Fatalf("a drag over the conversation should still copy it, got notice %q", notice)
+	}
+}
+
 // TestCtrlCCopiesTheSelection pins Claude Code's rule for Ctrl+C with text
-// selected: it copies instead of cancelling. A selection in the draft, which
-// its release left off the clipboard, is copied; one its release already
-// copied is only dropped, its copy announced again. Either way the selection is
-// gone afterwards, so the next Ctrl+C is an ordinary one.
+// selected: it copies instead of cancelling, in both copy_on_select states.
+// Off: a selection in the draft, which its release left off the clipboard, is
+// copied by Ctrl+C. On: the release already copied it, so Ctrl+C only drops
+// the selection and announces the copy again, without writing a second time.
+// Either way the selection is gone afterwards, so the next Ctrl+C is an
+// ordinary one.
 func TestCtrlCCopiesTheSelection(t *testing.T) {
 	pinNativeClipboardTextMethod(t)
+
+	// Off: the release leaves a draft selection off the clipboard, and Ctrl+C
+	// copies it.
+	captureClipboardWrites(t)
 	r := newComposerRenderer(t, 80, 24)
+	r.SetCopyOnSelect(false)
 	r.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
 	cursor := 0
 	r.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor})
@@ -5565,6 +5655,34 @@ func TestCtrlCCopiesTheSelection(t *testing.T) {
 	}
 	if r.HasSelection() {
 		t.Fatal("Ctrl+C should drop the copied selection")
+	}
+
+	// On: the release already copied the draft selection, so Ctrl+C only
+	// drops it and announces the copy again — without writing a second time.
+	clip := captureClipboardWrites(t)
+	r2 := newComposerRenderer(t, 80, 24)
+	r2.RenderFrame(Frame{Kind: FrameStatus, Content: "transcript line", Final: true})
+	cursor2 := 0
+	r2.RenderComposerState(ComposerRenderState{Text: "hello world foo", Cursor: &cursor2})
+	t.Cleanup(func() { composerSelectionRange.Store(nil) })
+
+	row2 := composerTextRowScreen(r2, 0)
+	prefix2 := r2.vpLastComposer.text.rows[0].prefixWidth
+	dragComposer(r2, prefix2+6, row2, prefix2+11, row2)
+	if got := clip.wait(t); got != "world" {
+		t.Fatalf("with copy on select on, the release should write \"world\", got %q", got)
+	}
+	if !r2.CopySelectionForCtrlC() {
+		t.Fatal("Ctrl+C over a release-copied selection should still be the copy")
+	}
+	if notice := copyNotice(r2); notice != "copied 5 chars to clipboard" {
+		t.Fatalf("Ctrl+C should announce the release's copy again, got notice %q", notice)
+	}
+	if pending := clip.pending(); pending != 0 {
+		t.Fatalf("Ctrl+C over a release-copied selection must not write again, got %d pending writes", pending)
+	}
+	if r2.HasSelection() {
+		t.Fatal("Ctrl+C should drop the selection")
 	}
 }
 

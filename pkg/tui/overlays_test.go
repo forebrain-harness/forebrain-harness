@@ -2929,13 +2929,15 @@ func waitForDragRelease(t *testing.T, r *Renderer) {
 	t.Fatal("the drag's release never reached the renderer")
 }
 
-// TestSelectorFilterSelectionLeavesTheClipboardAlone is the composer's
-// clipboard bug in a picker: a drag over the filter's text is the next edit's
-// target and is not copied over what the user copied elsewhere, while a drag
-// over the list below it is still copied.
+// TestSelectorFilterSelectionLeavesTheClipboardAlone keeps the composer's
+// clipboard bug fixed as features.copy_on_select's off state: in a picker, a
+// drag over the filter's text is the next edit's target and is not copied over
+// what the user copied elsewhere, while a drag over the list below it is still
+// copied.
 func TestSelectorFilterSelectionLeavesTheClipboardAlone(t *testing.T) {
 	pinNativeClipboardTextMethod(t)
 	r, pw, done := startFilterPicker(t)
+	r.SetCopyOnSelect(false)
 	typeIntoPicker(t, r, pw, "abcd")
 
 	startCol, row := overlayCellOf(t, r, "abcd", 1)
@@ -2960,12 +2962,45 @@ func TestSelectorFilterSelectionLeavesTheClipboardAlone(t *testing.T) {
 	finishPicker(t, pw, done)
 }
 
+// TestSelectorFilterSelectionCopiesByDefault pins features.copy_on_select's
+// default in a picker: the release over the filter copies the selected filter
+// text to the clipboard, and the range still reaches the next edit — Delete
+// takes it as before.
+func TestSelectorFilterSelectionCopiesByDefault(t *testing.T) {
+	pinNativeClipboardTextMethod(t)
+	r, pw, done := startFilterPicker(t)
+	clip := captureClipboardWrites(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row := overlayCellOf(t, r, "abcd", 1)
+	endCol, _ := overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
+		t.Fatalf("the default release should copy the filter's \"bc\", got notice %q", notice)
+	}
+	if got := clip.wait(t); got != "bc" {
+		t.Fatalf("the default release should write \"bc\" to the clipboard, got %q", got)
+	}
+
+	if _, err := pw.Write([]byte{0x7f}); err != nil {
+		t.Fatalf("write backspace: %v", err)
+	}
+	waitForPaintedRow(t, r, "ad")
+
+	finishPicker(t, pw, done)
+}
+
 // TestSelectorCtrlCCopiesTheSelection: in a modal, Ctrl+C with text selected
 // copies it and does nothing else — the picker stays open and its filter keeps
-// its text.
+// its text. With copy on select off the release left the selection off the
+// clipboard and Ctrl+C does the copying; with it on, the default, the release
+// already copied and Ctrl+C only drops the selection and announces the copy
+// again, without writing a second time.
 func TestSelectorCtrlCCopiesTheSelection(t *testing.T) {
 	pinNativeClipboardTextMethod(t)
 	r, pw, done := startFilterPicker(t)
+	r.SetCopyOnSelect(false)
 	typeIntoPicker(t, r, pw, "abcd")
 
 	startCol, row := overlayCellOf(t, r, "abcd", 1)
@@ -2995,14 +3030,58 @@ func TestSelectorCtrlCCopiesTheSelection(t *testing.T) {
 	}
 
 	finishPicker(t, pw, done)
+
+	// On: the release already copied the selection, so Ctrl+C only drops it
+	// and announces the copy again — the picker stays open, the filter keeps
+	// its text, and no second write lands.
+	clip := captureClipboardWrites(t)
+	r, pw, done = startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row = overlayCellOf(t, r, "abcd", 1)
+	endCol, _ = overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if got := clip.wait(t); got != "bc" {
+		t.Fatalf("with copy on select on, the release should write \"bc\", got %q", got)
+	}
+	if _, err := pw.Write([]byte{0x03}); err != nil {
+		t.Fatalf("write ctrl+c: %v", err)
+	}
+	deadline2 := time.Now().Add(3 * time.Second)
+	for r.HasSelection() && time.Now().Before(deadline2) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r.HasSelection() {
+		t.Fatal("Ctrl+C should drop the release-copied selection")
+	}
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
+		t.Fatalf("Ctrl+C should announce the release's copy again, got notice %q", notice)
+	}
+	if pending := clip.pending(); pending != 0 {
+		t.Fatalf("Ctrl+C over a release-copied selection must not write again, got %d pending writes", pending)
+	}
+	select {
+	case <-done:
+		t.Fatal("Ctrl+C over a selection must not dismiss the picker")
+	default:
+	}
+	if _, plain := overlayRowContaining(t, r, panelFilterGlyph); !strings.Contains(plain, "abcd") {
+		t.Fatalf("Ctrl+C must leave the filter as it was, row is %q", plain)
+	}
+
+	finishPicker(t, pw, done)
 }
 
 // TestSelectorCmdCCopiesTheSelection: a Cmd+C key report — what a terminal
 // that reports it, or a Terminal.app key binding, delivers — copies the
-// selection in a modal and, with nothing selected, does nothing at all.
+// selection in a modal and, with nothing selected, does nothing at all. With
+// copy on select on, the default, the release already copied and Cmd+C only
+// drops the selection, without writing a second time.
 func TestSelectorCmdCCopiesTheSelection(t *testing.T) {
 	pinNativeClipboardTextMethod(t)
 	r, pw, done := startFilterPicker(t)
+	r.SetCopyOnSelect(false)
 	typeIntoPicker(t, r, pw, "abcd")
 
 	if _, err := pw.Write([]byte("\x1b[99;9u")); err != nil {
@@ -3031,6 +3110,46 @@ func TestSelectorCmdCCopiesTheSelection(t *testing.T) {
 	}
 	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
 		t.Fatalf("cmd+c should copy the selected \"bc\", got notice %q", notice)
+	}
+	if _, plain := overlayRowContaining(t, r, panelFilterGlyph); !strings.Contains(plain, "abcd") {
+		t.Fatalf("cmd+c must leave the filter as it was, row is %q", plain)
+	}
+
+	finishPicker(t, pw, done)
+
+	// On: the release already copied the selection, so Cmd+C only drops it —
+	// no second write lands, the picker stays open and the filter is intact.
+	clip := captureClipboardWrites(t)
+	r, pw, done = startFilterPicker(t)
+	typeIntoPicker(t, r, pw, "abcd")
+
+	startCol, row = overlayCellOf(t, r, "abcd", 1)
+	endCol, _ = overlayCellOf(t, r, "abcd", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if got := clip.wait(t); got != "bc" {
+		t.Fatalf("with copy on select on, the release should write \"bc\", got %q", got)
+	}
+	if _, err := pw.Write([]byte("\x1b[99;9u")); err != nil {
+		t.Fatalf("write cmd+c: %v", err)
+	}
+	deadline2 := time.Now().Add(3 * time.Second)
+	for r.HasSelection() && time.Now().Before(deadline2) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if r.HasSelection() {
+		t.Fatal("cmd+c should drop the release-copied selection")
+	}
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
+		t.Fatalf("cmd+c should announce the release's copy again, got notice %q", notice)
+	}
+	if pending := clip.pending(); pending != 0 {
+		t.Fatalf("cmd+c over a release-copied selection must not write again, got %d pending writes", pending)
+	}
+	select {
+	case <-done:
+		t.Fatal("cmd+c over a selection must not dismiss the picker")
+	default:
 	}
 	if _, plain := overlayRowContaining(t, r, panelFilterGlyph); !strings.Contains(plain, "abcd") {
 		t.Fatalf("cmd+c must leave the filter as it was, row is %q", plain)
@@ -3078,9 +3197,11 @@ func TestSelectorFilterSelectionIsConsumedOnce(t *testing.T) {
 }
 
 // TestSelectorInputSelectionIsDeleted covers Input()'s field: a drag inside the
-// default value, then Delete.
+// default value, then Delete. The drag leaves the clipboard alone because the
+// test runs with copy on select off; the default is pinned separately.
 func TestSelectorInputSelectionIsDeleted(t *testing.T) {
 	r := newComposerRenderer(t, 80, 24)
+	r.SetCopyOnSelect(false)
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -3119,13 +3240,63 @@ func TestSelectorInputSelectionIsDeleted(t *testing.T) {
 	}
 }
 
+// TestSelectorInputSelectionCopiesByDefault pins features.copy_on_select's
+// default in Input()'s field: the release copies the selected default text,
+// and Delete still takes the selection.
+func TestSelectorInputSelectionCopiesByDefault(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	clip := captureClipboardWrites(t)
+
+	sel := newRawSelector(pr, r)
+	done := make(chan string, 1)
+	go func() {
+		value, _, err := sel.Input("Name", "hello")
+		if err != nil {
+			t.Errorf("Input: %v", err)
+		}
+		done <- value
+	}()
+	waitForPaintedRow(t, r, "hello")
+
+	startCol, row := overlayCellOf(t, r, "hello", 1)
+	endCol, _ := overlayCellOf(t, r, "hello", 3)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
+		t.Fatalf("the default release should copy \"el\", got notice %q", notice)
+	}
+	if got := clip.wait(t); got != "el" {
+		t.Fatalf("the default release should write \"el\" to the clipboard, got %q", got)
+	}
+
+	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
+		t.Fatalf("write backspace and Enter: %v", err)
+	}
+	select {
+	case value := <-done:
+		if value != "hlo" {
+			t.Fatalf("Delete over a selection in Input should leave %q, got %q", "hlo", value)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Input did not return")
+	}
+}
+
 // TestQuestionOtherSelectionIsDeleted covers user_interaction's Other field,
-// whose row carries a one-cell caret block the mapping has to skip.
+// whose row carries a one-cell caret block the mapping has to skip. The drag
+// leaves the clipboard alone because the test runs with copy on select off;
+// the default is pinned separately.
 func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
 	setForcedTermSize(80, 30)
 	t.Cleanup(func() { setForcedTermSize(0, 0) })
 	out := newApprovalPaintWriter()
 	r := NewRenderer(out, out)
+	r.SetCopyOnSelect(false)
 	r.EnableViewportMode()
 	t.Cleanup(r.DisableViewportMode)
 
@@ -3176,6 +3347,82 @@ func TestQuestionOtherSelectionIsDeleted(t *testing.T) {
 	waitForDragRelease(t, r)
 	if notice := copyNotice(r); notice != "" {
 		t.Fatalf("a drag over the Other answer must leave the clipboard alone, got %q", notice)
+	}
+
+	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
+		t.Fatalf("write backspace and Enter: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("question overlay: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the question overlay did not return")
+	}
+	if got := overlay.otherText[0]; got != "abef" {
+		t.Fatalf("Delete over a selection in the Other field should leave %q, got %q", "abef", got)
+	}
+}
+
+// TestQuestionOtherSelectionCopiesByDefault pins features.copy_on_select's
+// default on the Other row: the release copies the selected answer text, and
+// Delete still takes the selection.
+func TestQuestionOtherSelectionCopiesByDefault(t *testing.T) {
+	setForcedTermSize(80, 30)
+	t.Cleanup(func() { setForcedTermSize(0, 0) })
+	out := newApprovalPaintWriter()
+	r := NewRenderer(out, out)
+	r.EnableViewportMode()
+	t.Cleanup(r.DisableViewportMode)
+
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	rs := newRawSelector(pr, r)
+	clip := captureClipboardWrites(t)
+
+	form := state.AskForm{
+		Title:     "Pick one",
+		Questions: []state.AskQuestion{{ID: "q1", Prompt: "Choose", Options: []state.AskOption{{ID: "a", Label: "Alpha"}, {ID: "b", Label: "Beta"}}}},
+	}
+	payload, err := json.Marshal(form)
+	if err != nil {
+		t.Fatalf("marshal form: %v", err)
+	}
+	overlay, err := newQuestionOverlay(context.Background(), io.Discard, rs, turn.ToolApprovalRequest{AskFormJSON: string(payload)})
+	if err != nil {
+		t.Fatalf("newQuestionOverlay: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := overlay.Run()
+		done <- err
+	}()
+	waitForPaintedRow(t, r, "type to enter custom text")
+
+	for range 2 {
+		if _, err := pw.Write([]byte("\x1b[B")); err != nil {
+			t.Fatalf("write Down: %v", err)
+		}
+	}
+	waitForPaintedRow(t, r, "Other:")
+	if _, err := pw.Write([]byte("abcdef")); err != nil {
+		t.Fatalf("write text: %v", err)
+	}
+	waitForPaintedRow(t, r, "abcdef")
+
+	startCol, row := overlayCellOf(t, r, "abcdef", 2)
+	endCol, _ := overlayCellOf(t, r, "abcdef", 4)
+	writeMouseDrag(t, pw, startCol, row, endCol, row)
+	waitForDragRelease(t, r)
+	if notice := copyNotice(r); notice != "copied 2 chars to clipboard" {
+		t.Fatalf("the default release should copy \"cd\", got notice %q", notice)
+	}
+	if got := clip.wait(t); got != "cd" {
+		t.Fatalf("the default release should write \"cd\" to the clipboard, got %q", got)
 	}
 
 	if _, err := pw.Write([]byte{0x7f, '\r'}); err != nil {
@@ -3267,9 +3514,12 @@ func TestQuestionOtherSelectionDeletesAWideRuneWhole(t *testing.T) {
 
 // TestApprovalFeedbackSelectionIsDeleted covers the plan-approval feedback
 // field: a drag inside it, then Delete, and the rule's own row table resolves
-// the selection the way a click does.
+// the selection the way a click does. The drag leaves the clipboard alone
+// because the test runs with copy on select off; the default is pinned
+// separately.
 func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 	r := newComposerRenderer(t, 80, 24)
+	r.SetCopyOnSelect(false)
 	o := &approvalOverlay{rs: newRawSelector(nil, r), feedback: feedbackPlanDeny, out: io.Discard}
 	o.feedbackBuf = []rune("please fix the plan")
 	o.feedbackCursor = len(o.feedbackBuf)
@@ -3305,6 +3555,40 @@ func TestApprovalFeedbackSelectionIsDeleted(t *testing.T) {
 	o.insertEditText("X")
 	if got := string(o.feedbackBuf); got != "please  X plan" {
 		t.Fatalf("typing over a selection should replace it, got %q", got)
+	}
+}
+
+// TestApprovalFeedbackSelectionCopiesByDefault pins features.copy_on_select's
+// default in the plan-approval feedback field: the release copies the selected
+// feedback text, and Delete still takes it.
+func TestApprovalFeedbackSelectionCopiesByDefault(t *testing.T) {
+	r := newComposerRenderer(t, 80, 24)
+	clip := captureClipboardWrites(t)
+	o := &approvalOverlay{rs: newRawSelector(nil, r), feedback: feedbackPlanDeny, out: io.Discard}
+	o.feedbackBuf = []rune("please fix the plan")
+	o.feedbackCursor = len(o.feedbackBuf)
+	o.keepOptionsInView = true
+	o.renderViewport()
+	defer o.rs.withFieldProbe(o.feedbackTakes)()
+
+	startCol, row := overlayCellOf(t, r, "please fix the plan", 7)
+	endCol, _ := overlayCellOf(t, r, "please fix the plan", 10)
+	r.ViewportSelectStart(startCol, row)
+	r.ViewportSelectDrag(endCol, row)
+	r.ViewportSelectEnd(endCol, row)
+	if notice := copyNotice(r); notice != "copied 3 chars to clipboard" {
+		t.Fatalf("the default release should copy \"fix\", got notice %q", notice)
+	}
+	if got := clip.wait(t); got != "fix" {
+		t.Fatalf("the default release should write \"fix\" to the clipboard, got %q", got)
+	}
+
+	o.handleFeedbackKey(parsedKey{kind: rawKeyBackspace})
+	if got := string(o.feedbackBuf); got != "please  the plan" {
+		t.Fatalf("Delete over a selection should remove it, got %q", got)
+	}
+	if o.feedbackCursor != 7 {
+		t.Fatalf("the caret must land at the start of the selection, got %d", o.feedbackCursor)
 	}
 }
 

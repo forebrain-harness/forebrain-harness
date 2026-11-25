@@ -105,6 +105,7 @@ func defaultStoredFeatures(root appcfg.Root) appcfg.FeaturesSection {
 		Memories:          appcfg.BoolPtr(effective.Memories),
 		LSP:               appcfg.BoolPtr(effective.LSP),
 		PromptSuggestions: appcfg.BoolPtr(effective.PromptSuggestions),
+		CopyOnSelect:      appcfg.BoolPtr(effective.CopyOnSelect),
 	}
 }
 

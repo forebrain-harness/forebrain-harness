@@ -9590,6 +9590,56 @@ func TestConnectCurrentValuesFollowTheNamedAgent(t *testing.T) {
 	}
 }
 
+// The turn boundary reports features.copy_on_select even when the adoption
+// itself finds nothing new: a /config write moves the renderer flag without an
+// adoption, so the boundary must re-emit the adopted value on every pass —
+// including the pass whose SyncConfigFromDB short-circuits on the unchanged
+// composed snapshot's fingerprint. The session here is composed from the
+// database (OpenChatSessionForProject with the /connect fixture), because a
+// session opened from a handed-in config never enters the fingerprint path at
+// all: both passes below short-circuit and must both still report.
+func TestSyncConfigAtBoundaryReportsCopyOnSelectEveryPass(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FOREBRAIN_HOME", home)
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	cfgPath := filepath.Join(home, "forebrain.yaml")
+	writeConnectConfig(t, cfgPath, "workspace_write", "gpt-startup")
+	storeStoredSectionForTest(t, home, "agents", `{"definitions":{"main":{"primary":true,"default_model":"llm-connect"}}}`)
+	seedConnectModelRow(t, home, "gpt-startup")
+	storeStoredSectionForTest(t, home, "features", `{"copy_on_select":false}`)
+
+	process.ResetResolve()
+	t.Cleanup(process.ResetResolve)
+
+	ctx := context.Background()
+	s, err := OpenChatSessionForProject(ctx, home)
+	require.NoError(t, err)
+	defer s.Close()
+
+	rec := &notifiedRecorder{}
+	s.PrependUINotify(rec.record)
+
+	if err := s.syncConfigAtBoundary(ctx); err != nil {
+		t.Fatalf("first boundary sync: %v", err)
+	}
+	if err := s.syncConfigAtBoundary(ctx); err != nil {
+		t.Fatalf("second boundary sync: %v", err)
+	}
+
+	count := 0
+	for _, msg := range rec.awaitStable(t) {
+		if m, ok := msg.(CopyOnSelectMsg); ok {
+			count++
+			if m.Enabled {
+				t.Fatal("the boundary must report the stored copy_on_select=false")
+			}
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected two CopyOnSelectMsg reports, got %d", count)
+	}
+}
+
 func TestTrackerConcurrentAccess(t *testing.T) {
 	tracker := NewTracker()
 

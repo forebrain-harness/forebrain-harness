@@ -141,6 +141,13 @@ func Run(ctx context.Context, opts Options) error {
 		ModelRowID:      opts.Session.CurrentModelRowID(),
 	})
 	renderer.SetComposerTokenStats("", measuredComposerTokenStats(opts.Session, initialSessionID))
+	// features.copy_on_select is a renderer flag the session's composed
+	// configuration seeds once here; later changes arrive through
+	// CopyOnSelectMsg at the turn boundaries. The optional assertion keeps a
+	// session type without the method (tests, embedders) on the default.
+	if cf, ok := opts.Session.(interface{ CopyOnSelectEnabled() bool }); ok {
+		renderer.SetCopyOnSelect(cf.CopyOnSelectEnabled())
+	}
 	// Seed the idle terminal title with the resumed session's title (or the
 	// app name for a fresh session); turns animate it from here on.
 	titleAnimator.Settle(initialSessionTitle)
@@ -332,6 +339,12 @@ func Run(ctx context.Context, opts Options) error {
 			return
 		case SubagentQueueChangedMsg:
 			handleSubagentQueueChangedMsg(renderer, &state, msg)
+			return
+		case CopyOnSelectMsg:
+			// A turn boundary adopted the composed configuration; the flag
+			// follows it. No repaint is needed — the flag only decides what a
+			// later mouse release does.
+			renderer.SetCopyOnSelect(msg.Enabled)
 			return
 		}
 		if handlePeerWakeNotification(&state, m) {

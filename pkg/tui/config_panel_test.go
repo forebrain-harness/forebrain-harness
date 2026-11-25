@@ -818,6 +818,80 @@ func TestConfigPanelWritesATriStateBooleanOnEnter(t *testing.T) {
 	}
 }
 
+// The panel applies features.copy_on_select to the renderer the moment its
+// write lands — the switch takes effect without a turn in between. Off is the
+// discriminating direction (a fresh renderer defaults to on); on is driven
+// from a renderer a previous off-save had left, so both legs must move.
+func TestConfigPanelSaveFlipsTheCopyOnSelectFlagImmediately(t *testing.T) {
+	rendererCopyOnSelect := func(r *Renderer) bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.copyOnSelect
+	}
+
+	off := newConfigPanelSession(nil)
+	renderer := runConfigPanel(t, off, &scriptedSelector{}, []richStep{
+		{label: "Feature switches", ok: true},
+		{label: "Copy on select", ok: true},
+		{label: configBoolOffLabel, ok: true},
+		{ok: false},
+	}, nil)
+	if len(off.writes) != 1 {
+		t.Fatalf("expected one write, got %d", len(off.writes))
+	}
+	if string(off.writes[0].raw) != `{"copy_on_select":false}` {
+		t.Fatalf("raw = %s, want {\"copy_on_select\":false}", off.writes[0].raw)
+	}
+	if rendererCopyOnSelect(renderer) {
+		t.Fatal("turning copy on select off must move the renderer flag at once")
+	}
+
+	// On, from a renderer the previous off-save had left: the flag must come
+	// back with the saved document.
+	on := newConfigPanelSession(map[string]string{"features": `{"copy_on_select":false}`})
+	selector := &scriptedSelector{}
+	selector.richSteps = []richStep{
+		{label: "Feature switches", ok: true},
+		{label: "Copy on select", ok: true},
+		{label: configBoolOnLabel, ok: true},
+		{ok: false},
+	}
+	var out bytes.Buffer
+	renderer = NewRenderer(&out, &out)
+	renderer.SetCopyOnSelect(false)
+	ctrl := newCommandController(on, renderer, selector, nil, "")
+	ctrl.handleConfig(context.Background(), nil)
+
+	if len(on.writes) != 1 {
+		t.Fatalf("expected one write, got %d", len(on.writes))
+	}
+	if string(on.writes[0].raw) != `{"copy_on_select":true}` {
+		t.Fatalf("raw = %s, want {\"copy_on_select\":true}", on.writes[0].raw)
+	}
+	if !rendererCopyOnSelect(renderer) {
+		t.Fatal("turning copy on select on must move the renderer flag at once")
+	}
+}
+
+// copyOnSelectFromStoredDoc resolves the stored features row the way the
+// loader's accessor does: a missing, empty or undecodable row means the
+// default, on — the flag never stops at a stale value.
+func TestCopyOnSelectFromStoredDocDefaultsToOn(t *testing.T) {
+	for _, raw := range []json.RawMessage{
+		nil,
+		json.RawMessage(`{}`),
+		json.RawMessage(`not json`),
+		json.RawMessage(`{"copy_on_select":true}`),
+	} {
+		if !copyOnSelectFromStoredDoc(raw) {
+			t.Fatalf("copyOnSelectFromStoredDoc(%s) = false, want the default on", raw)
+		}
+	}
+	if copyOnSelectFromStoredDoc(json.RawMessage(`{"copy_on_select":false}`)) {
+		t.Fatal("copyOnSelectFromStoredDoc({\"copy_on_select\":false}) = true, want off")
+	}
+}
+
 // Every row kind writes on the confirmed edit, through the one store path, and
 // nothing short of a confirmed edit writes at all (plan 321 Step 6).
 func TestConfigPanelWritesOnEnterForEveryRowKind(t *testing.T) {
@@ -3856,7 +3930,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		"compact":                 "Keep long conversations within their context window.",
 		"memories":                "Tune retrieval, retention and background processing.",
 		"cron":                    "Choose how long task records are retained.",
-		"features":                "Enable memory, language intelligence and next-step suggestions.",
+		"features":                "Enable memory, language intelligence, next-step suggestions and copy on select.",
 		"agents":                  "Manage definitions, shared defaults.",
 		"hooks":                   "Run configured actions at lifecycle events.",
 		"lsp":                     "Manage servers, timeouts and diagnostic delivery.",
@@ -3888,6 +3962,7 @@ func TestConfigPanelPrototypeCopy(t *testing.T) {
 		{"cron", "retention_days", "Keep task records for", ""},
 		{"features", "memories", "Memory", "Remember useful context across conversations."},
 		{"features", "prompt_suggestions", "Next-step suggestions", "Predict your next message as ghost text in the idle composer; Tab or Right takes it."},
+		{"features", "copy_on_select", "Copy on select", "Copy mouse-selected text to the clipboard on release, including in the composer and dialog fields. Off keeps your clipboard untouched while you edit selected text."},
 		{"agents", "defaults.network_retry_max", "Network retries", "Zero disables network retries."},
 		{"agents", "defaults.stream_idle_timeout_seconds", "Stream idle timeout", "Zero disables the watchdog. Positive values below 10 run as 10."},
 		{"agents", "defaults.context_inject.warn_remaining_percent", "Warn below remaining context", ""},
@@ -3952,6 +4027,7 @@ func TestConfigPanelDefaultArrowUnitsAndStatus(t *testing.T) {
 		{"cron", "Keep task records for", ""},
 		{"approval_preset", "Default approval mode", ""},
 		{"features", "Memory", configBoolOnLabel},
+		{"features", "Copy on select", configBoolOnLabel},
 		{"agents", "Enable subagents", configBoolOffLabel},
 		{"compact", "Hand-off prompt", ""},
 		{"lsp", "Minimum severity", ""},

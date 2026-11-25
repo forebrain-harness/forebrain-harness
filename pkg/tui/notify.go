@@ -168,6 +168,15 @@ type FirstTokenMsg struct {
 	AgentID string
 	Wait    time.Duration
 }
+
+// CopyOnSelectMsg tells the surface where features.copy_on_select stands after
+// a turn boundary adopted the composed configuration. It is emitted
+// unconditionally at every boundary — even when the sync found nothing new —
+// because a /config write moves the renderer flag directly, and the boundary
+// is where the adopted value gets the last word.
+type CopyOnSelectMsg struct {
+	Enabled bool
+}
 type RunEndedMsg struct {
 	turn           *foregroundTurn
 	RunID          string
@@ -1710,8 +1719,9 @@ func openProcessChatSession(ctx context.Context, cfg *config.Root, cwd string) (
 		// Every turn adopts the current composed configuration before it
 		// starts (plan 187): a change written through the web or the TUI
 		// becomes effective on this surface's next turn, and a running turn
-		// never sees its configuration move.
-		turn.WithConfigSync(env.SyncConfigFromDB),
+		// never sees its configuration move. The session's own wrapper adds
+		// the copy-on-select flag's boundary report on top of the adoption.
+		turn.WithConfigSync(s.syncConfigAtBoundary),
 		// The run-step ledger backs the projected history this session serves
 		// (SurfaceSessionPlanUpdates replays the conversation's plan cards from
 		// it); without the store those reads silently come back empty.

@@ -306,11 +306,13 @@ var configSectionSchemas = []configSectionSchema{
 	},
 	{
 		Name: "features", Title: "Feature switches", Tab: configTabSession,
-		Summary: "Enable memory, language intelligence and next-step suggestions.",
+		Summary: "Enable memory, language intelligence, next-step suggestions and copy on select.",
 		Fields: []configField{
 			{Path: "memories", Label: "Memory", Kind: configFieldBool3, DefaultValue: "true", Hint: "Remember useful context across conversations."},
 			{Path: "lsp", Label: "Language servers", Kind: configFieldBool3, DefaultValue: "true", Hint: "Enable code intelligence and language diagnostics."},
 			{Path: "prompt_suggestions", Label: "Next-step suggestions", Kind: configFieldBool3, DefaultValue: "true", Hint: "Predict your next message as ghost text in the idle composer; Tab or Right takes it."},
+			{Path: "copy_on_select", Label: "Copy on select", Kind: configFieldBool3, DefaultValue: "true",
+				Hint: "Copy mouse-selected text to the clipboard on release, including in the composer and dialog fields. Off keeps your clipboard untouched while you edit selected text."},
 		},
 	},
 	{
