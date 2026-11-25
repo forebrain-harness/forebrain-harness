@@ -208,6 +208,29 @@ func (env *Environment) BindConversation(ctx context.Context, sessionID, project
 	return r, nil
 }
 
+// RebindConversation binds sessionID to projectID again, dropping the binding it
+// already holds. It is for a conversation that has no session row yet: an
+// earlier binding followed the project's type at that moment, and a type edit
+// since makes that pre-resolution stale — the row its first turn writes freezes
+// the project's current type, so the runner has to be that type's as well.
+// Call it only for such a conversation: a conversation that has a row is meant to
+// keep the entry it is bound to.
+func (env *Environment) RebindConversation(ctx context.Context, sessionID, projectID string) (*run.Runner, error) {
+	if env == nil {
+		return nil, nil
+	}
+	if env.SQL == nil {
+		return env.Runner, nil
+	}
+	env.EnsureRunnerPool()
+	// Dropping the stale pre-resolution first: BindSession resolves to the
+	// entry the project's current type picks, and a binding left in place
+	// would be answered from it (entryForSession returns a bound entry
+	// before it looks at the project).
+	_ = env.pool.BindSession(ctx, sessionID, "")
+	return env.BindConversation(ctx, sessionID, projectID)
+}
+
 // ErrSessionHasNoProject reports a turn that cannot start: its conversation
 // belongs to no project, and this process has none of its own to run it on.
 var ErrSessionHasNoProject = errors.New("session has no project")

@@ -1198,6 +1198,60 @@ func TestEnvironmentBindConversationBuildsTheProjectRunner(t *testing.T) {
 	}
 }
 
+// TestRebindConversationMovesAnUnbornSessionToTheNewType pins the one case a
+// rebind is for: a conversation with no session row was pre-bound to the type
+// the project had at that moment, and a type edit since makes that entry stale —
+// the row its first turn writes freezes the project's current type, so the
+// runner has to be that type's too. A plain re-bind is not enough: the stale
+// binding answers first, which is exactly why RebindConversation drops it.
+func TestRebindConversationMovesAnUnbornSessionToTheNewType(t *testing.T) {
+	ctx := context.Background()
+	env, projects, _ := newPoolTestEnv(t)
+	defer env.CloseRunnerPool()
+
+	root := t.TempDir()
+	proj, err := projects.Create(ctx, state.CreateProjectInput{
+		Name: "rebind", Root: root, ProjectKey: state.ProjectKeyForRoot(root),
+		ProjectType: state.ProjectTypeOffice,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No session row: this conversation has not started, so it has frozen
+	// nothing and follows the project's current type.
+	before, err := env.BindConversation(ctx, "sess-rebind", proj.ID)
+	if err != nil {
+		t.Fatalf("BindConversation: %v", err)
+	}
+	if got := before.Deps.ProjectType; got != state.ProjectTypeOffice {
+		t.Fatalf("the pre-bound runner's type = %q, want office", got)
+	}
+
+	coding := state.ProjectTypeCoding
+	if _, err := projects.Update(ctx, proj.ID, state.UpdateProjectInput{ProjectType: &coding}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	// A plain re-bind answers the stale entry, which is the defect the rebind
+	// exists to fix.
+	if again, err := env.BindConversation(ctx, "sess-rebind", proj.ID); err != nil || again != before {
+		t.Fatalf("a plain re-bind must keep the stale binding (got %p err=%v, want %p)", again, err, before)
+	}
+
+	after, err := env.RebindConversation(ctx, "sess-rebind", proj.ID)
+	if err != nil {
+		t.Fatalf("RebindConversation: %v", err)
+	}
+	if after == nil || after == before {
+		t.Fatal("RebindConversation must answer the new type's runner, not the stale one")
+	}
+	if got := after.Deps.ProjectType; got != state.ProjectTypeCoding {
+		t.Fatalf("the re-bound runner's type = %q, want coding", got)
+	}
+	if r, ok := env.BoundRunnerForSession(ctx, "sess-rebind"); !ok || r != after {
+		t.Fatalf("the session must be bound to the re-bound runner (got %p ok=%v, want %p)", r, ok, after)
+	}
+}
+
 // TestRunnerPoolLatestRunnerForProjectPicksTheNewestGeneration pins what the
 // project pages read: the project's most recently used live runner, whichever
 // generation it belongs to — a settings edit moves new sessions to a fresh
