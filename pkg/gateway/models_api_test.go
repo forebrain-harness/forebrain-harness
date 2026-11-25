@@ -21,6 +21,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
+	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1209,4 +1210,49 @@ func TestLLMModelsAPIListNamesTheSettingsThatPinARow(t *testing.T) {
 		require.NotContains(t, pin, "name")
 		require.NotContains(t, llmModelByID(t, body.Models, unpinned), "pinned_by")
 	}
+}
+
+// A row a subscription wrote says who that sign-in is signed in as, so the
+// drawer can draw the account line, and whether its source card may offer the
+// sign-out. Both come from the request's own account cache: ten rows of one
+// subscription cost one local read.
+func TestLLMModelsAPIRowCarriesTheSourceAccount(t *testing.T) {
+	s, do := modelsPageServer(t)
+	chatGPT, _ := loginStubs(t)
+	chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
+	chatGPT.hasAccount = true
+	chatGPT.account = subscription.Account{Name: "dev@example.test", Detail: "plus"}
+	empty := ""
+	_, err := process.UpsertLLMModel(context.Background(), s.Env.SQL, process.LLMModelInput{
+		Provider: "chatgpt", Model: "gpt-5-codex", BaseURL: "https://chatgpt.com/backend-api/codex",
+		APIKey: &empty, Source: "chatgpt",
+	})
+	require.NoError(t, err)
+
+	rows, _ := llmModelRows(t, do)
+	require.Len(t, rows, 1)
+	acct, ok := rows[0]["source_account"].(map[string]any)
+	require.True(t, ok, "the row must carry the source account: %v", rows[0]["source_account"])
+	require.Equal(t, "dev@example.test", acct["name"])
+	require.Equal(t, "plus", acct["detail"])
+	require.Equal(t, true, rows[0]["source_can_logout"])
+
+	// With no account to name the field is absent, and the row keeps only
+	// its source state; a sign-out may still be offered.
+	chatGPT.hasAccount = false
+	rows, _ = llmModelRows(t, do)
+	require.Len(t, rows, 1)
+	require.Nil(t, rows[0]["source_account"])
+	require.Equal(t, true, rows[0]["source_can_logout"])
+
+	// An environment-provided sign-in is named but never offered for
+	// sign-out: the false the wire omits is the absence itself.
+	chatGPT.hasAccount = true
+	chatGPT.account = subscription.Account{Name: "OPENCODE_API_KEY", EnvKey: true}
+	rows, _ = llmModelRows(t, do)
+	require.Len(t, rows, 1)
+	envAcct, ok := rows[0]["source_account"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "OPENCODE_API_KEY", envAcct["name"])
+	require.Nil(t, rows[0]["source_can_logout"])
 }

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
 	"github.com/forebrain-harness/forebrain-harness/pkg/process"
@@ -89,4 +90,44 @@ func (chatGPT) Provision(ctx context.Context, env Env, offers []Offer, opts Prov
 // RefreshKey has nothing to fetch: a ChatGPT row holds no key.
 func (chatGPT) RefreshKey(ctx context.Context, env Env, modelID string) error {
 	return ErrNoKeyToRefresh
+}
+
+// Account names who the stored sign-in belongs to, read locally from the
+// credential — no vendor call. The email is the identity the person
+// recognizes; the account id stands in when the login carried no email, and
+// the plan rides along as the detail. A stored login whose bytes cannot be
+// parsed has no name to show: the sign-in stands, the account reads as none.
+func (chatGPT) Account(ctx context.Context, env Env) (Account, bool, error) {
+	raw, err := openai.LoadStoredCredentials(ctx, env.Home)
+	if err != nil || raw == nil {
+		return Account{}, false, err
+	}
+	c, err := openai.LoadProcessCredentials(ctx, openai.CredentialsPath(env.Home))
+	if err != nil {
+		return Account{}, false, nil // stored but unreadable: no name to show
+	}
+	name := c.Email
+	if name == "" {
+		name = c.AccountID
+	}
+	if name == "" {
+		return Account{}, false, nil
+	}
+	return Account{Name: name, Detail: c.Plan, SharedPath: sharedCredentialPath(env.Home)}, true, nil
+}
+
+// sharedCredentialPath is the login file when it is not this install's own
+// auth.json — the Codex CLI's file, which this same login signs in.
+func sharedCredentialPath(home string) string {
+	path := openai.CredentialsPath(home)
+	if filepath.Clean(path) == filepath.Clean(openai.DefaultPath(home)) {
+		return ""
+	}
+	return path
+}
+
+// Logout removes the sign-in everywhere it lives: the store's row and the
+// file, which may be the Codex CLI's own (sharedCredentialPath above).
+func (chatGPT) Logout(ctx context.Context, env Env) error {
+	return openai.ClearStoredCredentials(ctx, env.Home)
 }

@@ -48,12 +48,34 @@ func signInStateName(state turn.SignInState) string {
 }
 
 // subscriptionRow is one entry of the subscriptions page: what it signs in to,
-// the flow kinds it can drive on a gateway, and how that sign-in stands today.
+// the flow kinds it can drive on a gateway, how that sign-in stands today, and
+// who it is signed in as.
 type subscriptionRow struct {
 	ID    string   `json:"id"`
 	Name  string   `json:"name"`
 	Flows []string `json:"flows"`
 	State string   `json:"state"`
+	// Account is who the stored sign-in belongs to, read locally from the
+	// credential — no vendor call. Nil when the subscription has no login
+	// stored, no capability to name one, or a stored login that reads no
+	// name; the page shows the state alone then.
+	Account *subscriptionAccount `json:"account,omitempty"`
+	// CanLogout says the page may offer a sign-out: the subscription can
+	// remove its stored login, one is stored (any state but missing), and the
+	// environment is not the one holding it.
+	CanLogout bool `json:"can_logout"`
+}
+
+// subscriptionAccount is who a stored sign-in belongs to, as the page shows
+// it: the identity the person recognizes, the plan or organization beside it,
+// and the two honesty flags — EnvKey (the environment provides this sign-in,
+// so it cannot be removed here) and SharedPath (the login file belongs to
+// another program, which the same sign-in also logs in).
+type subscriptionAccount struct {
+	Name       string `json:"name"`
+	Detail     string `json:"detail,omitempty"`
+	EnvKey     bool   `json:"env_key,omitempty"`
+	SharedPath string `json:"shared_path,omitempty"`
 }
 
 // subscriptionOffer is one model a finished sign-in unlocked, as the picker
@@ -100,15 +122,16 @@ type subscriptionOffer struct {
 // subscription by the same answer, so a page with ten rows of one plan still
 // costs one call.
 type subscriptionStates struct {
-	s     *Server
-	ctx   context.Context
-	state map[string]string
+	s        *Server
+	ctx      context.Context
+	state    map[string]string
+	accounts map[string]*subscriptionAccount
 }
 
 // newSubscriptionStates starts one request's answers. ctx bounds them: a page
 // that is already canceled must not keep probing.
 func newSubscriptionStates(s *Server, ctx context.Context) *subscriptionStates {
-	return &subscriptionStates{s: s, ctx: ctx, state: map[string]string{}}
+	return &subscriptionStates{s: s, ctx: ctx, state: map[string]string{}, accounts: map[string]*subscriptionAccount{}}
 }
 
 // of answers how one subscription's sign-in stands: usable, missing, dead, or
@@ -138,6 +161,65 @@ func (st *subscriptionStates) of(id string) string {
 	return st.state[id]
 }
 
+// accountOf answers one subscription's stored account once per request, cached
+// the way of() caches its state: an id no subscription carries answers nil
+// without a read, a read that yields nothing is cached as nil, and the read
+// itself is local (a DB or file read the request's ctx already bounds).
+func (st *subscriptionStates) accountOf(id string) *subscriptionAccount {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return nil
+	}
+	if acct, ok := st.accounts[id]; ok {
+		return acct
+	}
+	sub, found := gatewaySubscriptionByID(id)
+	if !found {
+		st.accounts[id] = nil
+		return nil
+	}
+	ctx := st.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	acct := readSubscriptionAccount(ctx, sub, st.s.subscriptionEnv())
+	st.accounts[id] = acct
+	return acct
+}
+
+// readSubscriptionAccount reads the stored account locally; a subscription
+// without the capability, without a login, or with an unreadable one answers
+// nil — the surface shows its state alone.
+func readSubscriptionAccount(ctx context.Context, sub subscription.Subscription, env subscription.Env) *subscriptionAccount {
+	reader, ok := sub.(subscription.AccountReader)
+	if !ok {
+		return nil
+	}
+	acct, ok, err := reader.Account(ctx, env)
+	if err != nil {
+		slog.Debug("subscription account read failed", "id", sub.ID(), "err", err)
+		return nil
+	}
+	if !ok || acct.Name == "" {
+		return nil
+	}
+	return &subscriptionAccount{Name: acct.Name, Detail: acct.Detail, EnvKey: acct.EnvKey, SharedPath: acct.SharedPath}
+}
+
+// subscriptionCanLogout says whether a surface may offer the sign-out: the
+// subscription can remove its login, one is stored (any state but missing —
+// dead is included, because a dead login is exactly the one to remove), and
+// the environment is not the one providing the sign-in.
+func subscriptionCanLogout(sub subscription.Subscription, state string, acct *subscriptionAccount) bool {
+	if _, ok := sub.(subscription.LogoutRemover); !ok {
+		return false
+	}
+	if state == "" || state == signInStateMissing {
+		return false
+	}
+	return acct == nil || !acct.EnvKey
+}
+
 // handleSubscriptions serves the registry: every subscription a surface offers,
 // in display order, with its state.
 func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -152,11 +234,14 @@ func (s *Server) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 	out := make([]subscriptionRow, 0, len(registry))
 	for _, sub := range registry {
 		label, labelZH := sub.Label()
+		state := states.of(sub.ID())
 		out = append(out, subscriptionRow{
-			ID:    sub.ID(),
-			Name:  llmText(r, labelZH, label),
-			Flows: sub.Flows(),
-			State: states.of(sub.ID()),
+			ID:        sub.ID(),
+			Name:      llmText(r, labelZH, label),
+			Flows:     sub.Flows(),
+			State:     state,
+			Account:   states.accountOf(sub.ID()),
+			CanLogout: subscriptionCanLogout(sub, state, states.accountOf(sub.ID())),
 		})
 	}
 	writeJSON(w, out)
@@ -317,6 +402,49 @@ func (s *Server) handleSubscriptionProvision(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, map[string]any{"ids": ids})
+}
+
+// handleSubscriptionLogout removes a stored sign-in. The write is deliberately
+// narrow: model rows stay (their source_state flips on the next read, and
+// calling fails until the user signs in again), nothing is re-probed for the
+// response — the page refreshes itself — and an external source that will sign
+// the machine back in is a 409, so the page can say so instead of promising a
+// signed-out state.
+func (s *Server) handleSubscriptionLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	sub, ok := s.subscriptionRoute(w, r)
+	if !ok {
+		return
+	}
+	remover, ok := sub.(subscription.LogoutRemover)
+	if !ok {
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{
+			"error": llmText(r, "这个订阅没有可退出的登录", "this subscription has no login to remove"),
+		})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), modelsDiscoveryTimeout)
+	defer cancel()
+	err := remover.Logout(ctx, s.subscriptionEnv())
+	if err != nil {
+		if errors.Is(err, subscription.ErrExternalLogin) {
+			writeJSONStatus(w, http.StatusConflict, map[string]any{
+				"error": llmText(r, "本机保存的登录已删除，但环境变量或官方客户端仍会让这台机器重新登录",
+					"The stored login was removed, but an environment variable or the official client will sign this machine back in"),
+				"external_login": true,
+			})
+			return
+		}
+		slog.Debug("subscription logout failed", "subscription", sub.ID(), "err", err)
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+			"error": llmText(r, "退出失败，请重试", "sign-out failed; try again"),
+		})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // subscriptionDefaultTarget answers the agent whose default a new model may

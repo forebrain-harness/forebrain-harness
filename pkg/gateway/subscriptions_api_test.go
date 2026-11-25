@@ -4,10 +4,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/forebrain-harness/forebrain-harness/pkg/process"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
@@ -167,4 +171,108 @@ func TestSubscriptionsAPIProvision(t *testing.T) {
 	require.Equal(t, "ark-pasted-placeholder", sent.Key)
 
 	require.Equal(t, http.StatusNotFound, do(http.MethodGet, "/api/subscriptions/zhipuai/offers").Code)
+}
+
+// The account a stored sign-in names rides the registry's list, and the logout
+// route answers every way its contract reads: 204 with the stub asked, 409
+// with the external source named, 404 for a subscription that cannot remove a
+// login and for an id no subscription carries. The rows the sign-in wrote
+// survive the sign-out; the next listing marks their source missing.
+func TestSubscriptionsAPIAccountAndLogout(t *testing.T) {
+	s, do := modelsPageServer(t)
+	chatGPT, openCode := loginStubs(t)
+	chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
+	chatGPT.hasAccount = true
+	chatGPT.account = subscription.Account{Name: "dev@example.test", Detail: "plus", SharedPath: "/Users/codex/.codex/auth.json"}
+	openCode.state = turn.SignInCheck{State: turn.SignInUsable}
+	openCode.hasAccount = true
+	openCode.account = subscription.Account{Name: "OPENCODE_API_KEY", EnvKey: true}
+	previous := gatewaySubscriptions
+	gatewaySubscriptions = func() []subscription.Subscription { return []subscription.Subscription{chatGPT, openCode} }
+	t.Cleanup(func() { gatewaySubscriptions = previous })
+
+	rec := do(http.MethodGet, "/api/subscriptions")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list []struct {
+		ID      string `json:"id"`
+		State   string `json:"state"`
+		Account *struct {
+			Name       string `json:"name"`
+			Detail     string `json:"detail"`
+			EnvKey     bool   `json:"env_key"`
+			SharedPath string `json:"shared_path"`
+		} `json:"account"`
+		CanLogout bool `json:"can_logout"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &list))
+	require.Len(t, list, 2)
+	require.Equal(t, "chatgpt", list[0].ID)
+	require.NotNil(t, list[0].Account, "a named account must ride the row")
+	require.Equal(t, "dev@example.test", list[0].Account.Name)
+	require.Equal(t, "plus", list[0].Account.Detail)
+	require.Equal(t, "/Users/codex/.codex/auth.json", list[0].Account.SharedPath)
+	require.True(t, list[0].CanLogout)
+	// The environment's key is a sign-in this surface cannot remove: it is
+	// named, and no sign-out is offered for it.
+	require.NotNil(t, list[1].Account)
+	require.Equal(t, "OPENCODE_API_KEY", list[1].Account.Name)
+	require.True(t, list[1].Account.EnvKey)
+	require.False(t, list[1].CanLogout)
+
+	// A row this sign-in wrote survives the sign-out, and the next listing
+	// marks its source missing — the login is the credential, not the row.
+	empty := ""
+	rowID, err := process.UpsertLLMModel(context.Background(), s.Env.SQL, process.LLMModelInput{
+		Provider: "chatgpt", Model: "gpt-5-codex", BaseURL: "https://chatgpt.com/backend-api/codex",
+		APIKey: &empty, Source: "chatgpt",
+	})
+	require.NoError(t, err)
+
+	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/logout")
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	require.Empty(t, rec.Body.String(), "204 answers nothing; the page refreshes itself")
+	require.Equal(t, 1, chatGPT.logoutCount())
+
+	chatGPT.state = turn.SignInCheck{State: turn.SignInMissing}
+	rows, _ := llmModelRows(t, do)
+	require.Len(t, rows, 1, "the model rows must survive the sign-out")
+	require.Equal(t, rowID, rows[0]["id"])
+	require.Equal(t, "missing", rows[0]["source_state"])
+
+	// An external source answers 409 and says so, so the page never promises a
+	// signed-out state it did not reach.
+	chatGPT.logoutErr = fmt.Errorf("unset QODER_PERSONAL_ACCESS_TOKEN: %w", subscription.ErrExternalLogin)
+	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/logout")
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"external_login":true`)
+	require.Contains(t, rec.Body.String(), "重新登录")
+	chatGPT.logoutErr = nil
+
+	// A subscription without the capability answers 404 in both languages'
+	// words: there is no login it can remove.
+	baseOnly := struct{ subscription.Subscription }{chatGPT}
+	prevSubs := gatewaySubscriptions
+	gatewaySubscriptions = func() []subscription.Subscription { return []subscription.Subscription{baseOnly} }
+	prevByID := gatewaySubscriptionByID
+	gatewaySubscriptionByID = func(id string) (subscription.Subscription, bool) {
+		if strings.EqualFold(strings.TrimSpace(id), "chatgpt") {
+			return baseOnly, true
+		}
+		return nil, false
+	}
+	t.Cleanup(func() {
+		gatewaySubscriptions = prevSubs
+		gatewaySubscriptionByID = prevByID
+	})
+	rec = do(http.MethodPost, "/api/subscriptions/chatgpt/logout")
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "没有可退出的登录")
+
+	// An id no subscription carries is the same 404 every route answers.
+	rec = do(http.MethodPost, "/api/subscriptions/nosuch/logout")
+	require.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "没有这个订阅")
+
+	// Only POST is served; anything else is the routes' uniform 405.
+	require.Equal(t, http.StatusMethodNotAllowed, do(http.MethodGet, "/api/subscriptions/chatgpt/logout").Code)
 }

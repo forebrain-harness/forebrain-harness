@@ -73,3 +73,21 @@ describe('ModelsTable', () => {
     expect(wrapper.findAll('[data-testid="models-cell-pinned"]')).toHaveLength(1)
   })
 })
+// The key cell names who a login-backed row is signed in as — the account's
+// own name rides under 「账号登录」 — and a row with no account to name keeps
+// the cell it always had.
+describe('ModelsTable account name', () => {
+  it('shows the source account under the account sign-in label', () => {
+    const wrapper = mountTable([
+      row({ source: 'chatgpt', sourceAccount: { name: 'dev@example.test', detail: 'plus' } }),
+    ])
+    expect(wrapper.get('[data-testid="models-cell-account"]').text()).toBe('Account sign-in')
+    expect(wrapper.get('[data-testid="models-cell-account-name"]').text()).toBe('dev@example.test')
+  })
+
+  it('keeps the plain account sign-in cell when the row names no account', () => {
+    const wrapper = mountTable([row({ source: 'chatgpt' })])
+    expect(wrapper.find('[data-testid="models-cell-account-name"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="models-cell-account"]').text()).toBe('Account sign-in')
+  })
+})

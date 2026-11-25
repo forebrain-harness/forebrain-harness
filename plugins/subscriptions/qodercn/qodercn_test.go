@@ -1669,3 +1669,113 @@ func TestPrepareRequestHeadersStaysUnderTheLatencyBudget(t *testing.T) {
 		t.Fatalf("PrepareRequestHeaders averages %s a call, want < 5ms", perCall)
 	}
 }
+
+// --- the account the stored login names, and the sign-out -------------------
+
+// The account is the login's own identity, read locally from whichever home
+// holds the fresher copy: the email first, then the display name, then the uid.
+func TestQoderCNAccountNamesTheStoredLogin(t *testing.T) {
+	ctx := context.Background()
+
+	db := testState(t)
+	home := t.TempDir()
+	saveCreds := func(creds Credentials) {
+		t.Helper()
+		if err := saveCredentials(ctx, db, home, creds); err != nil {
+			t.Fatalf("save credentials: %v", err)
+		}
+	}
+
+	saveCreds(Credentials{UID: "uid-1", Name: "Wang Bin", Email: "dev@example.test", AccessToken: "at", ExpiresAt: time.Now().Add(time.Hour)})
+	account, found, err := (qoderCNSubscription{}).Account(ctx, subscription.Env{DB: db, Home: home})
+	if err != nil || !found {
+		t.Fatalf("account = (%v, %v, %v), want the stored login named", account, found, err)
+	}
+	if account.Name != "dev@example.test" {
+		t.Fatalf("name = %q, want the email", account.Name)
+	}
+
+	// No email: the display name is the name.
+	saveCreds(Credentials{UID: "uid-2", Name: "Wang Bin", AccessToken: "at", ExpiresAt: time.Now().Add(time.Hour)})
+	account, found, err = (qoderCNSubscription{}).Account(ctx, subscription.Env{DB: db, Home: home})
+	if err != nil || !found {
+		t.Fatalf("account = (%v, %v, %v), want the stored login named", account, found, err)
+	}
+	if account.Name != "Wang Bin" {
+		t.Fatalf("name = %q, want the display name", account.Name)
+	}
+
+	// No email, no name: the uid is the name.
+	saveCreds(Credentials{UID: "uid-3", AccessToken: "at", ExpiresAt: time.Now().Add(time.Hour)})
+	account, _, err = (qoderCNSubscription{}).Account(ctx, subscription.Env{DB: db, Home: home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Name != "uid-3" {
+		t.Fatalf("name = %q, want the uid", account.Name)
+	}
+
+	// No login stored: absent is an answer.
+	account, found, err = (qoderCNSubscription{}).Account(ctx, subscription.Env{DB: testState(t), Home: t.TempDir()})
+	if err != nil || found {
+		t.Fatalf("account = (%v, %v, %v), want absent", account, found, err)
+	}
+}
+
+// Logout removes the login from both homes it lives in; an external source
+// answers ErrExternalLogin with the login already removed.
+func TestQoderCNLogoutRemovesTheLoginAndAnswersExternalSources(t *testing.T) {
+	ctx := context.Background()
+
+	// A plain logout: both homes lose the login, and nothing external stands
+	// in the way (the official client's probe points at a scratch dir).
+	db := testState(t)
+	home := t.TempDir()
+	official := t.TempDir()
+	withQoderHome(t, official)
+	saveCreds := func() {
+		t.Helper()
+		if err := saveCredentials(ctx, db, home, Credentials{
+			UID: "uid-1", Email: "dev@example.test", AccessToken: "at", ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("save credentials: %v", err)
+		}
+	}
+	saveCreds()
+	if err := (qoderCNSubscription{}).Logout(ctx, subscription.Env{DB: db, Home: home}); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if _, found, err := loadCredentials(ctx, db, home); err != nil || found {
+		t.Fatalf("after logout the login = (%v, %v), want it gone from both homes", found, err)
+	}
+
+	// A configured personal access token: the stored login is removed, and
+	// the surface is told the environment signs the machine in again.
+	saveCreds()
+	t.Setenv(personalTokenEnv, "pat-from-env")
+	err := (qoderCNSubscription{}).Logout(ctx, subscription.Env{DB: db, Home: home})
+	if !errors.Is(err, subscription.ErrExternalLogin) {
+		t.Fatalf("PAT logout = %v, want ErrExternalLogin", err)
+	}
+	if _, found, loadErr := loadCredentials(ctx, db, home); loadErr != nil || found {
+		t.Fatalf("after an external logout the login = (%v, %v), want it removed anyway", found, loadErr)
+	}
+
+	// The official client's own login file: same answer, same honesty. The
+	// file is only ever read, never decrypted or written here.
+	t.Setenv(personalTokenEnv, "")
+	saveCreds()
+	if err := os.MkdirAll(filepath.Join(official, ".auth"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(official, ".auth", "user"), []byte("official-login"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = (qoderCNSubscription{}).Logout(ctx, subscription.Env{DB: db, Home: home})
+	if !errors.Is(err, subscription.ErrExternalLogin) {
+		t.Fatalf("official-client logout = %v, want ErrExternalLogin", err)
+	}
+	if _, found, loadErr := loadCredentials(ctx, db, home); loadErr != nil || found {
+		t.Fatalf("after an external logout the login = (%v, %v), want it removed anyway", found, loadErr)
+	}
+}

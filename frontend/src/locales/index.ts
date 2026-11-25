@@ -2538,6 +2538,22 @@ const zh = {
   'models.stateMissing': '未登录',
   'models.stateDead': '登录已失效',
   'models.stateUnreachable': '无法确认登录状态',
+  'models.logout': '退出登录',
+  'models.logoutTitle': '退出登录？',
+  'models.logoutMessage':
+    '将删除本机保存的登录凭据。已添加的模型会保留，但在重新登录前无法调用。',
+  'models.logoutConfirm': '退出登录',
+  'models.logoutExternal':
+    '本机保存的登录已删除，但环境变量或官方客户端仍会让这台机器重新登录。',
+  'models.logoutFailed': '退出失败，请重试',
+  'models.logoutShared':
+    '这份凭据与 Codex CLI 共用（{path}），退出会同时让 Codex CLI 退出登录。',
+  'models.switchAccount': '换个账号登录',
+  'models.accountEnvKey': '环境变量提供',
+  'models.envKeyHint':
+    '这个登录由环境变量 {name} 提供，无法在这里退出；请在启动 Forebrain Harness 的终端里 unset 后重启。',
+  'models.accountUnknown': '登录有效，未存储账号名',
+  'models.currentAccount': '当前账号',
   'models.subscribeTitle': '订阅登录',
   'models.subscribeStep1': '第 1 步，共 3 步：选择订阅',
   'models.subscribeStep2': '第 2 步，共 3 步：登录',
@@ -5111,6 +5127,22 @@ const en: Record<keyof typeof zh, string> = {
   'models.stateMissing': 'Not signed in',
   'models.stateDead': 'Sign-in expired',
   'models.stateUnreachable': 'Sign-in state unknown',
+  'models.logout': 'Sign out',
+  'models.logoutTitle': 'Sign out?',
+  'models.logoutMessage':
+    'This removes the login saved on this machine. The models you added stay, but cannot call until you sign in again.',
+  'models.logoutConfirm': 'Sign out',
+  'models.logoutExternal':
+    'The stored login was removed, but an environment variable or the official client will sign this machine back in.',
+  'models.logoutFailed': 'Sign-out failed; try again',
+  'models.logoutShared':
+    'This credential is shared with the Codex CLI ({path}); signing out here signs the Codex CLI out too.',
+  'models.switchAccount': 'Sign in with another account',
+  'models.accountEnvKey': 'From the environment',
+  'models.envKeyHint':
+    'This sign-in comes from the {name} environment variable; it cannot be removed here. Unset it in the shell that starts Forebrain Harness, then restart.',
+  'models.accountUnknown': 'The sign-in stands; no account name is stored',
+  'models.currentAccount': 'Account',
   'models.subscribeTitle': 'Subscription sign-in',
   'models.subscribeStep1': 'Step 1 of 3: choose a subscription',
   'models.subscribeStep2': 'Step 2 of 3: sign in',

@@ -42,6 +42,15 @@
         {{ bullets(row) }}<b>{{ row.apiKeyLast4 }}</b>
       </span>
       <BadgeComponent v-else variant="warning" data-testid="models-cell-key-unset">{{ t('models.keyUnset') }}</BadgeComponent>
+      <!-- The account's own name rides under 「账号登录」: the person reading the
+           table sees who the machine is signed in as without opening anything. -->
+      <span
+        v-if="row.loginBacked && row.sourceAccount"
+        class="keyacct"
+        data-testid="models-cell-account-name"
+      >
+        {{ row.sourceAccount.name }}
+      </span>
     </template>
 
     <template #cell-actions="{ row }">
@@ -195,6 +204,16 @@ function bullets(row: LlmModelRow): string {
 .key-none {
   font-size: 12px;
   color: var(--forebrain-muted-text);
+}
+.keyacct {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--forebrain-muted-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 :deep(.models-row--flash > td) {
   animation: models-flash 1.6s ease-out 1;

@@ -16,7 +16,15 @@
         >
           <span class="subr__t">
             <b>{{ subscription.name }}</b>
-            <span>{{ describe(subscription) }}</span>
+            <!-- A stored sign-in's account replaces the flow sentence: the
+                 person is choosing between accounts, not between protocols. -->
+            <span
+              v-if="subscription.account"
+              :data-testid="`models-sub-account-${subscription.id}`"
+            >
+              {{ accountLine(subscription.account) }}
+            </span>
+            <span v-else>{{ describe(subscription) }}</span>
           </span>
           <BadgeComponent :variant="stateVariant(subscription.state)" :data-testid="`models-sub-state-${subscription.id}`">
             {{ stateText(subscription) }}
@@ -101,6 +109,50 @@
 
     <!-- Step 3: what the sign-in unlocked. -->
     <template v-else>
+      <!-- What the sign-out ended in: an external source saying the machine
+           will be signed in again, or a failure worth retrying. -->
+      <p
+        v-if="notice"
+        class="noticebar"
+        :class="{ bad: notice === 'failed' }"
+        :role="notice === 'failed' ? 'alert' : 'status'"
+        :data-testid="notice === 'external' ? 'models-logout-external' : 'models-logout-failed'"
+      >
+        {{ notice === 'external' ? t('models.logoutExternal') : t('models.logoutFailed') }}
+      </p>
+      <!-- Who the machine is signed in as, and the way out: the sign-out a
+           confirmation owns, and the switch that runs the flow again. -->
+      <div v-if="current" class="acct" data-testid="models-login-account">
+        <div class="acct__t">
+          <b>{{ current.account?.name ?? t('models.accountUnknown') }}</b>
+          <span v-if="current.account">{{ accountDetail(current.account) }}</span>
+          <BadgeComponent :variant="stateVariant(current.state)">{{ stateText(current) }}</BadgeComponent>
+        </div>
+        <div v-if="!current.account?.envKey" class="acct__acts">
+          <Button
+            v-if="current.canLogout"
+            type="button"
+            variant="ghost"
+            class="forebrain-btn forebrain-btn--ghost acct-logout h-auto text-xs"
+            data-testid="models-logout"
+            @click="logoutOpen = true"
+          >
+            {{ t('models.logout') }}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            class="forebrain-btn forebrain-btn--ghost h-auto text-xs"
+            data-testid="models-switch-account"
+            @click="switchAccount"
+          >
+            {{ t('models.switchAccount') }}
+          </Button>
+        </div>
+      </div>
+      <p v-if="current?.account?.envKey" class="envhint" data-testid="models-login-envkey">
+        {{ t('models.envKeyHint', { name: current.account.name }) }}
+      </p>
       <p v-if="offersError" class="bad" data-testid="models-offers-error">{{ offersError }}</p>
       <OfferPicker
         v-else
@@ -179,6 +231,19 @@
       </template>
     </template>
   </ForebrainModal>
+
+  <!-- The sign-out asks first: removing a login is irreversible, and the models
+       it added only work again once the person signs back in. A credential file
+       another client shares is named, so its sign-out is never silent. -->
+  <ConfirmDialog
+    :open="logoutOpen"
+    :title="t('models.logoutTitle')"
+    :message="logoutMessage"
+    :confirm-label="t('models.logoutConfirm')"
+    danger
+    @cancel="logoutOpen = false"
+    @confirm="doLogout"
+  />
 </template>
 
 <script setup lang="ts">
@@ -199,6 +264,7 @@ import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainModal from '@/components/common/ForebrainModal.vue'
 import OfferPicker from '@/components/models/OfferPicker.vue'
 import {
@@ -206,6 +272,7 @@ import {
   GatewayHttpError,
   getErrorMessage,
   type ProviderLoginStatus,
+  type SubscriptionAccount,
   type SubscriptionOffer,
   type SubscriptionRow,
 } from '@/lib/api'
@@ -227,7 +294,7 @@ const props = withDefaults(
   { initialId: '', known: () => [] },
 )
 
-const emit = defineEmits<{ close: []; saved: [] }>()
+const emit = defineEmits<{ close: []; saved: []; changed: [] }>()
 
 const { t, locale } = useI18n()
 
@@ -262,6 +329,11 @@ const pastedKey = ref('')
 const keyConsoleURL = ref('')
 /** The gateway answered that a chosen plan needs a key it cannot fetch. */
 const keyPasteAsked = ref(false)
+/** The sign-out's confirmation is open. */
+const logoutOpen = ref(false)
+/** What the last sign-out ended in: an external source that will sign this
+ *  machine in again, or a failure worth retrying; '' is nothing to say. */
+const notice = ref<'' | 'external' | 'failed'>('')
 
 let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -311,6 +383,28 @@ function stateText(subscription: SubscriptionRow): string {
   return subscription.state === 'usable' ? t('models.stateUsable') : t('models.subscribeNotLoggedIn')
 }
 
+/** What the account's own line says: the name, with the plan or organization
+ *  beside it — the environment's own key names the variable instead of a
+ *  detail the page would have to guess at. */
+function accountLine(account: SubscriptionAccount): string {
+  const detail = accountDetail(account)
+  return detail ? `${account.name} · ${detail}` : account.name
+}
+
+/** The detail beside a name, in one place: the environment's key reads as
+ *  "provided by the environment", everything else as the vendor's own word. */
+function accountDetail(account: SubscriptionAccount): string {
+  return account.envKey ? t('models.accountEnvKey') : (account.detail ?? '')
+}
+
+/** The sign-out confirmation's message: what is removed, and — when the
+ *  credential file is another client's own — which client signs out with it. */
+const logoutMessage = computed(() => {
+  const shared = current.value?.account?.sharedPath
+  const text = t('models.logoutMessage')
+  return shared ? text + t('models.logoutShared', { path: shared }) : text
+})
+
 function stopPoll(): void {
   if (timer) {
     clearTimeout(timer)
@@ -344,6 +438,8 @@ function reset(): void {
   pastedKey.value = ''
   keyConsoleURL.value = ''
   keyPasteAsked.value = false
+  logoutOpen.value = false
+  notice.value = ''
 }
 
 watch(
@@ -359,14 +455,17 @@ watch(
   { immediate: true },
 )
 
-async function loadSubscriptions(): Promise<void> {
+/** Rereads the subscriptions; `pick` says whether the initial id (the drawer's
+ *  relogin entry) should be acted on — a reread that follows a sign-out must
+ *  not walk back into the login it just removed. */
+async function loadSubscriptions(pick = true): Promise<void> {
   try {
     subscriptions.value = await forebrainApi.subscriptions()
   } catch (cause) {
     loginError.value = getErrorMessage(cause)
     return
   }
-  const wanted = props.initialId ? subscriptions.value.find((entry) => entry.id === props.initialId) : undefined
+  const wanted = pick && props.initialId ? subscriptions.value.find((entry) => entry.id === props.initialId) : undefined
   if (wanted) pickSubscription(wanted)
 }
 
@@ -385,7 +484,7 @@ function pickSubscription(subscription: SubscriptionRow): void {
   void startLogin()
 }
 
-async function startLogin(): Promise<void> {
+async function startLogin(force = false): Promise<void> {
   const subscription = current.value
   if (!subscription) return
   stopPoll()
@@ -397,12 +496,17 @@ async function startLogin(): Promise<void> {
   userCode.value = ''
   pasteUrl.value = ''
   pasteError.value = ''
+  notice.value = ''
   try {
-    const started = await forebrainApi.startProviderLogin(subscription.id)
+    // force skips the gateway's "already signed in" shortcut: switching
+    // accounts is the point, so the flow runs even on a working login.
+    const started = await forebrainApi.startProviderLogin(subscription.id, { force })
     if (current.value?.id !== subscription.id) return
     // A reusable sign-in on this machine is already the finished one: there is
-    // nothing to poll and no code to confirm.
+    // nothing to poll and no code to confirm. It says who it is, so the
+    // account bar is true without another round trip.
     if (started.status === 'complete') {
+      applyAccount(subscription.id, started.account, started.canLogout)
       await loadOffers()
       return
     }
@@ -420,6 +524,13 @@ async function startLogin(): Promise<void> {
       cause instanceof GatewayHttpError && cause.status === 409 ? t('models.loginBusy') : t('models.loginFailed')
     pending.value = true
   }
+}
+
+/** A login that just completed names its account: the bar the third step draws
+ *  reads the fresh answer rather than the stale row the first step listed. */
+function applyAccount(id: string, account?: SubscriptionAccount, canLogout?: boolean): void {
+  if (current.value?.id !== id) return
+  current.value = { ...current.value, account: account ?? undefined, canLogout: canLogout ?? false }
 }
 
 function poll(id: string, login: string): void {
@@ -456,6 +567,7 @@ async function pollOnce(id: string, login: string): Promise<void> {
     return
   }
   if (status.status === 'complete') {
+    applyAccount(id, status.account, status.canLogout)
     await loadOffers()
     return
   }
@@ -508,6 +620,49 @@ async function submitCallback(): Promise<void> {
 
 function restart(): void {
   void startLogin()
+}
+
+/** Switching accounts runs the sign-in flow again on purpose — the gateway's
+ *  "already signed in" shortcut is exactly what must not fire — and any flow
+ *  still running from the same modal is ended first. */
+function switchAccount(): void {
+  cancelRunning()
+  stopPoll()
+  step.value = 2
+  void startLogin(true)
+}
+
+/** The confirmed sign-out: the stored login is removed, the rows it wrote
+ *  stay, and the page that owns the table hears about it so it can refresh.
+ *  An external source answering 409 is told as it is — the stored login was
+ *  removed, but the machine will be signed in again — and the list is reread
+ *  so the account bar names whoever holds the login now. */
+async function doLogout(): Promise<void> {
+  const subscription = current.value
+  if (!subscription) return
+  logoutOpen.value = false
+  notice.value = ''
+  try {
+    await forebrainApi.logoutSubscription(subscription.id)
+  } catch (cause) {
+    if (cause instanceof GatewayHttpError && cause.payload?.externalLogin) {
+      notice.value = 'external'
+    } else {
+      notice.value = 'failed'
+      return
+    }
+  }
+  emit('changed')
+  await loadSubscriptions(false)
+  const fresh = subscriptions.value.find((entry) => entry.id === subscription.id)
+  if (fresh) current.value = fresh
+  if (notice.value === 'external') {
+    // The machine is signed in again by whatever answered 409: the bar keeps
+    // showing whoever the reread found, and the person decides what to do.
+    return
+  }
+  current.value = null
+  step.value = 1
 }
 
 async function loadOffers(): Promise<void> {
@@ -684,6 +839,65 @@ onBeforeUnmount(() => {
   border: 1px solid var(--forebrain-divider);
   border-radius: 10px;
   background: var(--forebrain-bg-alt);
+}
+.acct {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+  padding: 11px 14px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 10px;
+  background: var(--forebrain-bg-alt);
+}
+.acct__t {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.acct__t b {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.acct__t span {
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+}
+.acct__acts {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+.acct-logout {
+  color: var(--forebrain-danger);
+}
+.acct-logout:hover {
+  color: var(--forebrain-danger);
+}
+.envhint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--forebrain-muted-text);
+  line-height: 1.6;
+}
+.noticebar {
+  margin: 10px 0 0;
+  padding: 9px 12px;
+  border: 1px solid var(--forebrain-warning);
+  border-radius: 8px;
+  background: var(--forebrain-warning-soft);
+  font-size: 12.5px;
+  color: var(--forebrain-warning);
+  line-height: 1.55;
+}
+.noticebar.bad {
+  border-color: var(--forebrain-danger);
+  background: var(--forebrain-surface);
+  color: var(--forebrain-danger);
 }
 .auth p {
   margin: 0;

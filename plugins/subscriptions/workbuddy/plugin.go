@@ -8,6 +8,7 @@ package workbuddy
 import (
 	"context"
 	"errors"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -196,6 +198,41 @@ func (workBuddySubscription) Probe(ctx context.Context, env subscription.Env) tu
 		return turn.SignInCheck{State: turn.SignInUnreachable, Err: err}
 	}
 	return turn.SignInCheck{State: turn.SignInUsable}
+}
+
+// Account names who the stored login belongs to, read locally from the
+// credential — no vendor call. The display name is the identity; the uid
+// stands in when the login carried none, and the account type rides along as
+// the detail.
+func (workBuddySubscription) Account(ctx context.Context, env subscription.Env) (subscription.Account, bool, error) {
+	creds, ok, err := loadCredentials(ctx, env.DB, env.Home)
+	if err != nil || !ok {
+		return subscription.Account{}, false, err
+	}
+	name := creds.Name
+	if name == "" {
+		name = creds.UID
+	}
+	if name == "" {
+		return subscription.Account{}, false, nil
+	}
+	return subscription.Account{Name: name, Detail: creds.AccountType}, true, nil
+}
+
+// Logout removes the stored login from both homes it can live in — the state
+// store and the credential file. There is no external source for a WorkBuddy
+// login: this plugin signs in for itself and never reads the desktop app's
+// own files, so once both are gone the machine is signed out.
+func (workBuddySubscription) Logout(ctx context.Context, env subscription.Env) error {
+	if env.DB != nil {
+		if err := (&state.ConfigStore{DB: env.DB}).SaveCredential(ctx, credentialSection, nil); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(credentialPath(env.Home)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Start runs the external-link sign-in. The handle it returns publishes the

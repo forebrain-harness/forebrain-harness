@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -139,4 +140,85 @@ func TestOpenCodeProvisionWritesKeylessRowsOfItsOwnSource(t *testing.T) {
 func TestOpenCodeRefreshKeyHasNothingToRefresh(t *testing.T) {
 	err := (openCodeGo{}).RefreshKey(context.Background(), Env{Home: t.TempDir()}, "some-row-id")
 	require.ErrorIs(t, err, ErrNoKeyToRefresh)
+}
+
+// The account is the login's own identity, read locally: the email with the
+// organization beside it, the account id when the login carried no email. With
+// no stored login but OPENCODE_API_KEY set, the account is the variable
+// itself, marked EnvKey — the environment is holding the sign-in, so no
+// surface may offer a logout for it.
+func TestOpenCodeAccountNamesTheStoredLoginOrTheEnvironmentKey(t *testing.T) {
+	ctx := context.Background()
+
+	env := testEnv(t)
+	require.NoError(t, opencode.Save(opencode.DefaultPath(env.Home), opencode.Credentials{
+		AccessToken: "at", RefreshToken: "rt", AccountID: "acct-1", Email: "dev@example.test", OrgName: "Example Org",
+	}))
+	account, found, err := (openCodeGo{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: "dev@example.test", Detail: "Example Org"}, account)
+
+	// No email: the account id is the name.
+	env = testEnv(t)
+	require.NoError(t, opencode.Save(opencode.DefaultPath(env.Home), opencode.Credentials{
+		AccessToken: "at", RefreshToken: "rt", AccountID: "acct-2",
+	}))
+	account, found, err = (openCodeGo{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: "acct-2"}, account)
+
+	// No stored login and no environment key: absent is an answer.
+	account, found, err = (openCodeGo{}).Account(ctx, testEnv(t))
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, Account{}, account)
+
+	// No stored login, the environment key set: the variable is the account.
+	t.Setenv(opencode.APIKeyEnv, "sk-from-env")
+	account, found, err = (openCodeGo{}).Account(ctx, testEnv(t))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: "OPENCODE_API_KEY", EnvKey: true}, account)
+}
+
+// Logout answers the environment's honesty in every combination: a stored
+// login is always removed first, and ErrExternalLogin says what — not this
+// store — will sign the machine in again.
+func TestOpenCodeLogoutAnswersTheEnvironmentHonesty(t *testing.T) {
+	ctx := context.Background()
+
+	// Nothing stored, nothing in the environment: a plain success.
+	require.NoError(t, (openCodeGo{}).Logout(ctx, testEnv(t)))
+
+	// Nothing stored, the environment key set: nothing to remove, so the
+	// surface must say the variable still signs this machine in.
+	t.Setenv(opencode.APIKeyEnv, "sk-from-env")
+	err := (openCodeGo{}).Logout(ctx, testEnv(t))
+	require.ErrorIs(t, err, ErrExternalLogin)
+
+	// A stored login, the environment key set: the login is removed and the
+	// external source is still named.
+	env := testEnv(t)
+	path := opencode.DefaultPath(env.Home)
+	require.NoError(t, opencode.Save(path, opencode.Credentials{AccessToken: "at", RefreshToken: "rt"}))
+	err = (openCodeGo{}).Logout(ctx, env)
+	require.ErrorIs(t, err, ErrExternalLogin)
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatal("the stored login survived a logout that answered ErrExternalLogin")
+	}
+
+	// A stored login, nothing in the environment: gone, and no complaint.
+	t.Setenv(opencode.APIKeyEnv, "")
+	env = testEnv(t)
+	path = opencode.DefaultPath(env.Home)
+	require.NoError(t, opencode.Save(path, opencode.Credentials{AccessToken: "at", RefreshToken: "rt"}))
+	require.NoError(t, (openCodeGo{}).Logout(ctx, env))
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatal("the stored login survived the logout")
+	}
+	raw, err := opencode.LoadStoredCredentials(ctx, env.Home)
+	require.NoError(t, err)
+	require.Nil(t, raw)
 }

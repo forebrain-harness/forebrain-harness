@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/llm/opencode"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 	"github.com/stretchr/testify/require"
@@ -127,6 +128,13 @@ type loginSubscription struct {
 	offers       []subscription.Offer
 	provisionErr error
 	refreshErr   error
+	// account is who the stored sign-in names, hasAccount whether one is
+	// stored at all, and accountErr what a failing read answers. logoutErr is
+	// what the sign-out answers; nil removes the login.
+	account    subscription.Account
+	hasAccount bool
+	accountErr error
+	logoutErr  error
 	// handle is the sign-in this subscription hands the gateway. A test sets url,
 	// code and answer before starting it.
 	handle *loginHandle
@@ -134,10 +142,11 @@ type loginSubscription struct {
 	mu sync.Mutex
 	// starts counts the flows begun, refreshed the rows RefreshKey was asked
 	// about, and provisions is what each write was told (plan 281's pasted key
-	// arrives through it).
-	starts     int
-	refreshed  []string
-	provisions []subscription.ProvisionOptions
+	// arrives through it). logoutCalls counts the sign-outs.
+	starts      int
+	refreshed   []string
+	provisions  []subscription.ProvisionOptions
+	logoutCalls int
 }
 
 // newLoginSubscription builds one stand-in at its defaults: a sign-in with no
@@ -203,6 +212,30 @@ func (sub *loginSubscription) RefreshKey(_ context.Context, _ subscription.Env, 
 	defer sub.mu.Unlock()
 	sub.refreshed = append(sub.refreshed, modelID)
 	return sub.refreshErr
+}
+
+// Account names the stored sign-in the way the real capability does: read
+// locally, with the account, whether one is stored, and the read's own error
+// all under the stub's control.
+func (sub *loginSubscription) Account(context.Context, subscription.Env) (subscription.Account, bool, error) {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	return sub.account, sub.hasAccount, sub.accountErr
+}
+
+// Logout answers the sign-out with the stub's own verdict, counting the calls.
+func (sub *loginSubscription) Logout(context.Context, subscription.Env) error {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	sub.logoutCalls++
+	return sub.logoutErr
+}
+
+// logoutCount is how many sign-outs this stand-in was asked for.
+func (sub *loginSubscription) logoutCount() int {
+	sub.mu.Lock()
+	defer sub.mu.Unlock()
+	return sub.logoutCalls
 }
 
 // loginHandle is one running stand-in sign-in: what the page polls, the address
@@ -454,6 +487,10 @@ func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
 			chatGPT, openCode := loginStubs(t)
 			chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
 			openCode.state = turn.SignInCheck{State: turn.SignInUsable}
+			chatGPT.hasAccount = true
+			chatGPT.account = subscription.Account{Name: "dev@example.test", Detail: "plus"}
+			openCode.hasAccount = true
+			openCode.account = subscription.Account{Name: opencode.APIKeyEnv, EnvKey: true}
 			s, do := loginAPIServer(t)
 			rec := do(http.MethodPost, "/api/auth/login/"+provider)
 			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -462,6 +499,12 @@ func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
 				Status   string `json:"status"`
 				BaseURL  string `json:"base_url"`
 				LoginID  string `json:"login_id"`
+				Account  *struct {
+					Name   string `json:"name"`
+					Detail string `json:"detail"`
+					EnvKey bool   `json:"env_key"`
+				} `json:"account"`
+				CanLogout bool `json:"can_logout"`
 			}
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 			require.Equal(t, provider, body.Provider)
@@ -471,8 +514,43 @@ func TestAuthLoginStartCompletesOnAUsableSavedLogin(t *testing.T) {
 			require.Zero(t, chatGPT.startCount()+openCode.startCount(),
 				"a usable saved login must not start a flow")
 			require.Empty(t, s.authLogins, "no login session may be registered")
+			// The shortcut says who the machine is signed in as, so the page can
+			// draw the account bar without another round trip.
+			require.NotNil(t, body.Account, "the completed login must name its account")
+			if provider == authLoginChatGPT {
+				require.Equal(t, "dev@example.test", body.Account.Name)
+				require.Equal(t, "plus", body.Account.Detail)
+				require.False(t, body.Account.EnvKey)
+				require.True(t, body.CanLogout)
+			} else {
+				// The environment's own key is a sign-in this surface cannot
+				// remove, so no sign-out is offered for it.
+				require.Equal(t, opencode.APIKeyEnv, body.Account.Name)
+				require.True(t, body.Account.EnvKey)
+				require.False(t, body.CanLogout)
+			}
 		})
 	}
+}
+
+// force=1 skips the usable shortcut: the page asked to replace the account, so
+// the flow runs even though the stored login still works.
+func TestAuthLoginStartForceRunsTheFlowOnAUsableSavedLogin(t *testing.T) {
+	chatGPT, openCode := loginStubs(t)
+	chatGPT.state = turn.SignInCheck{State: turn.SignInUsable}
+	openCode.state = turn.SignInCheck{State: turn.SignInUsable}
+	s, do := loginAPIServer(t)
+
+	rec := do(http.MethodPost, "/api/auth/login/"+authLoginOpenCode+"?force=1")
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var body struct {
+		LoginID string `json:"login_id"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.LoginID)
+	require.Equal(t, 1, openCode.startCount(), "force must run the flow on a working login")
+	require.Zero(t, chatGPT.startCount())
+	require.NotEmpty(t, s.authLogins, "the forced flow must be registered and pollable")
 }
 
 // Unreachable completes too: a listing that fails for a reason that is not the
@@ -675,4 +753,51 @@ func TestAuthLoginPastedCallbackNeverLeaksTheAddress(t *testing.T) {
 	final := awaitTerminal(t, do, authLoginChatGPT, id)
 	require.NotContains(t, final.URL, "SECRET-MARKER")
 	require.NotContains(t, final.Error, "SECRET-MARKER")
+}
+
+// A login that just completed answers who the machine is signed in as: the
+// completing poll reads the account locally (the flow's own state knows
+// nothing about it) and says whether the page may offer the sign-out.
+func TestAuthLoginCompleteCarriesTheAccountAndCanLogout(t *testing.T) {
+	chatGPT, openCode := loginStubs(t)
+	chatGPT.hasAccount = true
+	chatGPT.account = subscription.Account{Name: "dev@example.test", Detail: "plus"}
+	_, do := loginAPIServer(t)
+
+	id := startLogin(t, do, authLoginChatGPT)
+	awaitPending(t, do, authLoginChatGPT, id)
+
+	// Before the flow ends there is no account to show and nothing to sign
+	// out of yet.
+	code, pending := loginStatus(t, do, authLoginChatGPT, id)
+	require.Equal(t, http.StatusOK, code)
+	require.Equal(t, authLoginPending, pending.Status)
+	require.Nil(t, pending.Account)
+	require.False(t, pending.CanLogout)
+
+	chatGPT.handle.releaseOnce()
+	done := awaitTerminal(t, do, authLoginChatGPT, id)
+	require.Equal(t, authLoginComplete, done.Status)
+	require.NotNil(t, done.Account)
+	require.Equal(t, "dev@example.test", done.Account.Name)
+	require.Equal(t, "plus", done.Account.Detail)
+	require.True(t, done.CanLogout)
+	require.Zero(t, openCode.startCount())
+}
+
+// A stored login whose account reads no name answers nil, but the page may
+// still sign out of it: the login stands even when the name does not.
+func TestAuthLoginCompleteWithoutAnAccountStillOffersTheSignOut(t *testing.T) {
+	chatGPT, _ := loginStubs(t)
+	chatGPT.hasAccount = true
+	chatGPT.account = subscription.Account{}
+	_, do := loginAPIServer(t)
+
+	id := startLogin(t, do, authLoginChatGPT)
+	awaitPending(t, do, authLoginChatGPT, id)
+	chatGPT.handle.releaseOnce()
+	done := awaitTerminal(t, do, authLoginChatGPT, id)
+	require.Equal(t, authLoginComplete, done.Status)
+	require.Nil(t, done.Account)
+	require.True(t, done.CanLogout)
 }

@@ -2048,3 +2048,65 @@ func TestReadCapRefusalFollowsTheNormalizedBody(t *testing.T) {
 		t.Fatalf("other-refusal body = %+v, want it classified as something else", refusal)
 	}
 }
+
+// --- the account the stored login names, and the sign-out -------------------
+
+// The account is the login's own identity, read locally from whichever home
+// holds the fresher copy: the display name first, then the uid, with the
+// account type beside it.
+func TestWorkBuddyAccountNamesTheStoredLogin(t *testing.T) {
+	ctx := context.Background()
+
+	db := testState(t)
+	home := t.TempDir()
+	env := subscription.Env{DB: db, Home: home}
+
+	creds := freshCredentials()
+	storeCredentials(t, db, home, creds)
+	account, found, err := (workBuddySubscription{}).Account(ctx, env)
+	if err != nil || !found {
+		t.Fatalf("account = (%v, %v, %v), want the stored login named", account, found, err)
+	}
+	if account.Name != "Test Account" || account.Detail != "personal" {
+		t.Fatalf("account = (%q, %q), want the display name with the account type", account.Name, account.Detail)
+	}
+
+	// No name: the uid is the name.
+	creds.Name = ""
+	storeCredentials(t, db, home, creds)
+	account, _, err = (workBuddySubscription{}).Account(ctx, env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Name != "uid-1" {
+		t.Fatalf("name = %q, want the uid", account.Name)
+	}
+
+	// No login stored: absent is an answer.
+	account, found, err = (workBuddySubscription{}).Account(ctx, subscription.Env{DB: testState(t), Home: t.TempDir()})
+	if err != nil || found {
+		t.Fatalf("account = (%v, %v, %v), want absent", account, found, err)
+	}
+}
+
+// Logout removes the login from both homes it lives in. WorkBuddy has no
+// external source — this plugin signs in for itself — so a removal is the
+// whole sign-out.
+func TestWorkBuddyLogoutRemovesTheLoginFromBothHomes(t *testing.T) {
+	ctx := context.Background()
+
+	db := testState(t)
+	home := t.TempDir()
+	env := subscription.Env{DB: db, Home: home}
+	storeCredentials(t, db, home, freshCredentials())
+
+	if err := (workBuddySubscription{}).Logout(ctx, env); err != nil {
+		t.Fatalf("logout: %v", err)
+	}
+	if _, found, err := loadCredentials(ctx, db, home); err != nil || found {
+		t.Fatalf("after logout the login = (%v, %v), want it gone from both homes", found, err)
+	}
+	if _, err := os.Stat(credentialPath(home)); !os.IsNotExist(err) {
+		t.Fatalf("the credential file survived the logout: %v", err)
+	}
+}

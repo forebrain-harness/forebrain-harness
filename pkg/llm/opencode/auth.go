@@ -247,6 +247,23 @@ func SaveStoredCredentials(ctx context.Context, home string, raw json.RawMessage
 	return os.Rename(name, path)
 }
 
+// ClearStoredCredentials removes the stored login everywhere it can exist: the
+// installed store's row (a nil write is a delete) and the file at
+// DefaultPath(home). A missing file is fine — what matters afterwards is that
+// no login is stored, so a process without the store, or one whose database
+// later fails to open, cannot find the login still alive.
+func ClearStoredCredentials(ctx context.Context, home string) error {
+	if h, ok := credentialsStore.Load().(credentialsStoreHolder); ok && h.store != nil {
+		if err := h.store.SaveCredentials(ctx, nil); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(DefaultPath(home)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // LoginStage is what a login is doing at a moment. A surface that shows
 // progress needs to say which step is running, not only that something is.
 type LoginStage string

@@ -392,9 +392,16 @@ const (
 	setupPageEffort          // every group: the model's default thinking level
 	setupPageConnection      // custom: send one request before saving
 	setupPageOffers          // a subscription's model to add
+	setupPageAccount         // who a stored sign-in is, and the way out of it
 	setupPageSubagents       // may the agent pick this row for subagents on its own?
 	setupPageReview
 )
+
+// errSignedOut is the account page's answer when the stored sign-in was
+// removed: the page it stood on is gone from the flow, so run() lands the
+// person on the list of sign-ins instead of reading it as a cancellation (the
+// way pickOffers answers ErrCancelled for an abandoned model request).
+var errSignedOut = errors.New("signed out")
 
 // setupPager is a selector that shows where in a setup flow its prompts
 // stand. The onboarding numbers its pages with it, and every selector that
@@ -452,9 +459,15 @@ type llmSetup struct {
 	offers           []subscription.Offer
 	selectedOfferIdx int
 	// probes are the sign-in answers already given for this setup, one per
-	// subscription: the first page's «Signed in» and the sign-in page ask the
-	// vendor once between them, never twice.
+	// subscription: the first page's row, the account page and the sign-in page
+	// ask the vendor once between them, never twice.
 	probes map[string]turn.SignInCheck
+	// accounts are the accounts this setup already read for its probes, one
+	// per subscription, from the stored credential — no vendor call.
+	// accountsAsked marks the ids already read, so a subscription that answers
+	// no account is not read again on the next page.
+	accounts      map[string]subscription.Account
+	accountsAsked map[string]bool
 	// subagentAllowed is the authorization page's answer: may the agent pick
 	// this model for a subagent on its own? (owner 2026-11-10)
 	subagentAllowed bool
@@ -523,6 +536,15 @@ func (s *llmSetup) run() (process.Options, bool, error) {
 				s.page, s.back = setupPageProvider, true
 				continue
 			}
+		case setupPageAccount:
+			forward, err = s.pickAccount()
+			if errors.Is(err, errSignedOut) {
+				// The stored sign-in was removed, so the account page it
+				// stood on is gone from the flow: the list of sign-ins is
+				// where the person lands, and the setup stays alive.
+				s.page, s.back = setupPageProvider, true
+				continue
+			}
 		case setupPageSubagents:
 			forward, err = s.pickSubagents()
 		case setupPageReview:
@@ -585,12 +607,13 @@ func (s *llmSetup) flowPages() []int {
 		}
 		return append(pages, setupPageEffort, setupPageConnection, setupPageSubagents, setupPageReview)
 	case s.choice.Subscription != "":
-		// A sign-in this machine already holds — or one whose listing failed —
-		// has nothing to answer on its page: the probe decided it before the
-		// flow started. Leaving that page out keeps Esc where the user expects
-		// it, on the list of models, going back to the list of sign-ins.
-		if s.subscriptionSettled() {
-			return []int{setupPageProvider, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
+		// A sign-in this machine stores — whatever its state, dead included,
+		// because a dead login is exactly the one to sign out of — gets the
+		// account page between the list of sign-ins and the models: who is
+		// signed in, and the way out. A machine with no login signs in first,
+		// so that page is the one the flow keeps.
+		if s.subscriptionHasLogin() {
+			return []int{setupPageProvider, setupPageAccount, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
 		}
 		return []int{setupPageProvider, setupPageCredentials, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
 	default:
@@ -613,6 +636,23 @@ func (s *llmSetup) subscriptionSettled() bool {
 		return false
 	}
 	return check.State == turn.SignInUsable || check.State == turn.SignInUnreachable
+}
+
+// subscriptionHasLogin reports whether the chosen subscription's cached probe
+// says this machine stores a sign-in: any state but missing — dead included —
+// and a subscription not probed yet counts as none. This is the page-order
+// question (account page or sign-in page), a different one from settled, which
+// only the account page's Continue and the sign-in page's shortcut read.
+func (s *llmSetup) subscriptionHasLogin() bool {
+	sub := s.subscription()
+	if sub == nil {
+		return false
+	}
+	check, ok := s.probes[sub.ID()]
+	if !ok {
+		return false
+	}
+	return check.State != turn.SignInMissing
 }
 
 // pageIndex is where the current page stands in the flow, for the step header.
@@ -750,12 +790,21 @@ func (s *llmSetup) providerRows() []providerRow {
 	rows := make([]providerRow, 0, len(subscriptions())+len(providerGroups)+1)
 	for _, sub := range subscriptions() {
 		choice := subscriptionChoice(sub)
-		status := ""
-		if s.probeSubscription(sub).State == turn.SignInUsable {
-			status = "Signed in"
+		row := SelectItem{Label: choice.Label, Category: providerSignInCategory}
+		// A stored sign-in's row carries the account's own name: the name is
+		// the login's signal, so no separate state word rides the row. A
+		// login that reads no name leaves the row as plain as a sign-in that
+		// was never made — the state is the account page's to tell.
+		if s.probeSubscription(sub).State != turn.SignInMissing {
+			if acct, ok := s.accountFor(sub); ok {
+				row.Description = acct.Name
+				if acct.Detail != "" {
+					row.Description += " (" + acct.Detail + ")"
+				}
+			}
 		}
 		rows = append(rows, providerRow{
-			item:   SelectItem{Label: choice.Label, Category: providerSignInCategory, Status: status},
+			item:   row,
 			choice: choice,
 		})
 	}
@@ -843,6 +892,47 @@ func (s *llmSetup) probeSubscription(sub subscription.Subscription) turn.SignInC
 	}
 	s.probes[sub.ID()] = check
 	return check
+}
+
+// accountFor is the account this setup already read for sub, or a fresh local
+// one: the name comes from the stored credential, never from the vendor. A
+// subscription without the capability, a read that fails, and a stored login
+// that names no account are all cached as "no account", so the next page does
+// not read it again.
+func (s *llmSetup) accountFor(sub subscription.Subscription) (subscription.Account, bool) {
+	if s.accountsAsked[sub.ID()] {
+		acct, ok := s.accounts[sub.ID()]
+		return acct, ok
+	}
+	if s.accounts == nil {
+		s.accounts = make(map[string]subscription.Account, len(subscriptions()))
+	}
+	if s.accountsAsked == nil {
+		s.accountsAsked = make(map[string]bool, len(subscriptions()))
+	}
+	s.accountsAsked[sub.ID()] = true
+	reader, ok := sub.(subscription.AccountReader)
+	if !ok {
+		return subscription.Account{}, false
+	}
+	acct, has, err := reader.Account(s.ctx(), s.signInEnv())
+	if err != nil || !has || acct.Name == "" {
+		return subscription.Account{}, false
+	}
+	s.accounts[sub.ID()] = acct
+	return acct, true
+}
+
+// forgetSubscription drops everything this setup cached about one sign-in: its
+// probe, its account, and the models its listing unlocked. A sign-out or a new
+// sign-in changes all three, and a page that reads them again must not meet the
+// old answers.
+func (s *llmSetup) forgetSubscription(id string) {
+	delete(s.probes, id)
+	delete(s.accounts, id)
+	delete(s.accountsAsked, id)
+	s.offers = nil
+	s.selectedOfferIdx = -1
 }
 
 // pickProvider asks how Forebrain Harness reaches a model, then — for a
@@ -1222,7 +1312,6 @@ func (s *llmSetup) note(title, body string) error {
 // machine already holds that lists its models IS the finished sign-in, so the
 // browser and device flows never repeat for it.
 func (s *llmSetup) signIn(sub subscription.Subscription) (bool, error) {
-	label, _ := sub.Label()
 	check := s.probeSubscription(sub)
 	switch check.State {
 	case turn.SignInUsable:
@@ -1234,7 +1323,17 @@ func (s *llmSetup) signIn(sub subscription.Subscription) (bool, error) {
 		logPromptChoice(s.cfg, "llmsetup.login_unreachable", s.choice, map[string]any{"error": errString(check.Err)})
 		return true, nil
 	}
-	logPromptChoice(s.cfg, "llmsetup.login_missing", s.choice, map[string]any{"error": errString(check.Err)})
+	return s.runSignInFlow(sub)
+}
+
+// runSignInFlow drives one sign-in from its confirmation to its end: the
+// browser or the device code, the panel or the plain-text page, and the answer
+// that says whether the wizard goes on. It is the half of signIn behind the
+// probe gate, run unchanged for a machine with no login, for the account
+// page's switch to another account, and for a dead login's sign-in-again.
+func (s *llmSetup) runSignInFlow(sub subscription.Subscription) (bool, error) {
+	label, _ := sub.Label()
+	logPromptChoice(s.cfg, "llmsetup.login_missing", s.choice, map[string]any{"error": errString(s.probeSubscription(sub).Err)})
 	flow := drivableFlow(sub)
 	if flow == "" {
 		return false, fmt.Errorf("%s offers no sign-in this terminal can drive", label)
@@ -1350,6 +1449,149 @@ func (s *llmSetup) signInAnswer(flow string, err error) (bool, error) {
 	}
 	logPromptChoice(s.cfg, "llmsetup.signed_in", s.choice, map[string]any{"flow": flow})
 	return true, nil
+}
+
+// The account page's options, in the order the page lists them.
+const (
+	accountContinue = "Continue with this account"
+	accountSwitch   = "Sign in with another account"
+	// accountSwitchEnvKey is accountSwitch for a sign-in the environment
+	// provides: there is no "other" account to leave.
+	accountSwitchEnvKey = "Sign in with an account"
+	accountSignInAgain  = "Sign in again"
+	accountSignOut      = "Sign out"
+)
+
+// pickAccount is the account page: who this machine's stored sign-in is, and
+// the ways out. Any state but missing reaches it — dead included, because a
+// stored login that no longer works is exactly the one to sign out of — and
+// the page branches by the state, never by whether the account read a name.
+//
+// Continue and Sign in again move the wizard forward; Sign out removes the
+// stored login and returns errSignedOut, which lands the person on the list of
+// sign-ins with the wizard alive. A declined confirmation, an abandoned
+// sign-in, and a sign-in that the vendor still refuses all stay on this page
+// and ask again, so no dead end appears between the two ways forward.
+func (s *llmSetup) pickAccount() (bool, error) {
+	sub := s.subscription()
+	if sub == nil {
+		return false, fmt.Errorf("this sign-in has no subscription to name its account")
+	}
+	label, _ := sub.Label()
+	_, canLogout := sub.(subscription.LogoutRemover)
+	for {
+		check := s.probeSubscription(sub)
+		acct, hasAccount := s.accountFor(sub)
+		envKey := hasAccount && acct.EnvKey
+		dead := check.State == turn.SignInDead
+		// A sign-out is offered when the subscription can remove its login and
+		// the environment is not the one holding it; the account having no
+		// readable name never withholds it.
+		canSignOut := canLogout && !envKey
+		// The title states the two facts the person is deciding on: who is
+		// signed in, and whether that sign-in still works. A dead login with
+		// no name drops the who entirely — there is only the state to say.
+		title := label + "\n"
+		line := "This sign-in stands; no account name is stored."
+		switch {
+		case envKey:
+			line = "Signed in with " + acct.Name + " from the environment."
+		case hasAccount:
+			line = "Signed in as " + accountNameDetail(acct) + "."
+		case dead:
+			line = ""
+		}
+		if dead {
+			line = strings.TrimSpace(line + " This sign-in no longer works; sign in again or sign out.")
+		}
+		title += line
+
+		items := []SelectItem{}
+		if !dead {
+			items = append(items, SelectItem{Label: accountContinue})
+		}
+		switch {
+		case dead:
+			items = append(items, SelectItem{Label: accountSignInAgain})
+		case envKey:
+			items = append(items, SelectItem{Label: accountSwitchEnvKey})
+		default:
+			items = append(items, SelectItem{Label: accountSwitch})
+		}
+		if canSignOut {
+			items = append(items, SelectItem{Label: accountSignOut, Danger: true})
+		}
+		idx, ok, err := selectRichTabbed(s.cfg.Selector, title, items, TabbedSelectOptions{DefaultIdx: 0})
+		if err != nil || !ok {
+			return false, err
+		}
+		switch items[idx].Label {
+		case accountContinue:
+			return true, nil
+		case accountSwitch, accountSwitchEnvKey, accountSignInAgain:
+			forward, err := s.runSignInFlow(sub)
+			if err != nil {
+				return false, err
+			}
+			if !forward {
+				// Declined or abandoned: the page asks again.
+				continue
+			}
+			// The new login decides what the flow looks like now: forget the
+			// old answers, ask the vendor once more, and only a login that
+			// stands goes on to the models — never one that would send the
+			// offers page into a fetch it cannot survive.
+			s.forgetSubscription(sub.ID())
+			if s.probeSubscription(sub).State != turn.SignInUsable && s.probeSubscription(sub).State != turn.SignInUnreachable {
+				continue
+			}
+			return true, nil
+		case accountSignOut:
+			confirm := "Sign out of " + label + "?\nThis removes the login saved on this machine."
+			if acct.SharedPath != "" {
+				confirm += " It is the same file the Codex CLI signs in with (" + acct.SharedPath + "), so the Codex CLI is signed out too."
+			}
+			confirm += " The models it added stay, but cannot call until you sign in again."
+			remove, ok, err := s.cfg.Selector.Confirm(confirm, false)
+			if err != nil {
+				return false, err
+			}
+			if !ok || !remove {
+				continue
+			}
+			remover := sub.(subscription.LogoutRemover)
+			err = remover.Logout(s.ctx(), s.signInEnv())
+			if err == nil {
+				logPromptChoice(s.cfg, "llmsetup.signed_out", s.choice, nil)
+				s.forgetSubscription(sub.ID())
+				return false, errSignedOut
+			}
+			if errors.Is(err, subscription.ErrExternalLogin) {
+				// The stored login was removed, but an external source will
+				// sign this machine in again: say so, ask the vendor what the
+				// sign-in looks like now, and let the page ask again.
+				logPromptChoice(s.cfg, "llmsetup.signed_out_external", s.choice, map[string]any{"error": errString(err)})
+				s.forgetSubscription(sub.ID())
+				s.probeSubscription(sub)
+				if out := s.statusOutput(label); out != nil {
+					fmt.Fprintln(out, "The saved login was removed. "+err.Error())
+				}
+				continue
+			}
+			return false, err
+		default:
+			return false, fmt.Errorf("%s named no account action", label)
+		}
+	}
+}
+
+// accountNameDetail is the account as a person reads it: the name, with the
+// plan or organization beside it when the credential carries one.
+func accountNameDetail(acct subscription.Account) string {
+	if acct.Detail == "" {
+		return acct.Name
+	}
+	return acct.Name + " (" + acct.Detail + ")"
 }
 
 // signInPanel is one running sign-in as the /connect panel shows it. It reads the

@@ -203,6 +203,23 @@ func SaveStoredCredentials(ctx context.Context, home string, raw json.RawMessage
 	return os.Rename(name, path)
 }
 
+// ClearStoredCredentials removes the stored login everywhere it can exist: the
+// installed store's row (a nil write is a delete) and the file at
+// CredentialsPath(home). A missing file is fine — what matters afterwards is
+// that no login is stored, so a process without the store, or one whose
+// database later fails to open, cannot find the login still alive.
+func ClearStoredCredentials(ctx context.Context, home string) error {
+	if s := credentialsStore.Load(); s != nil {
+		if err := (*s).SaveCredentials(ctx, nil); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(CredentialsPath(home)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // LoadProcessCredentials reads the login this process holds, through the
 // installed store when one is — the state database, from plan 188 W12 on —
 // and the file at path otherwise. The bytes are the same either way: the
@@ -265,6 +282,16 @@ func parseCredentials(raw []byte) (Credentials, error) {
 		IDToken:      strings.TrimSpace(stored.Tokens.IDToken),
 		AccountID:    strings.TrimSpace(stored.Tokens.AccountID),
 		AuthMode:     strings.TrimSpace(stored.AuthMode),
+	}
+	// The Codex file has no email or plan of its own: they live in the id
+	// token's claims, decoded here exactly as the login decodes them, so a
+	// login read back in a later process still names its account.
+	if c.IDToken != "" {
+		claims := jwtClaims(c.IDToken)
+		auth, _ := claims["https://api.openai.com/auth"].(map[string]any)
+		profile, _ := claims["https://api.openai.com/profile"].(map[string]any)
+		c.Email = firstNonEmpty(stringClaim(claims, "email"), stringClaim(profile, "email"))
+		c.Plan = stringClaim(auth, "chatgpt_plan_type")
 	}
 	if c.AccessToken == "" || c.RefreshToken == "" {
 		return Credentials{}, fmt.Errorf("ChatGPT credentials are incomplete; run /connect to log in")

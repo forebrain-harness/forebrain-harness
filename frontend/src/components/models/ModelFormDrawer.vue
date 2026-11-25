@@ -11,6 +11,13 @@
           <span>{{ sourceRow.sourceName || sourceRow.source }}<template v-if="sourceRow.sourcePlan"> {{ sourceRow.sourcePlan }}</template></span>
           <BadgeComponent :variant="stateVariant" class="ml-auto" data-testid="models-source-state">{{ stateLabel }}</BadgeComponent>
         </div>
+        <!-- Who the row's sign-in is signed in as — the row is the snapshot, so
+             this is the drawer's account line until the page refreshes it. -->
+        <div v-if="sourceRow.sourceAccount" class="src__acct" data-testid="models-source-account">
+          <span class="k">{{ t('models.currentAccount') }}</span>
+          <b>{{ sourceRow.sourceAccount.name }}</b>
+          <span v-if="sourceRow.sourceAccount.detail">{{ sourceAccountDetail }}</span>
+        </div>
         <p>{{ sourceRow.loginBacked ? t('models.sourceLoginHint') : t('models.sourceKeyHint') }}</p>
         <div class="src__acts">
           <Button
@@ -23,6 +30,18 @@
             @click="refreshKey"
           >
             <RotateCw class="size-3.5" aria-hidden="true" />{{ t('models.refreshKey') }}
+          </Button>
+          <!-- The sign-out of the sign-in this row rides on: the row itself
+               stays, and calls fail until the person signs in again. -->
+          <Button
+            v-if="sourceRow.sourceCanLogout"
+            type="button"
+            variant="ghost"
+            class="forebrain-btn forebrain-btn--ghost src-logout h-auto gap-1.5 text-xs"
+            data-testid="models-source-logout"
+            @click="logoutOpen = true"
+          >
+            <LogOut class="size-3.5" aria-hidden="true" />{{ t('models.logout') }}
           </Button>
           <Button
             type="button"
@@ -279,6 +298,19 @@
       </Button>
     </template>
   </ForebrainDrawer>
+
+  <!-- The sign-out asks first: removing a login is irreversible, the row stays
+       but cannot call until the person signs in again, and a credential file
+       another client shares is named so its sign-out is never silent. -->
+  <ConfirmDialog
+    :open="logoutOpen"
+    :title="t('models.logoutTitle')"
+    :message="logoutMessage"
+    :confirm-label="t('models.logoutConfirm')"
+    danger
+    @cancel="logoutOpen = false"
+    @confirm="doLogout"
+  />
 </template>
 
 <script setup lang="ts">
@@ -301,11 +333,12 @@
  *   read-only rather than as fields that would be rejected.
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue'
-import { CircleAlert, Eye, EyeClosed, LogIn, RotateCw } from 'lucide-vue-next'
+import { CircleAlert, Eye, EyeClosed, LogIn, LogOut, RotateCw } from 'lucide-vue-next'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 
 import BadgeComponent from '@/components/common/BadgeComponent.vue'
+import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import ForebrainDrawer from '@/components/common/ForebrainDrawer.vue'
 import ModelCapsFields from '@/components/models/ModelCapsFields.vue'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
@@ -350,6 +383,10 @@ const emit = defineEmits<{
   duplicate: [id: string]
   /** Sign in again to the subscription that wrote this row. */
   openSubscribe: [subscriptionId: string]
+  /** The row's sign-in was signed out (or an external source answered): the
+   *  page that owns the rows refreshes them, and the drawer stays open on
+   *  whatever the fresh row says. */
+  changed: []
 }>()
 
 const { t } = useI18n()
@@ -520,6 +557,43 @@ const stateLabel = computed(() => {
       return t('models.stateMissing')
   }
 })
+
+/** The account line's second word: the environment's own key reads as
+ *  "provided by the environment", everything else as the vendor's own word. */
+const sourceAccountDetail = computed(() =>
+  sourceRow.value?.sourceAccount?.envKey ? t('models.accountEnvKey') : (sourceRow.value?.sourceAccount?.detail ?? ''),
+)
+
+/** The sign-out's confirmation is open. */
+const logoutOpen = ref(false)
+
+/** The sign-out confirmation's message: what is removed, and — when the
+ *  credential file is another client's own — which client signs out with it. */
+const logoutMessage = computed(() => {
+  const shared = sourceRow.value?.sourceAccount?.sharedPath
+  const text = t('models.logoutMessage')
+  return shared ? text + t('models.logoutShared', { path: shared }) : text
+})
+
+/** The confirmed sign-out: the row stays, the page that owns it hears about
+ *  it (so the table and this card's badge refresh), and an external source
+ *  answering 409 is told as it is rather than as a failure. */
+async function doLogout(): Promise<void> {
+  const source = sourceRow.value?.source
+  if (!source) return
+  logoutOpen.value = false
+  try {
+    await forebrainApi.logoutSubscription(source)
+  } catch (cause) {
+    if (cause instanceof GatewayHttpError && cause.payload?.externalLogin) {
+      emit('changed')
+      return
+    }
+    saveError.value = getErrorMessage(cause) || t('models.logoutFailed')
+    return
+  }
+  emit('changed')
+}
 
 /** The bullets a stored key is shown with: one per character it hides, held
  *  between four and twelve so a long key never widens the column. */
@@ -1023,6 +1097,32 @@ async function refreshKey(): Promise<void> {
   font-size: 12px;
   line-height: 1.5;
   color: var(--forebrain-muted-text);
+}
+.src__acct {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+}
+.src__acct .k {
+  color: var(--forebrain-muted-text);
+  font-size: 12px;
+}
+.src__acct b {
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.src__acct span:not(.k) {
+  color: var(--forebrain-muted-text);
+  font-size: 12px;
+}
+.src-logout {
+  color: var(--forebrain-danger);
+}
+.src-logout:hover {
+  color: var(--forebrain-danger);
 }
 .src__acts {
   display: flex;

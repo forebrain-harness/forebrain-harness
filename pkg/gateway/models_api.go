@@ -97,10 +97,15 @@ type llmModelRow struct {
 	LoginBacked bool   `json:"login_backed"`
 	// Source is the subscription that wrote the row ("" = added by hand), and
 	// SourceName its label; SourceState is how that sign-in stands right now.
-	Source      string `json:"source,omitempty"`
-	SourcePlan  string `json:"source_plan,omitempty"`
-	SourceName  string `json:"source_name,omitempty"`
-	SourceState string `json:"source_state,omitempty"`
+	// SourceAccount is who it is signed in as (nil = no login or no name to
+	// show) and SourceCanLogout whether the row's source card may offer the
+	// sign-out.
+	Source          string               `json:"source,omitempty"`
+	SourcePlan      string               `json:"source_plan,omitempty"`
+	SourceName      string               `json:"source_name,omitempty"`
+	SourceState     string               `json:"source_state,omitempty"`
+	SourceAccount   *subscriptionAccount `json:"source_account,omitempty"`
+	SourceCanLogout bool                 `json:"source_can_logout,omitempty"`
 	// Params is the row's request-parameter JSON text, verbatim: its keys are
 	// the provider's request fields, and an object would have them re-cased by
 	// a client that normalizes response keys.
@@ -534,6 +539,8 @@ func (s *Server) llmModelRowOf(r *http.Request, scope llmModelScope, row state.L
 		label, labelZH := sub.Label()
 		out.SourceName = llmText(r, labelZH, label)
 		out.SourceState = states.of(row.Source)
+		out.SourceAccount = states.accountOf(row.Source)
+		out.SourceCanLogout = subscriptionCanLogout(sub, out.SourceState, out.SourceAccount)
 	}
 	return out
 }

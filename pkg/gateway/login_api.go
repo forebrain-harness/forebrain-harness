@@ -254,18 +254,25 @@ func (s *Server) handleAuthLoginStart(w http.ResponseWriter, r *http.Request) {
 	// being unreachable is not a dead login, and pushing a working login back
 	// through the browser would be the very bug this fixes. Missing and dead
 	// start the flow; the page is the progress display and the flow reports its
-	// own failures.
-	probeCtx, probeCancel := context.WithTimeout(r.Context(), modelsDiscoveryTimeout)
-	check := sub.Probe(probeCtx, s.subscriptionEnv())
-	probeCancel()
-	if check.State == turn.SignInUsable || check.State == turn.SignInUnreachable {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"provider": provider,
-			"status":   authLoginComplete,
-			"base_url": authLoginBaseURL(provider),
-		})
-		return
+	// own failures. force=1 skips the shortcut: a switch-account login runs the
+	// flow even when the stored one still works, because replacing it is the
+	// point.
+	if r.URL.Query().Get("force") != "1" {
+		probeCtx, probeCancel := context.WithTimeout(r.Context(), modelsDiscoveryTimeout)
+		check := sub.Probe(probeCtx, s.subscriptionEnv())
+		probeCancel()
+		if check.State == turn.SignInUsable || check.State == turn.SignInUnreachable {
+			acct := readSubscriptionAccount(r.Context(), sub, s.subscriptionEnv())
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"provider":   provider,
+				"status":     authLoginComplete,
+				"base_url":   authLoginBaseURL(provider),
+				"account":    acct,
+				"can_logout": subscriptionCanLogout(sub, signInStateName(check.State), acct),
+			})
+			return
+		}
 	}
 	flow, ok := authLoginFlow(sub)
 	if !ok {
@@ -318,6 +325,12 @@ type authLoginStatusBody struct {
 	// Flow is the flow kind being driven, so the page knows whether to show a
 	// device code or ask for a pasted address.
 	Flow string `json:"flow"`
+	// Account is who the just-finished sign-in belongs to, and CanLogout
+	// whether the page may offer its sign-out. They are filled only for a
+	// login that completed; the lock is already released by then (the account
+	// is a local read, not something the flow's own state knows).
+	Account   *subscriptionAccount `json:"account,omitempty"`
+	CanLogout bool                 `json:"can_logout"`
 }
 
 // handleAuthLoginStatus answers one poll.
@@ -355,6 +368,16 @@ func (s *Server) handleAuthLoginStatus(w http.ResponseWriter, r *http.Request) {
 	if login.login != nil {
 		body.URL = login.login.AuthorizeURL()
 		body.UserCode = login.login.UserCode()
+	}
+	// A login that completed is settled by definition — there is nothing to
+	// probe — so its account is read locally here, outside authLoginFinish's
+	// lock (a DB read must not wait on it) and the sign-out is offered when
+	// the subscription can remove the login and the environment is not the
+	// one holding it.
+	if login.status == authLoginComplete && login.errText == "" {
+		body.Account = readSubscriptionAccount(r.Context(), sub, s.subscriptionEnv())
+		_, can := sub.(subscription.LogoutRemover)
+		body.CanLogout = can && (body.Account == nil || !body.Account.EnvKey)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)

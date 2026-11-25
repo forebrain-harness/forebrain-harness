@@ -359,7 +359,11 @@ type fakeSubscription struct {
 	label string
 	flows []string
 	check turn.SignInCheck
-	login *fakeLogin
+	// checkFn answers each probe by its call number, so a test can model a
+	// login whose state changes — the sign-in the flow just completed makes
+	// the next probe usable, the way a real vendor would.
+	checkFn func(call int) turn.SignInCheck
+	login   *fakeLogin
 	// panelLogin is a sign-in a test drives from another goroutine: the values it
 	// publishes are read under a lock. When it is set, Start hands it back
 	// instead of login.
@@ -368,6 +372,15 @@ type fakeSubscription struct {
 	offers      []subscription.Offer
 	offersFn    func(call int) ([]subscription.Offer, error)
 	provisionFn func(call int) error
+	// account is who the stored sign-in names, hasAccount whether one is
+	// stored, and accountErr what a failing read answers; logoutErr is what
+	// the sign-out answers (nil removes the login). Neither capability is
+	// optional on this stand-in — a test that needs a subscription without
+	// them wraps it in accountlessSubscription.
+	account    subscription.Account
+	hasAccount bool
+	accountErr error
+	logoutErr  error
 
 	probeCalls  int
 	startCalls  int
@@ -376,7 +389,13 @@ type fakeSubscription struct {
 	provisioned [][]subscription.Offer
 	options     []subscription.ProvisionOptions
 	envs        []subscription.Env
+	logoutCalls int
 }
+
+// accountlessSubscription hides the account and sign-out capabilities a
+// fakeSubscription always has, leaving only the base interface: the degradation
+// a surface owes a subscription that implements neither.
+type accountlessSubscription struct{ subscription.Subscription }
 
 func (s *fakeSubscription) ID() string              { return s.id }
 func (s *fakeSubscription) Label() (string, string) { return s.label, s.label }
@@ -384,6 +403,9 @@ func (s *fakeSubscription) Flows() []string         { return s.flows }
 
 func (s *fakeSubscription) Probe(context.Context, subscription.Env) turn.SignInCheck {
 	s.probeCalls++
+	if s.checkFn != nil {
+		return s.checkFn(s.probeCalls)
+	}
 	return s.check
 }
 
@@ -456,6 +478,19 @@ func (s *fakeSubscription) Provision(_ context.Context, env subscription.Env, of
 
 func (s *fakeSubscription) RefreshKey(context.Context, subscription.Env, string) error {
 	return subscription.ErrNoKeyToRefresh
+}
+
+// Account names the stored sign-in the way the real capability does: the
+// account, whether one is stored, and the read's own error all under the test's
+// control.
+func (s *fakeSubscription) Account(context.Context, subscription.Env) (subscription.Account, bool, error) {
+	return s.account, s.hasAccount, s.accountErr
+}
+
+// Logout answers the sign-out with the stub's own verdict, counting the calls.
+func (s *fakeSubscription) Logout(context.Context, subscription.Env) error {
+	s.logoutCalls++
+	return s.logoutErr
 }
 
 // splitOfferEfforts separates the levels a listing names from the off switch it
@@ -597,14 +632,35 @@ func setupTestConfig(t *testing.T, selector SetupSelector) PromptConfig {
 	return PromptConfig{Selector: selector, Output: io.Discard, Home: home, ConfigPath: filepath.Join(home, "forebrain.yaml")}
 }
 
-// runSubscriptionSetup runs the model setup from its sign-in page with a
-// subscription already chosen, saving at the offers page.
+// subscriptionStartPage is the page a test run of the wizard starts on for
+// sub's saved state: a stored login that stands goes straight to the models it
+// unlocked (the account page has its own tests, so an existing case does not
+// walk it unless it is what the case is about), a dead login starts on the
+// account page — signing in again from it is the case — and no login signs in.
+// A state-driven check answers for its first probe, without spending one.
+func subscriptionStartPage(sub *fakeSubscription) int {
+	check := sub.check
+	if sub.checkFn != nil {
+		check = sub.checkFn(1)
+	}
+	switch check.State {
+	case turn.SignInUsable, turn.SignInUnreachable:
+		return setupPageOffers
+	case turn.SignInDead:
+		return setupPageAccount
+	default:
+		return setupPageCredentials
+	}
+}
+
+// runSubscriptionSetup runs the model setup from the page its saved state
+// starts on, with a subscription already chosen, saving at the offers page.
 func runSubscriptionSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription) (process.Options, bool, error) {
 	t.Helper()
 	withSubscriptions(t, sub)
 	setup := newLLMSetup(cfg)
 	setup.setChoice(subscriptionChoice(sub))
-	setup.page = setupPageCredentials
+	setup.page = subscriptionStartPage(sub)
 	return setup.run()
 }
 
@@ -677,16 +733,23 @@ func TestProviderPageListsThreeGroups(t *testing.T) {
 	}
 }
 
-// A subscription this machine is already signed in to says so on its row, and
-// the answer is asked once: the sign-in page reads it again from the same probe.
-func TestProviderPageMarksASubscriptionAlreadySignedIn(t *testing.T) {
+// A subscription this machine is already signed in to names the account beside
+// its row, and the answer is asked once: the account page reads it again from
+// the same read. The name is the login's signal — the row carries no separate
+// state word.
+func TestProviderPageShowsTheAccountBesideTheSignIn(t *testing.T) {
 	sub := chatGPTLike()
 	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test", Detail: "plus"}
 	withSubscriptions(t, sub)
 	setup := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
 	rows := setup.providerRows()
-	if rows[0].item.Status != "Signed in" {
-		t.Fatalf("signed-in row = %+v, want the badge", rows[0].item)
+	if rows[0].item.Description != "dev@example.test (plus)" {
+		t.Fatalf("signed-in row = %+v, want the account beside the label", rows[0].item)
+	}
+	if rows[0].item.Status != "" {
+		t.Fatalf("signed-in row carries a status %q, want none: the name is the signal", rows[0].item.Status)
 	}
 	if sub.probeCalls != 1 {
 		t.Fatalf("probe calls = %d, want one", sub.probeCalls)
@@ -695,6 +758,19 @@ func TestProviderPageMarksASubscriptionAlreadySignedIn(t *testing.T) {
 	setup.providerRows()
 	if sub.probeCalls != 1 {
 		t.Fatalf("probe calls = %d, want the cached answer", sub.probeCalls)
+	}
+
+	// A login that reads no account leaves the row as plain as a sign-in that
+	// was never made: the state is the account page's to tell.
+	sub.hasAccount = false
+	plain := newLLMSetup(PromptConfig{Selector: &fakeSelector{}, Output: io.Discard, Home: t.TempDir()})
+	withSubscriptions(t, sub)
+	rows = plain.providerRows()
+	if rows[0].item.Description != "" || rows[0].item.Status != "" {
+		t.Fatalf("accountless row = %+v, want only the label", rows[0].item)
+	}
+	if sub.probeCalls != 2 {
+		t.Fatalf("probe calls = %d, want one for the new setup", sub.probeCalls)
 	}
 }
 
@@ -775,22 +851,23 @@ func TestOffersPageLabelsModelsByVendorName(t *testing.T) {
 	}
 }
 
-// A sign-in page whose answer the probe already gave is not a step: the flow is
-// the list of sign-ins and the list of models, so Esc on the models goes back to
-// the page that asks. Only a page that will ask for a sign-in stays in the flow.
+// A machine that stores a sign-in — whatever its state, dead included, because
+// a dead login is exactly the one the account page offers to remove — walks the
+// account page between the list of sign-ins and the models. Only a machine with
+// no login signs in, so that page is the one the flow keeps.
 func TestSubscriptionFlowDropsSettledSignInPage(t *testing.T) {
-	settledPages := []int{setupPageProvider, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
-	threePages := []int{setupPageProvider, setupPageCredentials, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
+	loginPages := []int{setupPageProvider, setupPageAccount, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
+	noLoginPages := []int{setupPageProvider, setupPageCredentials, setupPageOffers, setupPageEffort, setupPageSubagents, setupPageReview}
 	for _, tc := range []struct {
 		name  string
 		check *turn.SignInCheck
 		want  []int
 	}{
-		{name: "a login that lists its models", check: &turn.SignInCheck{State: turn.SignInUsable}, want: settledPages},
-		{name: "a login whose listing failed", check: &turn.SignInCheck{State: turn.SignInUnreachable}, want: settledPages},
-		{name: "no login", check: &turn.SignInCheck{State: turn.SignInMissing}, want: threePages},
-		{name: "a dead login", check: &turn.SignInCheck{State: turn.SignInDead}, want: threePages},
-		{name: "not probed yet", want: threePages},
+		{name: "a login that lists its models", check: &turn.SignInCheck{State: turn.SignInUsable}, want: loginPages},
+		{name: "a login whose listing failed", check: &turn.SignInCheck{State: turn.SignInUnreachable}, want: loginPages},
+		{name: "no login", check: &turn.SignInCheck{State: turn.SignInMissing}, want: noLoginPages},
+		{name: "a dead login", check: &turn.SignInCheck{State: turn.SignInDead}, want: loginPages},
+		{name: "not probed yet", want: noLoginPages},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sub := qoderCNLike()
@@ -807,9 +884,9 @@ func TestSubscriptionFlowDropsSettledSignInPage(t *testing.T) {
 	}
 }
 
-// Esc on the list of models goes back to the list of sign-ins. It used to land
-// on the sign-in page, which answers itself for a login this machine holds and
-// steps straight forward again — the page never moved.
+// Esc on the list of models steps back to the account page, and Esc there
+// steps back to the list of sign-ins: a stored login owns one page between
+// them, and the person walks back through it rather than around it.
 func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
 	sub := qoderCNLike()
 	selector := &fakeSelector{}
@@ -820,11 +897,17 @@ func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
 	if ok {
 		t.Fatal("the setup saved itself after Esc on the model list")
 	}
-	if len(selector.selectLabels) != 2 || !strings.HasPrefix(selector.selectLabels[0], "Qoder CN\nCho") {
-		t.Fatalf("pages drawn = %#v, want the model list once", selector.selectLabels)
+	if len(selector.selectLabels) != 3 {
+		t.Fatalf("pages drawn = %#v, want the model list, the account page, then the sign-in list", selector.selectLabels)
 	}
-	if !strings.HasPrefix(selector.selectLabels[1], "Connect a model") {
-		t.Fatalf("the page Esc landed on = %#v, want the list of sign-ins", selector.selectLabels[1])
+	if !strings.HasPrefix(selector.selectLabels[0], "Qoder CN\nCho") {
+		t.Fatalf("first page = %#v, want the model list", selector.selectLabels[0])
+	}
+	if !strings.HasPrefix(selector.selectLabels[1], "Qoder CN\nThis sign-in stands; no account name is stored.") {
+		t.Fatalf("the page the first Esc landed on = %#v, want the account page", selector.selectLabels[1])
+	}
+	if !strings.HasPrefix(selector.selectLabels[2], "Connect a model") {
+		t.Fatalf("the page the second Esc landed on = %#v, want the list of sign-ins", selector.selectLabels[2])
 	}
 	if len(selector.multiLabels) != 0 {
 		t.Fatalf("check lists = %#v, one model is chosen from a list, not ticked", selector.multiLabels)
@@ -837,6 +920,241 @@ func TestEscOnOffersPageReturnsToProviderPage(t *testing.T) {
 	}
 	if opts.Provider != "" {
 		t.Fatalf("options = %+v, want none written", opts)
+	}
+}
+
+// runAccountPageSetup runs the wizard from the account page of a subscription
+// whose probe answer is sub's, for the tests that are about that page.
+func runAccountPageSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription) (process.Options, bool, error) {
+	t.Helper()
+	withSubscriptions(t, sub)
+	setup := newLLMSetup(cfg)
+	setup.setChoice(subscriptionChoice(sub))
+	setup.page = setupPageAccount
+	return setup.run()
+}
+
+// The account page names who is signed in, and Continue takes the wizard to
+// the models without paying for a sign-in.
+func TestAccountPageContinueReachesTheOffers(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test", Detail: "plus"}
+	selector := &fakeSelector{selects: []string{accountContinue, "gpt-future", reasoningEffortUnset, subagentsNo}}
+	opts, ok, err := runAccountPageSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sub.startCalls != 0 {
+		t.Fatalf("sign-ins = %d, Continue must not sign in again", sub.startCalls)
+	}
+	if opts.Model != "gpt-future" {
+		t.Fatalf("model = %q, want the offers page's row", opts.Model)
+	}
+	if !strings.HasPrefix(selector.selectLabels[0], "ChatGPT\nSigned in as dev@example.test (plus).") {
+		t.Fatalf("account page title = %#v", selector.selectLabels[0])
+	}
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{accountContinue, accountSwitch, accountSignOut}) {
+		t.Fatalf("account page options = %#v, want continue, switch and sign out", got)
+	}
+}
+
+// A confirmed sign-out removes the login and lands the person on the list of
+// sign-ins with the wizard alive — the page it removed is simply gone from the
+// flow. The confirmation says what a sign-out costs: the login, and the models
+// it added until the person signs in again.
+func TestAccountPageSignOutRemovesTheLoginAndReturnsToProvider(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test"}
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{accountSignOut}}
+	opts, ok, err := runAccountPageSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if ok {
+		t.Fatal("the setup saved after a sign-out")
+	}
+	if sub.logoutCalls != 1 {
+		t.Fatalf("logouts = %d, want one", sub.logoutCalls)
+	}
+	if !strings.Contains(selector.confirmLabels[0], "Sign out of ChatGPT?") ||
+		!strings.Contains(selector.confirmLabels[0], "This removes the login saved on this machine.") ||
+		!strings.Contains(selector.confirmLabels[0], "The models it added stay, but cannot call until you sign in again.") {
+		t.Fatalf("sign-out confirmation = %#v", selector.confirmLabels[0])
+	}
+	if !strings.HasPrefix(selector.selectLabels[1], "Connect a model") {
+		t.Fatalf("the page after the sign-out = %#v, want the list of sign-ins", selector.selectLabels[1])
+	}
+	if opts.Provider != "" {
+		t.Fatalf("options = %+v, want nothing written by a sign-out", opts)
+	}
+	// The cached answers about the sign-in were dropped with it: the list of
+	// sign-ins asked the vendor again (the account page's probe, then the
+	// list's).
+	if sub.probeCalls != 2 {
+		t.Fatalf("probe calls = %d, want the cache cleared and the list re-probed", sub.probeCalls)
+	}
+}
+
+// A declined confirmation keeps the login: the page asks again rather than
+// taking the refusal as a way out of the wizard.
+func TestAccountPageSignOutDeclinedKeepsTheLogin(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test"}
+	selector := &fakeSelector{confirms: []bool{false}, selects: []string{accountSignOut}}
+	_, _, err := runAccountPageSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if sub.logoutCalls != 0 {
+		t.Fatalf("logouts = %d, a declined confirmation must remove nothing", sub.logoutCalls)
+	}
+	if !strings.HasPrefix(selector.selectLabels[1], "ChatGPT\nSigned in as dev@example.test.") {
+		t.Fatalf("the page after the decline = %#v, want the account page asking again", selector.selectLabels[1])
+	}
+}
+
+// Switching to another account runs the sign-in flow again — its own
+// confirmation included — and the models the wizard then offers are the new
+// login's listing, not the old one's.
+func TestAccountPageSwitchAccountRunsTheFlowAgain(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "old@example.test"}
+	sub.offersFn = func(int) ([]subscription.Offer, error) {
+		return []subscription.Offer{{
+			Subscription: "chatgpt", Provider: "chatgpt", Model: "gpt-switched",
+			BaseURL: openai.CodexBaseURL, APIPath: "/responses", PlanLabel: "ChatGPT plan", Default: true,
+		}}, nil
+	}
+	browserMachine(t)
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{accountSwitch, "gpt-switched", reasoningEffortUnset, subagentsNo}}
+	opts, ok, err := runAccountPageSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if sub.startCalls != 1 {
+		t.Fatalf("sign-ins = %d, want the switch to run the flow", sub.startCalls)
+	}
+	if opts.Model != "gpt-switched" {
+		t.Fatalf("model = %q, want the new login's listing", opts.Model)
+	}
+	if !strings.Contains(selector.confirmLabels[0], "Sign in with ChatGPT") {
+		t.Fatalf("sign-in confirmation = %#v, want the flow's own question", selector.confirmLabels[0])
+	}
+}
+
+// A sign-in the environment provides is named, but no sign-out is offered for
+// it: the environment, not this store, is holding the login.
+func TestAccountPageEnvKeyOffersNoSignOut(t *testing.T) {
+	sub := openCodeLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "OPENCODE_API_KEY", EnvKey: true}
+	selector := &fakeSelector{selects: []string{accountContinue, "glm-5.3", reasoningEffortUnset, subagentsNo}}
+	opts, ok, err := runAccountPageSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.Model != "glm-5.3" {
+		t.Fatalf("model = %q", opts.Model)
+	}
+	if !strings.HasPrefix(selector.selectLabels[0], "OpenCode\nSigned in with OPENCODE_API_KEY from the environment.") {
+		t.Fatalf("account page title = %#v", selector.selectLabels[0])
+	}
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{accountContinue, accountSwitchEnvKey}) {
+		t.Fatalf("account page options = %#v, want no sign-out for an environment sign-in", got)
+	}
+}
+
+// A subscription that implements neither optional capability degrades exactly
+// as far as its state: the row stays plain, and the account page offers the two
+// ways forward with no sign-out.
+func TestAccountPageWithoutTheCapabilitiesOffersNoSignOut(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test"}
+	wrapped := accountlessSubscription{sub}
+	selector := &fakeSelector{selects: []string{accountContinue, "gpt-future", reasoningEffortUnset, subagentsNo}}
+	cfg := setupTestConfig(t, selector)
+	withSubscriptions(t, wrapped)
+	setup := newLLMSetup(cfg)
+	setup.setChoice(subscriptionChoice(wrapped))
+	setup.page = setupPageAccount
+	opts, ok, err := setup.run()
+	if err != nil || !ok {
+		t.Fatalf("configure err=%v ok=%t", err, ok)
+	}
+	if opts.Model != "gpt-future" {
+		t.Fatalf("model = %q", opts.Model)
+	}
+	if !strings.HasPrefix(selector.selectLabels[0], "ChatGPT\nThis sign-in stands; no account name is stored.") {
+		t.Fatalf("account page title = %#v", selector.selectLabels[0])
+	}
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{accountContinue, accountSwitch}) {
+		t.Fatalf("account page options = %#v, want no sign-out without the capability", got)
+	}
+}
+
+// A shared credential file is named in the confirmation: signing out here signs
+// the Codex CLI out too, and the person decides knowing it.
+func TestAccountPageSharedCredentialNamesTheFile(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test", SharedPath: "/Users/dev/.codex/auth.json"}
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{accountSignOut}}
+	_, _, err := runAccountPageSetup(t, setupTestConfig(t, selector), sub)
+	if err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if sub.logoutCalls != 1 {
+		t.Fatalf("logouts = %d, want one", sub.logoutCalls)
+	}
+	if !strings.Contains(selector.confirmLabels[0], "/Users/dev/.codex/auth.json") ||
+		!strings.Contains(selector.confirmLabels[0], "It is the same file the Codex CLI signs in with (/Users/dev/.codex/auth.json), so the Codex CLI is signed out too.") {
+		t.Fatalf("sign-out confirmation = %#v, want the shared file named", selector.confirmLabels[0])
+	}
+}
+
+// An external source answers the sign-out honestly: the stored login was
+// removed, the cache about it was dropped, the person is told what will sign
+// the machine in again — and the wizard stays on its feet.
+func TestAccountPageExternalLoginExplains(t *testing.T) {
+	sub := chatGPTLike()
+	sub.check = turn.SignInCheck{State: turn.SignInUsable}
+	sub.hasAccount = true
+	sub.account = subscription.Account{Name: "dev@example.test"}
+	sub.logoutErr = fmt.Errorf("unset QODER_PERSONAL_ACCESS_TOKEN: %w", subscription.ErrExternalLogin)
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{accountSignOut}}
+	var reported strings.Builder
+	cfg := setupTestConfig(t, selector)
+	cfg.Output = &reported
+	_, _, err := runAccountPageSetup(t, cfg, sub)
+	if err != nil {
+		t.Fatalf("an external sign-out must not fail the wizard: %v", err)
+	}
+	if sub.logoutCalls != 1 {
+		t.Fatalf("logouts = %d, want one", sub.logoutCalls)
+	}
+	if !strings.Contains(reported.String(), "The saved login was removed.") ||
+		!strings.Contains(reported.String(), "QODER_PERSONAL_ACCESS_TOKEN") {
+		t.Fatalf("status = %q, want the external source explained", reported.String())
+	}
+	// The cached answers were dropped with the stored login, and the account
+	// page asked again rather than ending the wizard.
+	if sub.probeCalls != 2 {
+		t.Fatalf("probe calls = %d, want the cache cleared and the state re-read", sub.probeCalls)
+	}
+	if !strings.HasPrefix(selector.selectLabels[1], "ChatGPT\n") {
+		t.Fatalf("the page after the external sign-out = %#v, want the account page asking again", selector.selectLabels[1])
 	}
 }
 
@@ -971,18 +1289,32 @@ func TestConfigureSubscriptionDeclinedNeverSignsIn(t *testing.T) {
 	}
 }
 
-// A dead login runs the flow too: only a new sign-in restores what the refresh
-// token lost.
+// A dead login starts on the account page, whose sign-in-again is the flow that
+// restores what the refresh token lost — and the login it completes makes the
+// next probe usable, so the wizard goes on to the models.
 func TestConfigureSubscriptionDeadLoginRunsTheFlow(t *testing.T) {
 	sub := chatGPTLike()
-	sub.check = turn.SignInCheck{State: turn.SignInDead, Err: errors.New("ChatGPT login expired; sign in again")}
+	sub.checkFn = func(call int) turn.SignInCheck {
+		if call == 1 {
+			return turn.SignInCheck{State: turn.SignInDead, Err: errors.New("ChatGPT login expired; sign in again")}
+		}
+		return turn.SignInCheck{State: turn.SignInUsable}
+	}
 	browserMachine(t)
-	selector := &fakeSelector{confirms: []bool{true}, selects: []string{"gpt-future", reasoningEffortUnset, subagentsNo}}
+	selector := &fakeSelector{confirms: []bool{true}, selects: []string{"Sign in again", "gpt-future", reasoningEffortUnset, subagentsNo}}
 	if _, ok, err := runSubscriptionSetup(t, setupTestConfig(t, selector), sub); err != nil || !ok {
 		t.Fatalf("configure err=%v ok=%t", err, ok)
 	}
 	if sub.startCalls != 1 {
 		t.Fatalf("sign-ins = %d, want the flow to run", sub.startCalls)
+	}
+	// The account page is where the dead login is answered: its title says the
+	// sign-in no longer works, and its first option is to sign in again.
+	if !strings.HasPrefix(selector.selectLabels[0], "ChatGPT\nThis sign-in no longer works; sign in again or sign out.") {
+		t.Fatalf("account page title = %#v, want the dead-login wording", selector.selectLabels[0])
+	}
+	if got := selector.selectOptions[0]; !reflect.DeepEqual(got, []string{"Sign in again", "Sign out"}) {
+		t.Fatalf("account page options = %#v, want sign in again and sign out", got)
 	}
 }
 
@@ -2497,13 +2829,14 @@ type setupAnswer struct {
 	err  error
 }
 
-// start runs the setup on this subscription from its sign-in page.
+// start runs the setup on this subscription from the page its saved state
+// starts on.
 func startConnectSetup(t *testing.T, cfg PromptConfig, sub *fakeSubscription) <-chan setupAnswer {
 	t.Helper()
 	withSubscriptions(t, sub)
 	setup := newLLMSetup(cfg)
 	setup.setChoice(subscriptionChoice(sub))
-	setup.page = setupPageCredentials
+	setup.page = subscriptionStartPage(sub)
 	answer := make(chan setupAnswer, 1)
 	go func() {
 		opts, ok, err := setup.run()
@@ -3279,8 +3612,8 @@ func TestConnectSetupPanelLateAddressRepaintsInPlace(t *testing.T) {
 	}
 }
 
-// A login this machine already holds never starts a flow: the models page follows
-// directly, and no sign-in page is painted at all.
+// A login this machine already holds never starts a flow: the run starts on
+// the models page, and neither a sign-in page nor an account page is painted.
 func TestConnectSetupPanelSignedInLoginSkipsTheSignIn(t *testing.T) {
 	sub := openCodeLike()
 	sub.check = turn.SignInCheck{State: turn.SignInUsable}
@@ -3296,7 +3629,7 @@ func TestConnectSetupPanelSignedInLoginSkipsTheSignIn(t *testing.T) {
 	}
 	sub.panelLogin = newPanelLogin("https://opencode.ai/auth", "QK7M-2PLX")
 	answer := startConnectSetup(t, cfg, sub)
-	// The models page follows the probe directly, with no sign-in page before it.
+	// The starting page is the models page; nothing is painted before it.
 	models := waitForPanelText(panel.render, "Choose the models to add")
 	if strings.Contains(models, "Sign in with") {
 		t.Fatalf("panel = %q, want no sign-in page for a login this machine holds", models)

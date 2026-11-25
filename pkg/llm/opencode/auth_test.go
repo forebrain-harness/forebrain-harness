@@ -508,9 +508,10 @@ func writeJSON(t *testing.T, w http.ResponseWriter, status int, body any) {
 }
 
 type fakeCredentialsStore struct {
-	loaded int
-	saved  int
-	bytes  json.RawMessage
+	loaded  int
+	saved   int
+	bytes   json.RawMessage
+	saveErr error
 }
 
 func (f *fakeCredentialsStore) LoadCredentials(context.Context) (json.RawMessage, error) {
@@ -520,6 +521,9 @@ func (f *fakeCredentialsStore) LoadCredentials(context.Context) (json.RawMessage
 
 func (f *fakeCredentialsStore) SaveCredentials(_ context.Context, raw json.RawMessage) error {
 	f.saved++
+	if f.saveErr != nil {
+		return f.saveErr
+	}
 	f.bytes = raw
 	return nil
 }
@@ -576,5 +580,66 @@ func TestStoredCredentialsGoThroughInstalledStore(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, CredentialsFile)); !os.IsNotExist(err) {
 		t.Fatal("the file default ran although a store is installed")
+	}
+}
+
+// TestClearStoredCredentialsRemovesTheLoginBothWays pins the sign-out half of
+// the port: the nil write reaches the installed store and the file at
+// DefaultPath(home) is removed too, so no backend can still answer the login.
+func TestClearStoredCredentialsRemovesTheLoginBothWays(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	path := DefaultPath(home)
+	if err := os.WriteFile(path, []byte(`{"access_token":"a"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeCredentialsStore{bytes: json.RawMessage(`{"access_token":"from-store"}`)}
+	SetCredentialsStore(fake)
+	t.Cleanup(func() { SetCredentialsStore(nil) })
+
+	if err := ClearStoredCredentials(ctx, home); err != nil {
+		t.Fatal(err)
+	}
+	if fake.saved != 1 || fake.bytes != nil {
+		t.Fatalf("store nil write = (%d, %q), want (1, nil)", fake.saved, fake.bytes)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the file at DefaultPath(home) survived the clear")
+	}
+}
+
+// TestClearStoredCredentialsWithoutAStoreStillRemovesTheFile covers the file
+// default: no store is installed, so the clear's whole job is the file — and a
+// home that already has none is a success, not an error.
+func TestClearStoredCredentialsWithoutAStoreStillRemovesTheFile(t *testing.T) {
+	SetCredentialsStore(nil)
+	ctx := context.Background()
+	home := t.TempDir()
+	path := DefaultPath(home)
+	if err := os.WriteFile(path, []byte(`{"access_token":"a"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ClearStoredCredentials(ctx, home); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the file survived the clear")
+	}
+	if err := ClearStoredCredentials(ctx, home); err != nil {
+		t.Fatalf("clearing a home with no file anywhere = %v, want nil", err)
+	}
+}
+
+// TestClearStoredCredentialsReportsAStoreFailure: a store that cannot take the
+// nil write must surface its error, not leave the login half-removed.
+func TestClearStoredCredentialsReportsAStoreFailure(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakeCredentialsStore{saveErr: errors.New("store down")}
+	SetCredentialsStore(fake)
+	t.Cleanup(func() { SetCredentialsStore(nil) })
+
+	if err := ClearStoredCredentials(ctx, t.TempDir()); err == nil {
+		t.Fatal("a store failure must surface, not be swallowed")
 	}
 }

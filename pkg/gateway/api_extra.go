@@ -440,10 +440,12 @@ func (s *Server) AttachExtraRoutes(routes Routes) {
 	api.Post("/llm-models/:id/refresh-key", s.handleLLMModelRefreshKey)
 	api.Get("/llm-providers", s.handleLLMProviders)
 	// The subscriptions the page signs in to: the registry, what a finished
-	// sign-in offers, and the write that turns chosen offers into model rows.
+	// sign-in offers, the write that turns chosen offers into model rows, and
+	// the sign-out that removes a stored login.
 	api.Get("/subscriptions", s.handleSubscriptions)
 	api.Get("/subscriptions/:id/offers", s.handleSubscriptionOffers)
 	api.Post("/subscriptions/:id/provision", s.handleSubscriptionProvision)
+	api.Post("/subscriptions/:id/logout", s.handleSubscriptionLogout)
 	// The operator's variables (plan 259), which took over from the home .env:
 	// MCP and LSP entries resolve them as ${NAME}.
 	api.Get("/env-vars", s.handleEnvVars)

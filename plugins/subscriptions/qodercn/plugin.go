@@ -8,13 +8,18 @@ package qodercn
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/home"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm"
 	"github.com/forebrain-harness/forebrain-harness/pkg/llm/openai"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/subscription"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
@@ -97,6 +102,52 @@ func (qoderCNSubscription) Probe(ctx context.Context, env subscription.Env) turn
 func isUnauthorized(err error) bool {
 	var api *llm.APIError
 	return errors.As(err, &api) && api.StatusCode == http.StatusUnauthorized
+}
+
+// Account names who the stored login belongs to, read locally from the
+// credential — no vendor call. The email is the identity; the display name and
+// the uid stand in when the login carried no email.
+func (qoderCNSubscription) Account(ctx context.Context, env subscription.Env) (subscription.Account, bool, error) {
+	creds, ok, err := loadCredentials(ctx, env.DB, env.Home)
+	if err != nil || !ok {
+		return subscription.Account{}, false, err
+	}
+	name := creds.Email
+	if name == "" {
+		name = creds.Name
+	}
+	if name == "" {
+		name = creds.UID
+	}
+	if name == "" {
+		return subscription.Account{}, false, nil
+	}
+	return subscription.Account{Name: name}, true, nil
+}
+
+// Logout removes the stored login from both homes it can live in — the state
+// store and the credential file — then answers whether an external source
+// will sign this machine in again: a configured personal access token, or the
+// official client's own login, which the next Probe imports back (read-only,
+// as always). The stored login is removed either way.
+func (qoderCNSubscription) Logout(ctx context.Context, env subscription.Env) error {
+	if env.DB != nil {
+		if err := (&state.ConfigStore{DB: env.DB}).SaveCredential(ctx, credentialSection, nil); err != nil {
+			return err
+		}
+	}
+	if err := os.Remove(credentialPath(env.Home)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if strings.TrimSpace(os.Getenv(personalTokenEnv)) != "" {
+		return fmt.Errorf("%w: unset %s to finish signing out", subscription.ErrExternalLogin, personalTokenEnv)
+	}
+	if root := QoderHomeDir(); root != "" {
+		if fi, err := os.Stat(filepath.Join(root, ".auth", "user")); err == nil && fi.Size() > 0 {
+			return fmt.Errorf("%w: the official Qoder CN client is signed in; its login will be imported again", subscription.ErrExternalLogin)
+		}
+	}
+	return nil
 }
 
 // Start runs the browser PKCE device flow. The handle it returns publishes

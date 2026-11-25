@@ -1475,6 +1475,11 @@ export interface LlmModelRow {
   sourceName?: string
   /** How that sign-in stands right now: usable / missing / dead / unreachable. */
   sourceState?: string
+  /** Who that sign-in is signed in as; absent when there is no login or no
+   *  name to show. The drawer's source card draws it. */
+  sourceAccount?: SubscriptionAccount
+  /** The source card may offer a sign-out of the row's sign-in. */
+  sourceCanLogout?: boolean
   /** The row's request-parameter JSON text, keys verbatim. */
   params?: string
   caps: LlmModelCaps
@@ -1549,6 +1554,18 @@ export interface LlmProvidersListing {
   customId: string
 }
 
+/** Who a stored sign-in belongs to, read locally from the credential: the
+ *  identity the person recognizes, the plan or organization beside it, and two
+ *  honesty flags — `envKey` (the environment provides this sign-in, so it
+ *  cannot be removed here) and `sharedPath` (the login file belongs to another
+ *  program, which the same sign-in also logs in). */
+export interface SubscriptionAccount {
+  name: string
+  detail?: string
+  envKey?: boolean
+  sharedPath?: string
+}
+
 /** One subscription the page can sign in to. */
 export interface SubscriptionRow {
   id: string
@@ -1557,6 +1574,12 @@ export interface SubscriptionRow {
   flows: string[]
   /** usable / missing / dead / unreachable. */
   state: string
+  /** Who this machine's stored sign-in is; absent when there is no login, no
+   *  name to show, or no capability to read one. */
+  account?: SubscriptionAccount
+  /** The page may offer a sign-out: the subscription can remove its login, one
+   *  is stored, and the environment is not the one holding it. */
+  canLogout?: boolean
 }
 
 /** One model a finished sign-in unlocked. */
@@ -1615,6 +1638,11 @@ export interface ProviderLoginStatus {
    *  pasted back). The page renders one branch per kind; a gateway that names
    *  none leaves the page on the subscription's own declared flow. */
   flow?: string
+  /** Who the just-completed sign-in belongs to, and whether the page may offer
+   *  its sign-out — carried by the completing poll (and the start's own
+   *  completion answer) so the account bar needs no extra round trip. */
+  account?: SubscriptionAccount
+  canLogout?: boolean
 }
 
 export interface PermissionUpdateBody {
@@ -4829,15 +4857,17 @@ export const forebrainApi = {
   },
 
   /** Begins a browser sign-in for one provider and answers the id to poll. The
-   * flow runs in the gateway — a page cannot print a status line or open a
-   * window on the machine the gateway sits on — and it saves the credential the
-   * same way the terminal's /connect does, so one login serves both surfaces.
-   * When the machine already holds a reusable login (or a login that stands
-   * while only the model listing is unreachable), the gateway answers the
-   * request itself with `status: 'complete'` and the base URL — there is no
-   * login to poll. */
-  async startProviderLogin(provider: ProviderLoginProvider) {
-    const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}`, {
+   *  flow runs in the gateway — a page cannot print a status line or open a
+   *  window on the machine the gateway sits on — and it saves the credential the
+   *  same way the terminal's /connect does, so one login serves both surfaces.
+   *  When the machine already holds a reusable login (or a login that stands
+   *  while only the model listing is unreachable), the gateway answers the
+   *  request itself with `status: 'complete'` and the base URL — there is no
+   *  login to poll. `force` skips that shortcut: replacing the account is the
+   *  point, so the flow runs even when the stored login works. */
+  async startProviderLogin(provider: ProviderLoginProvider, opts?: { force?: boolean }) {
+    const query = opts?.force ? '?force=1' : ''
+    const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}${query}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
     })
@@ -4847,6 +4877,8 @@ export const forebrainApi = {
       loginId?: string
       status?: 'pending' | 'complete'
       baseUrl?: string
+      account?: SubscriptionAccount
+      canLogout?: boolean
     }
   },
 
@@ -4874,12 +4906,24 @@ export const forebrainApi = {
   },
 
   /** Ends a sign-in the page walked away from. An id the gateway already
-   * forgot is over either way, so its 404 is not a failure here. */
+   *  forgot is over either way, so its 404 is not a failure here. */
   async cancelProviderLogin(provider: ProviderLoginProvider, loginId: string) {
     const res = await gatewayFetch(`${API_BASE}/auth/login/${provider}/${encodeURIComponent(loginId)}/cancel`, {
       method: 'POST',
     })
     if (!res.ok && res.status !== 404) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
+  },
+
+  /** Removes one subscription's stored sign-in. The model rows it wrote stay;
+   *  their calls fail until the user signs in again. 204 is the plain success;
+   *  a 409 with `externalLogin` says an environment variable or the official
+   *  client will sign this machine back in (the stored login was still
+   *  removed); anything else is a failure worth retrying. */
+  async logoutSubscription(id: string) {
+    const res = await gatewayFetch(`${API_BASE}/subscriptions/${encodeURIComponent(id)}/logout`, {
+      method: 'POST',
+    })
+    if (!res.ok) throw new GatewayHttpError(res.status, await gatewayErrorText(res))
   },
 
   hooks() {

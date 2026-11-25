@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -103,4 +104,61 @@ func (openCodeGo) Provision(ctx context.Context, env Env, offers []Offer, opts P
 // RefreshKey has nothing to fetch: a Go subscription row holds no key.
 func (openCodeGo) RefreshKey(ctx context.Context, env Env, modelID string) error {
 	return ErrNoKeyToRefresh
+}
+
+// Account names who the stored sign-in belongs to, read locally from the
+// credential — no vendor call. The email is the identity the person
+// recognizes; the account id stands in when the login carried no email, and
+// the organization rides along as the detail. With no stored login but
+// OPENCODE_API_KEY set, the account is the variable itself and EnvKey says a
+// surface must not offer a logout for it — the environment, not this store,
+// is holding the sign-in.
+func (openCodeGo) Account(ctx context.Context, env Env) (Account, bool, error) {
+	raw, err := opencode.LoadStoredCredentials(ctx, env.Home)
+	if err != nil {
+		return Account{}, false, err
+	}
+	if raw == nil {
+		if strings.TrimSpace(os.Getenv(opencode.APIKeyEnv)) != "" {
+			return Account{Name: opencode.APIKeyEnv, EnvKey: true}, true, nil
+		}
+		return Account{}, false, nil
+	}
+	c, err := opencode.LoadProcessCredentials(ctx, opencode.DefaultPath(env.Home))
+	if err != nil {
+		return Account{}, false, nil // stored but unreadable: no name to show
+	}
+	name := c.Email
+	if name == "" {
+		name = c.AccountID
+	}
+	if name == "" {
+		return Account{}, false, nil
+	}
+	return Account{Name: name, Detail: c.OrgName}, true, nil
+}
+
+// Logout removes the stored sign-in from the store's row and the file. When
+// the environment supplies the sign-in instead, there is nothing to remove
+// here: ErrExternalLogin tells the surface the machine will be signed in
+// again until the variable is unset where Forebrain Harness starts.
+func (openCodeGo) Logout(ctx context.Context, env Env) error {
+	raw, err := opencode.LoadStoredCredentials(ctx, env.Home)
+	if err != nil {
+		return err
+	}
+	envKey := strings.TrimSpace(os.Getenv(opencode.APIKeyEnv)) != ""
+	if raw == nil {
+		if envKey {
+			return fmt.Errorf("%w: unset %s in the shell that starts Forebrain Harness", ErrExternalLogin, opencode.APIKeyEnv)
+		}
+		return nil
+	}
+	if err := opencode.ClearStoredCredentials(ctx, env.Home); err != nil {
+		return err
+	}
+	if envKey {
+		return fmt.Errorf("%w: the stored login was removed; %s still signs this machine in", ErrExternalLogin, opencode.APIKeyEnv)
+	}
+	return nil
 }

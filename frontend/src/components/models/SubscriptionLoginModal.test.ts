@@ -27,7 +27,14 @@ function subscriptions(): SubscriptionRow[] {
   return [
     { id: 'opencode-go', name: 'OpenCode Go', flows: ['device_code'], state: 'missing' },
     { id: 'chatgpt', name: 'ChatGPT', flows: ['paste_callback'], state: 'missing' },
-    { id: 'volcengine', name: '火山方舟', flows: ['device_code'], state: 'usable' },
+    {
+      id: 'volcengine',
+      name: '火山方舟',
+      flows: ['device_code'],
+      state: 'usable',
+      account: { name: 'AKLT…f3a9', detail: 'STS' },
+      canLogout: true,
+    },
   ]
 }
 
@@ -294,6 +301,164 @@ describe('SubscriptionLoginModal', () => {
     await flushPromises()
     const second = vi.mocked(forebrainApi.provisionSubscription).mock.calls[1][1] as Record<string, unknown>
     expect(second.key).toBe('ark-pasted-placeholder')
+  })
+
+  // The account the stored sign-in names takes the first step's second line:
+  // the person is choosing between accounts, not between protocols, and a
+  // subscription with no account keeps the flow sentence it always had.
+  it('names the account beside a signed-in subscription on the first step', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    const wrapper = mountModal()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="models-sub-account-volcengine"]').text()).toBe('AKLT…f3a9 · STS')
+    expect(wrapper.find('[data-testid="models-sub-account-chatgpt"]').exists()).toBe(false)
+  })
+
+  // A usable row opens straight on its models with the account bar above them:
+  // who the machine is signed in as, and the way out of it.
+  it('shows the account bar with a sign-out on the models step', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine' })])
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+
+    const bar = wrapper.find('[data-testid="models-login-account"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.text()).toContain('AKLT…f3a9')
+    expect(bar.text()).toContain('STS')
+    expect(wrapper.find('[data-testid="models-logout"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="models-switch-account"]').exists()).toBe(true)
+  })
+
+  // A confirmed sign-out removes the login, tells the page that owns the table
+  // to refresh, and lands the person back on the first step.
+  it('signs out through the confirmation and returns to the first step', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine' })])
+    const logout = vi.spyOn(forebrainApi, 'logoutSubscription').mockResolvedValue(undefined)
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="models-logout"]').trigger('click')
+    await flushPromises()
+
+    // The confirmation says what a sign-out costs before anything is removed.
+    expect(logout).not.toHaveBeenCalled()
+    const message = wrapper.find('.forebrain-confirm-message').text()
+    expect(message).toContain('将删除本机保存的登录凭据')
+    expect(message).toContain('已添加的模型会保留，但在重新登录前无法调用')
+
+    await wrapper.find('[data-testid="confirm-ok"]').trigger('click')
+    await flushPromises()
+
+    expect(logout).toHaveBeenCalledWith('volcengine')
+    expect(wrapper.emitted('changed')).toBeTruthy()
+    expect(wrapper.text()).toContain('第 1 步')
+  })
+
+  // A shared credential file is named in the confirmation: the sign-out would
+  // remove the Codex CLI's own login, and the person decides knowing it.
+  it('names the shared credential file in the sign-out confirmation', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue([
+      { ...subscriptions()[2], account: { name: 'dev@example.test', sharedPath: '/Users/dev/.codex/auth.json' } },
+    ])
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine' })])
+    vi.spyOn(forebrainApi, 'logoutSubscription').mockResolvedValue(undefined)
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="models-logout"]').trigger('click')
+    await flushPromises()
+
+    const message = wrapper.find('.forebrain-confirm-message').text()
+    expect(message).toContain('/Users/dev/.codex/auth.json')
+    expect(message).toContain('这份凭据与 Codex CLI 共用')
+    expect(message).toContain('退出会同时让 Codex CLI 退出登录')
+    // Nothing was removed while the confirmation stood open.
+    expect(vi.mocked(forebrainApi.logoutSubscription)).not.toHaveBeenCalled()
+  })
+
+  // An external source answering 409 is told as it is: the stored login was
+  // removed, but the machine will be signed in again. The page reads the
+  // refusal's data, never its text.
+  it('explains a 409 external login after the sign-out', async () => {
+    const rows = subscriptions()
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(rows)
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine' })])
+    vi.spyOn(forebrainApi, 'logoutSubscription').mockRejectedValueOnce(
+      new GatewayHttpError(409, JSON.stringify({ error: 'an external source provides this sign-in', external_login: true })),
+    )
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="models-logout"]').trigger('click')
+    await flushPromises()
+    await wrapper.find('[data-testid="confirm-ok"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="models-logout-external"]').text()).toContain('本机保存的登录已删除')
+    expect(wrapper.find('[data-testid="models-logout-external"]').text()).toContain('重新登录')
+    expect(wrapper.emitted('changed')).toBeTruthy()
+  })
+
+  // A sign-in the environment provides is named but never removable here: no
+  // sign-out and no switch, only the hint that says where it comes from.
+  it('offers no sign-out for a sign-in the environment provides', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue([
+      {
+        id: 'opencode-go',
+        name: 'OpenCode Go',
+        flows: ['device_code'],
+        state: 'usable',
+        account: { name: 'OPENCODE_API_KEY', envKey: true },
+        canLogout: false,
+      },
+    ])
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer()])
+
+    const wrapper = mountModal()
+    await flushPromises()
+    expect(wrapper.find('[data-testid="models-sub-account-opencode-go"]').text()).toContain('环境变量提供')
+    await wrapper.find('[data-subscription="opencode-go"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="models-logout"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="models-switch-account"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="models-login-envkey"]').text()).toContain('OPENCODE_API_KEY')
+    expect(wrapper.find('[data-testid="models-login-envkey"]').text()).toContain('unset')
+  })
+
+  // Switching accounts runs the flow again on purpose: the gateway's
+  // "already signed in" shortcut is exactly what must not fire.
+  it('switching accounts starts the flow with force', async () => {
+    vi.spyOn(forebrainApi, 'subscriptions').mockResolvedValue(subscriptions())
+    vi.spyOn(forebrainApi, 'subscriptionOffers').mockResolvedValue([offer({ provider: 'volcengine' })])
+    const start = vi
+      .spyOn(forebrainApi, 'startProviderLogin')
+      .mockResolvedValue({ provider: 'volcengine', loginId: 'login-9' })
+    vi.spyOn(forebrainApi, 'providerLoginStatus').mockResolvedValue(
+      status({ status: 'complete', baseUrl: 'https://opencode.ai/zen/go/v1', flow: 'device_code' }),
+    )
+
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.find('[data-subscription="volcengine"]').trigger('click')
+    await flushPromises()
+    expect(start).not.toHaveBeenCalled()
+
+    await wrapper.find('[data-testid="models-switch-account"]').trigger('click')
+    await flushPromises()
+    expect(start).toHaveBeenCalledWith('volcengine', { force: true })
   })
 
   it('offers to create a key when the account holds none', async () => {

@@ -70,9 +70,10 @@
       @saved="onSaved"
       @duplicate="gotoRow"
       @open-subscribe="relogin"
+      @changed="onChanged"
     />
 
-    <SubscriptionLoginModal :open="subscribeOpen" :initial-id="subscribeId" @close="subscribeOpen = false" @saved="onSubscribed" />
+    <SubscriptionLoginModal :open="subscribeOpen" :initial-id="subscribeId" @close="subscribeOpen = false" @saved="onSubscribed" @changed="onChanged" />
 
     <ConfirmDialog
       :open="removeRow !== null"
@@ -234,6 +235,16 @@ function onSaved(): void {
 function onSubscribed(): void {
   subscribeOpen.value = false
   void reload()
+}
+
+/** A sign-in changed (a sign-out, or an external source answering one): the
+ *  table is reread, and the open drawer's row — a snapshot taken when it
+ *  opened — is re-pointed at the fresh row so the source card's badge and
+ *  account line flip in place, the drawer staying open. */
+async function onChanged(): Promise<void> {
+  const openId = drawerOpen.value ? drawerRow.value?.id : undefined
+  await reload()
+  if (openId) drawerRow.value = rows.value.find((row) => row.id === openId) ?? drawerRow.value
 }
 
 async function makeDefault(row: LlmModelRow): Promise<void> {

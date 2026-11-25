@@ -473,3 +473,28 @@ func saveVolcengineCredential(ctx context.Context, env Env, credential volcengin
 	}
 	return volcengineStore(env).SaveCredential(ctx, volcengineCredentialSection, raw)
 }
+
+// Account names who the stored sign-in belongs to by the only identity it
+// carries: the AccessKeyID, masked — it is half of a credential pair, so no
+// surface may ever show it whole. "STS" is the detail, because that is what
+// this login is. (A found credential always has a non-empty AccessKeyID:
+// loadVolcengineCredential answers not-found for a row without one.)
+func (volcengine) Account(ctx context.Context, env Env) (Account, bool, error) {
+	credential, found, err := loadVolcengineCredential(ctx, env)
+	if err != nil {
+		return Account{}, false, err
+	}
+	if !found {
+		return Account{}, false, nil
+	}
+	return Account{Name: MaskID(credential.AccessKeyID), Detail: "STS"}, true, nil
+}
+
+// Logout removes the console sign-in: this login lives in the one credential
+// row, with no file fallback and no environment source.
+func (volcengine) Logout(ctx context.Context, env Env) error {
+	if env.DB == nil {
+		return nil
+	}
+	return volcengineStore(env).SaveCredential(ctx, volcengineCredentialSection, nil)
+}

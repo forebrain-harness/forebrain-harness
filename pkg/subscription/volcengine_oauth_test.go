@@ -294,3 +294,45 @@ func deviceAuthForTests() volcengineDeviceAuth {
 		ExpiresIn: 600, Interval: 1,
 	}
 }
+
+// The account is the masked AccessKeyID — the whole key never leaves this
+// package — and the detail says what the login is: an STS credential.
+func TestVolcengineAccountMasksTheAccessKeyID(t *testing.T) {
+	ctx := context.Background()
+
+	env := testEnv(t)
+	require.NoError(t, saveVolcengineCredential(ctx, env, volcengineCredential{
+		AccessKeyID: stubAccessKeyID, SecretAccessKey: stubSecretKey, SessionToken: stubSession,
+	}))
+	account, found, err := (volcengine{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: MaskID(stubAccessKeyID), Detail: "STS"}, account)
+	require.Equal(t, "AKLT…lder", account.Name)
+	require.NotContains(t, account.Name, stubAccessKeyID)
+
+	// No row: absent is an answer, not an error.
+	account, found, err = (volcengine{}).Account(ctx, testEnv(t))
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, Account{}, account)
+}
+
+// Logout removes the one place this login lives, the credential row; a
+// machine without the database has nothing to remove.
+func TestVolcengineLogoutRemovesTheCredentialRow(t *testing.T) {
+	ctx := context.Background()
+
+	env := testEnv(t)
+	require.NoError(t, saveVolcengineCredential(ctx, env, volcengineCredential{
+		AccessKeyID: stubAccessKeyID, SecretAccessKey: stubSecretKey, SessionToken: stubSession,
+	}))
+	require.NoError(t, (volcengine{}).Logout(ctx, env))
+	_, found, err := loadVolcengineCredential(ctx, env)
+	require.NoError(t, err)
+	require.False(t, found)
+
+	// No database: nothing to remove, and no error for a machine that never
+	// signed in here.
+	require.NoError(t, (volcengine{}).Logout(ctx, Env{Home: t.TempDir()}))
+}

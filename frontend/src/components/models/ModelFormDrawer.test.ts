@@ -493,3 +493,107 @@ describe('ModelFormDrawer default effort', () => {
     wrapper.unmount()
   })
 })
+
+// The source card names who the row's sign-in is signed in as, and its
+// sign-out is a confirmation that hands the removal to the page that owns the
+// rows — the drawer stays open on whatever the fresh row says.
+describe('ModelFormDrawer account and sign-out', () => {
+  it('names the account under the source card head', async () => {
+    const wrapper = mountDrawer({
+      row: row({
+        source: 'chatgpt',
+        sourceName: 'ChatGPT',
+        sourceState: 'usable',
+        sourceAccount: { name: 'dev@example.test', detail: 'plus' },
+        sourceCanLogout: true,
+        loginBacked: true,
+        apiKeySet: false,
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        apiPath: '/responses',
+      }),
+    })
+    await flushPromises()
+
+    const account = wrapper.get('[data-testid="models-source-account"]')
+    expect(account.text()).toContain('当前账号')
+    expect(account.text()).toContain('dev@example.test')
+    expect(account.text()).toContain('plus')
+    expect(wrapper.find('[data-testid="models-source-logout"]').exists()).toBe(true)
+  })
+
+  it('hides the account line and the sign-out when the row carries neither', async () => {
+    const wrapper = mountDrawer({
+      row: row({
+        source: 'chatgpt',
+        sourceName: 'ChatGPT',
+        sourceState: 'missing',
+        loginBacked: true,
+        apiKeySet: false,
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        apiPath: '/responses',
+      }),
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="models-source-account"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="models-source-logout"]').exists()).toBe(false)
+  })
+
+  it('signs out through the confirmation and hands the refresh to the page', async () => {
+    const logout = vi.spyOn(forebrainApi, 'logoutSubscription').mockResolvedValue(undefined)
+    const wrapper = mountDrawer({
+      row: row({
+        source: 'chatgpt',
+        sourceName: 'ChatGPT',
+        sourceState: 'usable',
+        sourceAccount: { name: 'dev@example.test' },
+        sourceCanLogout: true,
+        loginBacked: true,
+        apiKeySet: false,
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        apiPath: '/responses',
+      }),
+    })
+    await flushPromises()
+    await wrapper.find('[data-testid="models-source-logout"]').trigger('click')
+    await flushPromises()
+
+    // The confirmation says what a sign-out costs before anything is removed.
+    expect(logout).not.toHaveBeenCalled()
+    const message = wrapper.find('.forebrain-confirm-message').text()
+    expect(message).toContain('将删除本机保存的登录凭据')
+    expect(message).toContain('已添加的模型会保留，但在重新登录前无法调用')
+
+    await wrapper.find('[data-testid="confirm-ok"]').trigger('click')
+    await flushPromises()
+
+    expect(logout).toHaveBeenCalledWith('chatgpt')
+    expect(wrapper.emitted('changed')).toBeTruthy()
+    // The drawer itself stays open: the fresh row is the page's to hand back.
+    expect(wrapper.find('[data-testid="models-source-card"]').exists()).toBe(true)
+  })
+
+  it('names the shared credential file in the sign-out confirmation', async () => {
+    vi.spyOn(forebrainApi, 'logoutSubscription').mockResolvedValue(undefined)
+    const wrapper = mountDrawer({
+      row: row({
+        source: 'chatgpt',
+        sourceName: 'ChatGPT',
+        sourceState: 'usable',
+        sourceAccount: { name: 'dev@example.test', sharedPath: '/Users/dev/.codex/auth.json' },
+        sourceCanLogout: true,
+        loginBacked: true,
+        apiKeySet: false,
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        apiPath: '/responses',
+      }),
+    })
+    await flushPromises()
+    await wrapper.find('[data-testid="models-source-logout"]').trigger('click')
+    await flushPromises()
+
+    const message = wrapper.find('.forebrain-confirm-message').text()
+    expect(message).toContain('/Users/dev/.codex/auth.json')
+    expect(message).toContain('这份凭据与 Codex CLI 共用')
+  })
+})

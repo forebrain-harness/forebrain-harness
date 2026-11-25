@@ -2,8 +2,12 @@ package subscription
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -176,4 +180,107 @@ func TestChatGPTProvisionWritesKeylessRowsOfItsOwnSource(t *testing.T) {
 func TestChatGPTRefreshKeyHasNothingToRefresh(t *testing.T) {
 	err := (chatGPT{}).RefreshKey(context.Background(), Env{Home: t.TempDir()}, "some-row-id")
 	require.ErrorIs(t, err, ErrNoKeyToRefresh)
+}
+
+// idTokenFor builds the login's id token, the only place the account's
+// identity rides in the stored file. Just the payload's claims are ever read
+// (nothing verifies a signature), so the header and signature are placeholders.
+func idTokenFor(t *testing.T, claims map[string]any) string {
+	t.Helper()
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "header." + base64.RawURLEncoding.EncodeToString(payload) + ".signature"
+}
+
+// The account is the login's own identity, read locally: the email with the
+// plan beside it, the account id when the login carried no email, and no
+// account at all when nothing is stored or the bytes cannot be read. The
+// sign-in never becomes an error a surface would have to block on.
+func TestChatGPTAccountNamesTheStoredLogin(t *testing.T) {
+	ctx := context.Background()
+
+	env := testEnv(t)
+	require.NoError(t, openai.Save(openai.CredentialsPath(env.Home), openai.Credentials{
+		AccessToken: "at", RefreshToken: "rt", AccountID: "acct-1",
+		IDToken: idTokenFor(t, map[string]any{
+			"email":                          "dev@example.test",
+			"https://api.openai.com/auth":    map[string]any{"chatgpt_plan_type": "plus"},
+			"https://api.openai.com/profile": map[string]any{"email": "profile@example.test"},
+		}),
+	}))
+	account, found, err := (chatGPT{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: "dev@example.test", Detail: "plus"}, account)
+
+	// No id token claims: the account id is the name.
+	env = testEnv(t)
+	require.NoError(t, openai.Save(openai.CredentialsPath(env.Home), openai.Credentials{
+		AccessToken: "at", RefreshToken: "rt", AccountID: "acct-2",
+	}))
+	account, found, err = (chatGPT{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: "acct-2"}, account)
+
+	// No login stored: absent is an answer, not an error.
+	account, found, err = (chatGPT{}).Account(ctx, testEnv(t))
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, Account{}, account)
+
+	// Stored but unreadable: the sign-in stands, there is just no name.
+	env = testEnv(t)
+	require.NoError(t, os.WriteFile(openai.CredentialsPath(env.Home), []byte("not json"), 0o600))
+	account, found, err = (chatGPT{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.False(t, found)
+	require.Equal(t, Account{}, account)
+}
+
+// A credentials.chatgpt override that points outside the install's own home
+// is the Codex CLI's file: the account says so, so a surface can warn before
+// the logout removes another program's login.
+func TestChatGPTAccountNamesASharedCredentialFile(t *testing.T) {
+	ctx := context.Background()
+	shared := filepath.Join(t.TempDir(), "auth.json")
+	openai.SetCredentialsPath(shared)
+	t.Cleanup(func() { openai.SetCredentialsPath("") })
+	require.NoError(t, openai.Save(shared, openai.Credentials{
+		AccessToken: "at", RefreshToken: "rt", AccountID: "acct-3",
+		IDToken: idTokenFor(t, map[string]any{"email": "codex@example.test"}),
+	}))
+
+	env := testEnv(t)
+	account, found, err := (chatGPT{}).Account(ctx, env)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, Account{Name: "codex@example.test", SharedPath: shared}, account)
+}
+
+// Logout removes the login from this machine. The default file is this
+// install's own; a shared one is removed too, because the same login signs
+// that client in.
+func TestChatGPTLogoutRemovesTheStoredLogin(t *testing.T) {
+	ctx := context.Background()
+
+	env := testEnv(t)
+	path := openai.CredentialsPath(env.Home)
+	require.NoError(t, openai.Save(path, openai.Credentials{AccessToken: "at", RefreshToken: "rt"}))
+	require.NoError(t, (chatGPT{}).Logout(ctx, env))
+	_, err := os.Stat(path)
+	require.True(t, os.IsNotExist(err), "the default file survived the logout")
+	raw, err := openai.LoadStoredCredentials(ctx, env.Home)
+	require.NoError(t, err)
+	require.Nil(t, raw)
+
+	shared := filepath.Join(t.TempDir(), "auth.json")
+	openai.SetCredentialsPath(shared)
+	t.Cleanup(func() { openai.SetCredentialsPath("") })
+	require.NoError(t, openai.Save(shared, openai.Credentials{AccessToken: "at", RefreshToken: "rt"}))
+	require.NoError(t, (chatGPT{}).Logout(ctx, env))
+	_, err = os.Stat(shared)
+	require.True(t, os.IsNotExist(err), "the shared file survived the logout")
 }
