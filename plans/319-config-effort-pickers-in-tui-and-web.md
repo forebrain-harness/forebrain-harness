@@ -31,6 +31,7 @@
   `turn.SetupReasoningEfforts`, gateway validation)
 - **Category**: consistency / UX
 - **Planned at**: `1013b50f`, 2026-11-17
+- **Landed**: `2106a0d9`（2026-11-18 TUI 半边「feat(tui): a thinking level is picked from its model row's levels」）＋`6eedfc99`（同日 web 半边「feat(web): a settings thinking level is its own field kind」）。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`pkg/tui/config_panel_schema.go` 四条 `reasoning_effort` 行都是 `configFieldEffort`（:472/:490/:500/:512）、`pkg/tui/config_panel.go:946` 的分支在位，web `frontend/src/lib/settingsSchema.ts:55` 有 `'effort'` 字段类型。
 - **Dispatch**: **owner approved on 2026-11-17** ("318/319 已批准派发").
   **Blocked until 313 and 315 are in `dev` and 318 has landed** (it converts
   their rows and needs 318's helper/order/validation). Do not start earlier.

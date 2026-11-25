@@ -6,7 +6,7 @@
 
 ## Status
 
-- **Status**: TODO（原型已交付并浏览器实测；**派发执行前 owner 须确认原型并在 §0 留痕**，执行器开工前必须核对 §0 的 SHA-256 闸门。2026-11-24 `review-plan` 复核：七处可执行性缺口已就地修订；同日 owner 三项裁决〔dead 也进账号页、env Key 的 `Detail` 留空、共享凭据文件写明路径〕已落进 §2 契约与两份原型，见 §0.2）
+- **Status**: **DONE（2026-11-25 execute 完成并评审 APPROVE；改动在 worktree `exec-374-account-logout` 工作区、零提交、未合并——合并归 owner。详见 §0.3）**
 - **Priority**: P1
 - **Effort**: L（后端能力契约 + 5 个订阅实现 + gateway + TUI 向导 + Web 三组件 + 双语文案 + 测试）
 - **Risk**: MED（删除凭据是不可逆操作，必须确认框先行；登录复用/探测缓存语义不得破坏；模型行保留不删）
@@ -24,6 +24,12 @@
 - **回归脚本**: `plans/374-account-tui-prototype.test.cjs`、`plans/374-account-web-prototype.test.cjs`（node + frontend 的 Playwright，纯断言零写入；运行方式：`python3 -m http.server 8765 --directory plans` 后 `node plans/374-account-tui-prototype.test.cjs`，web 同理）。
 - **已浏览器实测**：见 §0.1 实测留痕（2026-11-24）。关键帧截图 `plans/374-shot-*.png` 由实际渲染 DOM 栅格化。
 - **确认留痕与执行闸门**：owner 确认原型后在本节记录「原型已确认」与日期。执行器开工前必须 `shasum -a 256 plans/374-account-tui-prototype.html plans/374-account-web-prototype.html` 核对等于上述两个值，不符即 STOP 报告，不得按记忆中的旧稿实施。**原型中的文案、页面顺序、选项标签即实施目标**；如原型与 §2 契约冲突，以 §2 为准并先修订原型、重新冻结哈希、重新留痕。
+- **原型已确认（owner 2026-11-24）**：owner 原话「374 的原型已确认」。本次确认的稿就是上面这一对——
+  TUI `7db6a090b584bdb0b655e5af7bb38aeb36389cd43d4ed1bca8f8986eed7eec72`、Web
+  `9c7aa7baf0b4c9daf3a44e79d9aa5c81bde67f6b85200ddb41dbd280ef3c2f05`，确认时在仓库内实跑
+  `shasum -a 256` 逐字相符（含同日三项裁决后的 ⑨ 版场景与文案）。**派发闸门已解除**：不再需要任何
+  原型前置，执行器开工仍须自行复核这两个哈希，不符照旧 STOP；开工后若要改原型，必须先停下、重新
+  冻结哈希、再由 owner 留痕——不得在工作过程中悄悄改稿。
 
 ### 0.1 实测留痕（2026-11-24 交付实测）
 
@@ -45,6 +51,57 @@
 3. **共享凭据文件把路径写进确认框**（owner 选项：写明路径）。`credentials.chatgpt` 指到 Codex CLI 的 `~/.codex/auth.json` 时，退出席会删掉那个共用文件；原稿文案只说「本机保存的登录凭据」，读起来是本产品的登录。裁决后：解析出的路径不在安装 home 之下时，TUI Confirm 与 Web `models.logoutMessage` 都把路径写出来并说明那个客户端也会退出登录（两份原型各加一个 `shared` 场景）。
 
 **本轮就地修订（可执行性，不改产品行为）**：§2.1.3 掩码档位、§2.1.4 的 `Detail`、§2.4.1 注释同步、§2.4.2/§2.4.4 的 dead 与退出特判、§2.6 的 409 识别与 405、Step 5 的 ctx 与锁、Step 6 既有测试迁移、Step 9 抽屉刷新、§3.2 transport 已验证、§3.6 引用位置、§9 STOP 3 改为已证事实。
+
+### 0.3 执行留痕（2026-11-25 execute，评审方记录）
+
+owner 指令「execute 374 与 248」。执行器 worktree `.worktrees/exec-374-account-logout`（分支
+`exec-374-account-logout`，基线 `db4f3f4a`，**零提交，改动留工作区**，no-git-commits）。开工闸门
+（§0 两原型 SHA、27 个 in-scope 文件对 `9552c46c..db4f3f4a` 的 drift check 为空）由派发方与执行器
+各自核过。改动＝§5 清单内 32 个跟踪文件修改＋新增 `pkg/subscription/account.go`/`account_test.go`
+＋回归脚本再生的 17 张 `plans/374-shot-*.png`（未跟踪），零越界、零提交、plans/ 跟踪文件零改动。
+
+**评审独立复跑的判据（全部通过）**：六组 Go 包 `go test -tags fts5 -count=1`（subscription 1.9s、
+gateway 11.7s、openai 6.0s、opencode 0.4s、qodercn 1.9s、workbuddy 2.3s、tui 196.4s，全 ok）；
+`gofmt -l` 全部改动 .go 为空；`pnpm typecheck` exit 0；`pnpm test` 195 文件/1599 全过（基线 1586＋
+新增）；原型闸门复跑 SHA 相符、TUI 14/14、Web 12/12、`browserErrors: []`；`grep` 证 `Subscription`
+接口本体未加方法、`pkg/gateway/`+`frontend/src/` 无 `AccessKeyID`；§8 六条行为判据均有对应测试
+（模型行在退出后保留且 `source_state` 翻 missing 由 `TestSubscriptionsAPIAccountAndLogout` 断言）。
+环境噪音非回归：pkg/architecture `TestWebBuildLoadsNoExternalAsset` 在 fresh worktree 因无
+`pkg/gateway/dist` 拒跑（Step 10 命令集不含 architecture；主树有 dist 即过）；
+`TestTestFilesCorrespondToProductionFiles` 为 §4 明示预存失败，未修。
+
+**执行器已文档化偏差（评审逐条核过、全部接受）**：
+1. `pkg/llm/openai/auth.go` 的 `parseCredentials` 补解码 id_token claims（email/plan）——落盘的
+   Codex 形状（`storedAuth`）不含这两个字段，登录路径 `credentialsFromTokens` 本就解码同一组
+   claims；不补则 §2.1 契约（Name=Email、Detail=Plan）在新进程里永远回退 AccountID。同款提取
+   逻辑、同款 claim 键，新测试 `TestLoadDecodesTheAccountIdentityFromTheIDToken` 钉住。
+2. volcengine 的 `Account` 去掉计划里「AccessKeyID 非空」守卫——`volcengineCreds.empty()` 已把
+   AccessKeyID 或 SecretAccessKey 为空判为 not-found（`volcengine_openapi.go:49`），found ⇒ 非空，
+   守卫是不可达分支（owner 常设规则：不为不可能状态写防御分支）。
+3. gateway 请求级账号缓存用单 map（presence=已读、nil=读后为空）等价计划的双 map 方案。
+4. 两对语义重合的测试做了合并而非重复造测：`TestFlowInsertsTheAccountPageForAnyStoredLogin` ≡
+   迁移后的 `TestSubscriptionFlowDropsSettledSignInPage` 三态表（usable/unreachable/dead 都得
+   `[Provider, Account, Offers, …]`）；`TestAccountPageDeadOffersSignInAgainAndSignOut` ≡ 迁移后的
+   `TestConfigureSubscriptionDeadLoginRunsTheFlow`（同一脚本，dead 页选项断言
+   `[Sign in again, Sign out]` 已并入）。净新增 TUI 测试函数 9 个，计划列的 10 个行为全覆盖。
+5. locales 增加一个 §2.7 表之外的键 `models.currentAccount`（当前账号/Account）——冻结 Web 原型
+   在抽屉账号行硬编码「当前账号」标签，原型即实施目标。
+
+**评审判定 APPROVE；合并与提交归 owner。**
+
+**同日落地留痕（owner「合并回主树dev分支」）**：worktree 内提交
+`feat(subscription): name the signed-in account and offer its sign-out (plan 374)`
+（34 文件＋2752/−103，不含 17 张截图）→ rebase 到已含 377＋248 的 dev 尖 `aad6fb9d`
+（无冲突，提交变 `3a261297`；pkg/tui 与 377 的 picker 改动首次同树，全套门禁即集成门）→
+rebase 后门禁复跑全绿：六组 Go 包全 ok（tui 197.4s）、gofmt 净、typecheck 0、
+前端 195 文件/1599、原型闸门 SHA 相符＋TUI 14/14＋Web 12/12＋browserErrors=[] →
+主树 `git merge --ff-only` 落 dev（`aad6fb9d..3a261297`，源码与测试提交逐字一致）。
+合并后主树门禁：`go test -tags fts5 ./...` 全量 **39 ok＋1 失败**（失败＝
+`pkg/architecture TestTestFilesCorrespondToProductionFiles`，§4 明示的预存
+deliverables_outcome 配对缺，与本改动无关）；`gofmt -l cmd pkg third_party plugins` 净；
+`go vet -tags fts5 ./...` exit 0；前端 typecheck 0＋1599 全过。worktree 与分支已删，
+未 push；17 张 `plans/374-shot-*.png` 未入库——两份 `.test.cjs` 回归脚本随跑随再生
+（`python3 -m http.server 8765 --directory plans` 后 `node` 跑两脚本即得）。
 
 ## 1. Why this matters
 

@@ -68,6 +68,7 @@
   Do not run in parallel with 311/312 (`pkg/tui/setup.go`).
 - **Category**: migration / feature
 - **Planned at**: 2026-11-16, on top of `7611d6cc`
+- **Landed**: `fcfb4df1`（2026-11-17，删掉 `llm_providers` 全链：`AgentDefinition.LLMProviders` 与七个 legacy helper）＋`f170d8f5`（同日「/config hides the retired key, rows feed the pickers」）＋`46a86fd4`（启动错误文案）。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`pkg/tui/config_panel.go:869` 的 `dropRetiredAgentKeys`、`pkg/home/data_test.go:141-143` 钉住 seed 不含 `llm_providers` 在位。
 
 ## Why this matters
 

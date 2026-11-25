@@ -18,6 +18,37 @@
 > 另：脚本的 skip 集需补 `.worktrees`（否则把两个 worktree 副本各数一遍，TOTAL 18 假象）；317 携带修正版脚本。
 > 三引擎电池与负控制仍未复跑——索引状态保持「待复核」，317 落地且电池复跑后再改 DONE。
 
+> **2026-11-24 reconcile 留痕（HEAD `cba1bfba`，工作区干净）**：317 已落地（dev `1013b50f`）。下文枚举脚本
+> 在 skip 集补上 `.worktrees`（317 的修正版）后复跑得 **`TOTAL 3`**，全部落在同一个文件：
+> `pkg/process/subagent_migration_test.go:179/:210/:224` 的
+> `` env.SQL.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = ?`, …) ``。
+> 该文件由 `d7c2e5b6`（2026-11-19「merge the shared subagent registry into definitions」）带入，
+> 句柄 `env.SQL` 跟随引擎（`importOpenForTest`），故本计划的不变量适用、不是「钉死 SQLite」的豁免情形。
+> **两处判据随 owner 裁决更新**：
+> ① 三引擎电池与负控制**不再要求**——owner 常设裁决「本仓永不执行 `scripts/test-db.sh`」，SQL 改动只以
+> SQLite 单测 + 代码核对验证；计划里「电池复跑后再改 DONE」的句子作废，此后再也不要为它起容器。
+> ② 因此本计划现在**唯一的**完成判据就是：把上面三处包进 `dbx.Rebind(dbx.DialectOf(<同一句柄>), …)`
+> 后复跑枚举脚本到 `TOTAL 0`。索引行已按此复位为 TODO。
+
+> **2026-11-25 execute 留痕（评审方）**：owner 指令「execute 374 与 248」。执行器 worktree
+> `.worktrees/exec-248-rebind`（分支 `exec-248-rebind`，基线 `db4f3f4a`，**零提交，改动留工作区**，
+> no-git-commits）。完成的就是上面三处：`env.SQL.QueryRowContext` 的三条
+> `SELECT value_json FROM fb_config WHERE section = ?` 包 `dbx.Rebind(dbx.DialectOf(env.SQL), …)`
+> （语句逐字未动，`pkg/state/dbx` import 按序补入），+8/−3 单文件。评审独立复跑全部判据：
+> 派发前主树扫描 **TOTAL 3**（三处行号与本留痕一致）→ 改后 worktree 扫描 **TOTAL 0**；
+> `FOREBRAIN_HOME=$(mktemp -d) CGO_ENABLED=1 go test -tags fts5 ./pkg/process -count=1` → ok 228s；
+> `gofmt -l` 空；`go vet -tags fts5 ./pkg/process` exit 0；`git status --porcelain` 恰好一个文件。
+> 评审读全量 diff：三处包裹形状照同包 `llm_models_test.go` 的多行先例，句柄与方法同表达式。
+> **评审判定 APPROVE；合并与否归 owner。** 按本留痕前的一条判据更新，本计划至此完成
+> （三引擎电池与负控制按 owner 常设裁决永不起容器，SQLite 单测＋代码核对即为验证）。
+
+> **同日落地留痕（owner「合并回主树dev分支」）**：worktree 内提交
+> `test(process): rebind the migration literals to their engine (plan 248)` → rebase 到
+> 377 落地后的 dev 尖 `9c964e8a`（无冲突，提交变 `aad6fb9d`）→ rebase 后门禁复跑
+> （`./pkg/process` ok 225.8s、gofmt 净、vet 0、扫描 **TOTAL 0**）→ 主树
+> `git merge --ff-only` 落 dev（`9c964e8a..aad6fb9d`，源码与测试提交逐字一致），
+> 主树全量门禁随 374 落地后一并复跑。worktree 与分支已删，未 push。
+
 > **Executor instructions**: Follow the steps in order; confirm each verification
 > before the next. If a STOP condition occurs, stop and report — do not improvise.
 > Do **not** commit, push or merge: leave the change in the working tree and report

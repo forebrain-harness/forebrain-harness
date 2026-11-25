@@ -20,6 +20,7 @@
   labels; **land 318 first** so this plan does not collide with it.
 - **Category**: Feature / consistency
 - **Planned at**: 2026-11-17, on top of `831c45b4`
+- **Landed**: `356ce2b8`（TUI）／`73d63535`（gateway）／`cc292a6c`（web），2026-11-18，三条提交正文各自点名 plan 320。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`pkg/tui/overlays_test.go:4216` 的 `TestExitPlanPickerOpensOnTheConfiguredReviewer` 与 `:4260` 的 `…EvenWhenItIsInForce` 在位。
 
 ## Why this matters
 

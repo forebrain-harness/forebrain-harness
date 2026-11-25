@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Forebrain Harness 项目类型 TUI 原型（待确认）</title>
+<style>
+:root{--page:#0c1015;--card:#11161d;--line:#222b37;--ink:#d6dee8;--mut:#8794a5;--acc:#87afd7;--acc-dim:#5c7a99;--ok:#5faf00;--warn:#ffaf00;--bad:#ff5f5f;--tbg:#101318;--lh:20px}
+*{box-sizing:border-box}body{margin:0;background:var(--page);color:var(--ink);font:14px/1.65 -apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif}button,input{font:inherit}button{cursor:pointer}button:focus-visible,summary:focus-visible{outline:2px solid var(--acc);outline-offset:3px}a{color:var(--acc)}.wrap{max-width:1460px;margin:auto;padding:30px 30px 60px}header{margin-bottom:24px}.eyebrow{font-size:11px;letter-spacing:.14em;color:var(--acc-dim);margin-bottom:8px}h1{font-size:23px;line-height:1.3;margin:0 0 9px;letter-spacing:.2px}.sub{color:var(--mut);max-width:1000px}.sub code,code{color:var(--acc);background:#161d27;padding:1px 5px;border-radius:4px;font-size:.95em}.badge{display:inline-block;border:1px solid #624a27;color:#d9ae70;background:#292116;border-radius:4px;font-size:11px;letter-spacing:0;padding:2px 7px;margin-left:10px;vertical-align:3px}.layout{display:grid;grid-template-columns:252px minmax(0,1fr);gap:22px;align-items:start}nav{position:sticky;top:20px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 10px;max-height:calc(100vh - 40px);overflow:auto}.group{color:var(--acc-dim);font-size:11px;letter-spacing:.12em;margin:15px 8px 6px}.group:first-child{margin-top:2px}nav button{display:block;width:100%;text-align:left;background:none;border:0;color:var(--ink);font-size:13px;padding:8px 9px;border-radius:7px;line-height:1.45}nav button:hover{background:#18202b}nav button.on{background:#1b2634;color:#fff;box-shadow:inset 2px 0 0 var(--acc)}nav .num{color:var(--acc-dim);font-size:12px;margin-right:8px;font-variant-numeric:tabular-nums}.nav-foot{border-top:1px solid var(--line);margin:15px 8px 0;padding-top:12px;font-size:12px;color:var(--mut)}.stage{min-width:0;overflow-x:auto}.bar{display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap}.bar h2{font-size:15px;margin:0;font-weight:600}.dims{margin-left:auto;display:flex;gap:6px;align-items:center;color:var(--mut);font-size:12px}.dims button,.small-button{background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:6px;padding:3px 9px;font-size:12px}.dims button.on{color:var(--acc);border-color:var(--acc-dim)}.term{background:var(--tbg);border:1px solid #26303d;border-radius:12px;overflow:hidden;box-shadow:0 18px 50px #0007;outline:none}.term:focus-visible{border-color:#5c7a99}.thead{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #1e2631;color:var(--mut);font-size:12px;background:#0e1218}.dot{width:9px;height:9px;border-radius:50%;background:#2c3745}.tt{margin-left:6px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.kb{margin-left:auto;color:var(--acc-dim)}.screen{padding:12px 8px 14px;overflow-x:auto}.grid{font-family:ui-monospace,SFMono-Regular,"SF Mono","Fira Code",Menlo,Consolas,monospace;font-size:13px;line-height:var(--lh);width:max-content;margin:auto;font-variant-ligatures:none}.row{white-space:pre;height:var(--lh)}.row[data-hit]{cursor:pointer}.row[data-hit]:hover{background:#17202b}.fg110{color:#87afd7}.fg45{color:#00d7ff}.fg74{color:#5fafd7}.fg70{color:#5faf00}.fg203{color:#ff5f5f}.fg214{color:#ffaf00}.fg245{color:#8a8a8a}.fg244{color:#808080}.fg249{color:#b2b2b2}.fg252{color:#d0d0d0}.fg90{color:#808080}.bg238{background:#444}.b{font-weight:700}.ft{opacity:.52}.rev{background:#d0d0d0;color:#444;opacity:1}.cap{margin-top:12px;color:var(--mut);font-size:13px;min-height:43px}.cap b{color:var(--ink)}.keys{margin-top:9px;color:var(--acc-dim);font-size:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}.key{background:#18202b;border:1px solid #2a3542;border-bottom-width:2px;border-radius:4px;padding:1px 8px;font:12px ui-monospace,Menlo,monospace;color:var(--ink)}.key:hover{border-color:var(--acc-dim)}.inspection{margin-top:20px;border:1px solid var(--line);border-radius:10px;background:var(--card)}.inspect-head{display:flex;gap:12px;align-items:center;padding:12px 15px;font-size:13px;border-bottom:1px solid var(--line)}.inspect-head strong{font-weight:500}.inspect-head span{color:var(--mut);font-size:12px}.inspect-head button{margin-left:auto}.inspect-body{display:grid;grid-template-columns:1fr 1fr;gap:22px;padding:15px}.inspect-title{font-size:11px;letter-spacing:.06em;color:var(--acc-dim);margin-bottom:8px}.kv{display:grid;grid-template-columns:108px minmax(0,1fr);gap:5px 8px;font-size:12px}.kv dt{color:var(--mut)}.kv dd{margin:0;overflow-wrap:anywhere}.events{font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--mut);max-height:152px;overflow:auto}.events div{padding-left:10px;border-left:1px solid #2a394a;margin:4px 0}.events .good{color:#91ac76}.events .bad{color:#e29288}.events .warn{color:#d9ae70}details{border-top:1px solid var(--line);padding:10px 15px;color:var(--mut);font-size:12px}summary{cursor:pointer}pre{font:12px/1.7 ui-monospace,Menlo,monospace;color:var(--ink);overflow:auto;max-height:260px;margin:12px 0 2px}.notes{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:25px}.note{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:17px 18px}.note h3{font-size:13px;color:var(--acc);margin:0 0 8px}.note p{margin:6px 0;font-size:12px;color:var(--mut)}.legend{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--acc);margin-right:5px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}@media(max-width:1100px){.wrap{padding:22px 18px 40px}.layout{grid-template-columns:225px minmax(0,1fr)}.notes{grid-template-columns:1fr}.inspect-body{grid-template-columns:1fr}}@media(max-width:840px){.layout{grid-template-columns:1fr}nav{position:static;max-height:240px}.bar h2{width:100%}.dims{margin-left:0}.kb{display:none}.wrap{padding:20px 12px}.badge{display:block;width:max-content;margin:10px 0 0}.grid{margin:0}.inspect-head{flex-wrap:wrap}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header><div class="eyebrow">FOREBRAIN HARNESS / DESIGN REVIEW</div><h1>项目类型：在终端里查看并修改<span class="badge">待确认原型，未实施</span></h1><div class="sub">沿用 <code>374-account-tui-prototype.html</code> 的终端渲染规范；版式与 footer 取真实选择器（<code>❯ 标签  说明</code> 两列、全小写一行 hint）。输入 <code>/project</code> 打开项目类型面板：三类单选，改成别的类型先到确认页。终端面板文案与真实 TUI 一致为英文。<br>点击终端直接按键，也可点击选项；下方观察器显示模拟的项目行、写入次数与事件。演示数据仅在本页内存，不连接数据库。</div></header>
+<div class="layout">
+<nav id="nav" aria-label="原型场景"></nav>
+<main class="stage">
+<div class="bar"><h2 id="scene-title"></h2><div class="dims" aria-label="终端宽度">宽度 <button class="on" data-width="120">120 列</button><button data-width="88">88 列</button><button data-width="68">68 列</button></div></div>
+<div class="term" id="terminal" tabindex="0" role="application" aria-label="可交互的 Forebrain 终端原型。方向键移动，回车确认，Esc 返回。">
+<div class="thead"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="tt" id="terminal-title">forebrain — 120x40</span><span class="kb" id="page-position"></span></div>
+<div class="screen"><div class="grid" id="grid"></div></div>
+</div>
+<div class="cap" id="caption"></div>
+<div class="keys"><span>终端按键</span><button class="key" data-key="ArrowUp" aria-label="向上">↑</button><button class="key" data-key="ArrowDown" aria-label="向下">↓</button><button class="key" data-key="Enter">Enter</button><button class="key" data-key="Escape">Esc</button><span>确认页光标默认停在 No；在当前类型上按 Enter 等同关闭。</span></div>
+<section class="inspection" aria-label="项目行观察器"><div class="inspect-head"><strong>项目行观察器</strong><span>原型辅助区，不属于产品 TUI</span><button class="small-button" id="reset">重置当前场景</button></div><div class="inspect-body"><div><div class="inspect-title">项目与会话</div><dl class="kv" id="facts"></dl></div><div><div class="inspect-title">写入与事件</div><div class="events" id="events"></div></div></div><details><summary>查看模拟项目行（只在本页内存）</summary><pre id="database"></pre></details></section>
+<div class="notes"><section class="note"><h3>已开始的保留，未开始的跟随</h3><p>会话出生时冻结自己的类型。已经说过话的会话（或执行过 <code>/new</code>、<code>/model</code>、<code>/rename</code> 的会话——这些命令会立刻建会话行）保留出生类型，回复里给出 <code>/new</code>；只有还没建行的启动会话跟随新类型（后台把它重新绑定到新类型的运行时），不需要 <code>/new</code>。面板始终点名屏幕上的会话属于哪一种。</p></section><section class="note"><h3>改类型先问一句</h3><p>与 Web 一致：选了别的类型先到确认页，复述「从什么改成什么」与生效范围，光标默认停在 No。选当前类型、按 Esc 都不写入，对话里不留回复。</p></section><section class="note"><h3>跑批的两个方向都写清后果</h3><p>改成后台跑批：任务在网页创建，终端只能查看；回复不建议 <code>/new</code>（跑批会话在终端里发不了消息，首条消息会被拒绝）。改出后台跑批：任务页与任务通知不再显示，已建任务仍可查看；在只读查看器里改出时，回复提示重启终端才能开始新类型的会话。</p></section></div>
+</main></div></div>
+<div id="announcement" class="sr-only" aria-live="polite"></div>
+<script>
+'use strict';
+const $=s=>document.querySelector(s);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const charWidth=c=>/[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/.test(c)?2:1;
+const width=s=>[...String(s)].reduce((n,c)=>n+charWidth(c),0);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const rep=(s,n)=>s.repeat(Math.max(0,n));
+const style=(fg='',bg='',bold=false,faint=false)=>({fg,bg,bold,faint});
+const TXT=style(),ACC=style('110'),TITLE=style('110','',true),DIM=style('244'),HINT=style('','',false,true),BAD=style('203');
+class Line{constructor(hit=null){this.parts=[];this.w=0;this.hit=hit}add(text,s=TXT){text=String(text);this.parts.push({text,s});this.w+=width(text);return this}pad(w,s=TXT){return this.add(rep(' ',w-this.w),s)}}
+const line=(text='',s=TXT,hit=null)=>new Line(hit).add(text,s);
+function wrap(text,max){max=Math.max(1,max);const out=[];let current='';for(const word of String(text).split(' ')){if(!word)continue;if(width(word)>max){if(current)out.push(current);current='';for(const c of word){if(width(current+c)>max){out.push(current);current=''}current+=c}}else if(width(current)+(current?1:0)+width(word)>max){out.push(current);current=word}else current+=(current?' ':'')+word}if(current||!out.length)out.push(current);return out}
+function textRows(text,s=TXT,prefix='  ',hit=null){return wrap(text,COLS-2-width(prefix)).map((chunk,i)=>line(i?rep(' ',width(prefix)):prefix,TXT,hit).add(chunk,s))}
+const clone=x=>JSON.parse(JSON.stringify(x));
+
+// The three kinds of project, in the web's own English words (frontend/src/locales/index.ts).
+const TYPES=[
+ {id:'office',label:'Office work',desc:'Documents, spreadsheets, slide decks'},
+ {id:'coding',label:'Coding',desc:'Code and software projects'},
+ {id:'batch',label:'Batch runs',desc:'Runs tasks for a business system'}];
+const labelOf=id=>TYPES.find(t=>t.id===id)?.label||id;
+const idx=id=>Math.max(0,TYPES.findIndex(t=>t.id===id));
+// The picker's own footer: what SelectRich draws, lowercased by the renderer.
+const FOOTER='↑/↓ to navigate enter to confirm esc to cancel';
+
+const SCENES=[
+ {id:'fresh',group:'A 完整流程',title:'刚打开终端就改（本会话未开始）',desc:'打开终端、还没发消息（也没执行过 /new、/model、/rename）时输入 /project：屏幕上的会话尚无会话行，副标题写明它尚未开始、会跟随新类型。确认后的回复不要求 /new，直接说话就是新类型。'},
+ {id:'picker',group:'A 完整流程',title:'会话已开始时打开',desc:'三类单选：光标停在项目当前类型，✓ 画在标签右侧。副标题一句话写明生效范围，并点名屏幕上的会话保留什么（本次故障场景：项目与本会话都是 Office work，改完本会话仍是 Office work）。'},
+ {id:'confirm',group:'A 完整流程',title:'选了另一种类型：先确认',desc:'确认页复述「把 wenquxing 从 Office work 改成 Coding?」并再写一遍生效范围。光标默认停在 No, go back。'},
+ {id:'saved',group:'A 完整流程',title:'确认后：一帧系统回复',desc:'面板关闭，对话里留一帧系统回复（标题 project，正文缩进两格）：项目类型现为 Coding、本会话保留 Office work、/new 起一个 Coding 会话。已处理的命令本身不回显。再开 /project 时 ✓ 已在 Coding。'},
+ {id:'fresh-saved',group:'B 关键设计帧',title:'未开始的会话确认后',desc:'回复只说两件事：项目类型现为 Coding、本会话开始时取新类型。后台动作：这个会话重新绑定到新类型的运行时（原本在启动时按旧类型预绑定）。'},
+ {id:'reopen',group:'B 关键设计帧',title:'/new 之后：新会话里再打开',desc:'/new 会立刻建会话行并冻结类型，所以要在改完类型之后再 /new：新会话的出生类型就是新类型（Coding）。面板照常点名屏幕上的会话，✓ 在 Coding。'},
+ {id:'cancel',group:'B 关键设计帧',title:'取消：零写入',desc:'确认页按 Esc 或选 No 回到选择页；选择页按 Esc 直接关闭。两步都不写入，对话里不留回复。'},
+ {id:'unchanged',group:'B 关键设计帧',title:'在当前类型上按 Enter',desc:'等同关闭：不写入，也不发回复帧。'},
+ {id:'to-batch',group:'B 关键设计帧',title:'改成后台跑批',desc:'确认页多一句后果：跑批项目的任务在网页创建，终端只能查看。保存后的回复不建议 /new：跑批会话在终端里发不了消息。'},
+ {id:'from-batch',group:'B 关键设计帧',title:'从后台跑批改出（只读查看器里）',desc:'确认页多一句：任务页与任务通知不再显示，已建任务仍可查看。保存后的回复提示重启终端，才能开始一个 Coding 会话。'},
+ {id:'failed',group:'C 边界与失败',title:'写入失败',desc:'存储报错时项目类型不变，对话里留一帧错误回复（存储的原话）。再开 /project 仍是旧类型。'}
+];
+
+let COLS=120,PROJECT,SESSION_TYPE,S,EVENTS=[],WRITES,sceneID='picker',currentItems=[];
+
+// The simulated store. A failed scene answers every write with the error text.
+let FAIL_WRITES=false;
+function event(text,tone=''){EVENTS.push({text,tone});if(EVENTS.length>15)EVENTS.shift()}
+function seed(projectType,sessionType){PROJECT={id:'prj_project-ac41cde0',name:'wenquxing',path:'~/workspace/hundsun/guangfa/wenquxing',type:projectType,sandbox:null};SESSION_TYPE=sessionType;EVENTS=[];WRITES={tried:0,applied:0};FAIL_WRITES=false}
+function openPicker(){S={page:'picker',cursor:idx(PROJECT.type),pending:'',reply:'',tone:'',frameTitle:''}}
+// The confirm page always opens on No, whichever row the picker was on.
+function openConfirm(pending){S.pending=pending;S.page='confirm';S.cursor=0}
+function items(){return S.page==='confirm'
+ ?[{label:'No, go back',value:'no'},{label:'Yes, change to '+labelOf(S.pending),value:'yes'}]
+ :TYPES.map(t=>({label:t.label,desc:t.desc,value:t.id,mark:t.id===PROJECT.type?'✓':''}))}
+function pageTitle(){return S.page==='confirm'?'Change project type':'Project type'}
+// SESSION_TYPE is the type the conversation on screen was born with; null while
+// it has no session row yet (nothing said in it), which is when it still follows
+// the project's current type.
+function scopeSentence(){
+ if(SESSION_TYPE===null)return 'this one has not started, so it takes the new type.';
+ if(SESSION_TYPE==='batch')return S.page==='confirm'?'this screen keeps replaying a batch execution; restart Forebrain Harness to start a '+labelOf(S.pending)+' conversation.':'this screen keeps replaying a batch execution.';
+ return 'this one keeps '+labelOf(SESSION_TYPE)+'.'}
+function subtitle(){
+ const base=PROJECT.name+'. A change reaches conversations started after it';
+ if(S.page==='picker')return base+'; '+scopeSentence();
+ let t='Change '+PROJECT.name+' from '+labelOf(PROJECT.type)+' to '+labelOf(S.pending)+'? Only conversations started after the change get the new type; '+scopeSentence();
+ if(S.pending==='batch')t+=' Batch projects take tasks created on the web; the terminal only views them.';
+ if(PROJECT.type==='batch')t+=' The task page and task notifications stop for this project; tasks already created stay readable.';
+ return t}
+function save(){
+ WRITES.tried++;
+ if(FAIL_WRITES){S.page='closed';S.tone='bad';S.frameTitle='error';S.reply='project type was not changed: database is locked (5) (SQLITE_BUSY).';event('UPDATE fb_projects SET project_type = "'+S.pending+'" ... failed: database is locked (5) (SQLITE_BUSY)','bad');return}
+ const from=PROJECT.type,to=S.pending;PROJECT.type=to;PROJECT.sandbox=to==='batch'?true:PROJECT.sandbox;WRITES.applied++;S.page='closed';S.tone='ok';S.frameTitle='project';
+ const head='Project type is now '+labelOf(to)+'.';
+ // A batch conversation takes no typed message in the terminal, so becoming batch never points at /new.
+ S.reply=to==='batch'
+  ?head+' Batch projects take tasks created on the web; the terminal only views them.'+(SESSION_TYPE!==null&&SESSION_TYPE!=='batch'?' This conversation keeps '+labelOf(SESSION_TYPE)+'.':'')
+  :SESSION_TYPE===null
+  ?head+' This conversation takes the new type when it starts.'
+  :SESSION_TYPE==='batch'
+  ?head+' Tasks already created stay readable. Restart Forebrain Harness to start a '+labelOf(to)+' conversation.'
+  :head+' This conversation keeps '+labelOf(SESSION_TYPE)+'; /new starts a '+labelOf(to)+' conversation.';
+ event('fb_projects.project_type: '+from+' > '+to,'good');
+ if(SESSION_TYPE===null)event('conversation has no session row: re-bound to the new runner generation (the startup binding followed the old type)','warn');
+ if(to==='batch')event('becoming batch: batch_sandbox seeded from the install default; trust recorded (as the web PATCH does)','warn')}
+function activate(index=S.cursor){const list=items(),item=list[index];if(!item)return;S.cursor=index;
+ if(S.page==='picker'){
+  if(item.value===PROJECT.type){S.page='closed';S.reply='';event('Closed on the current type: nothing written');render();return}
+  openConfirm(item.value);render();return}
+ if(item.value==='no'){S.page='picker';S.cursor=idx(S.pending);event('Cancelled at the confirm page: nothing written');render();return}
+ save();render()}
+function back(){if(S.page==='confirm'){S.page='picker';S.cursor=idx(S.pending);event('Cancelled at the confirm page: nothing written')}else if(S.page==='picker'){S.page='closed';S.reply='';event('Closed: nothing written')}render()}
+
+// The type in force carries its check right after the label, the way the real
+// picker draws a row's mark: accent-coloured, at every width. (A Status would be
+// quiet and dropped under 100 columns, panel_columns.go panelNarrowWidth.)
+function listRows(list){const cellW=i=>width(i.label)+(i.mark?1+width(i.mark):0);const maxWidth=Math.min(34,Math.floor((COLS-4)*2/5));const nameWidth=Math.min(maxWidth,Math.max(1,...list.map(cellW)));const rows=[];list.forEach((item,index)=>{const hit={type:'option',index};const focused=index===S.cursor;const prefix=focused?'❯ ':'  ';const base=focused?ACC:TXT;const desc=item.desc||'';const descWidth=Math.max(1,COLS-6-nameWidth);const stack=width(desc)>descWidth&&descWidth<16;const labelChunks=wrap(item.label,nameWidth);if(stack){labelChunks.forEach((t,i)=>{const row=line(i?'  ':prefix,base,hit).add(t);if(i===0&&item.mark)row.add(' '+item.mark,ACC);rows.push(row)});wrap(desc,COLS-4).forEach(t=>rows.push(line('  ',TXT,hit).add(t,DIM)))}else{const descChunks=desc?wrap(desc,descWidth):[''];descChunks.forEach((t,i)=>{const row=line(i?'  ':prefix,base,hit);row.add(i?rep(' ',nameWidth+2):item.label);if(i===0){if(item.mark)row.add(' '+item.mark,ACC);row.pad(nameWidth+4,TXT)}row.add(t,DIM);rows.push(row)})}});return rows}
+function panel(){const head=[...textRows(pageTitle(),TITLE),...textRows(subtitle()),line()];const body=listRows(items());const hints=textRows(FOOTER,HINT);const room=Math.max(1,19-head.length-hints.length-1);let focus=body.findIndex(r=>r.hit?.index===S.cursor);let focusEnd=focus;while(body[focusEnd+1]?.hit?.index===S.cursor)focusEnd++;let top=0;if(focus>=room)top=Math.max(0,Math.min(body.length-room,focusEnd-room+1));const visible=body.slice(top,top+room);while(visible.length<room)visible.push(line());const note=top||body.length>room?line('  ').add([top?'↑ '+top+' more':'',body.length-top-room>0?'↓ '+(body.length-top-room)+' more':''].filter(Boolean).join(' '),HINT):line();return[...head,...visible,note,...hints]}
+function css(s){return[s.fg?'fg'+s.fg:'',s.bg?'bg'+s.bg:'',s.bold?'b':'',s.faint?'ft':''].filter(Boolean).join(' ')}
+function rowHTML(row){let used=0,out='';for(const part of row.parts){let value='';for(const c of part.text){if(used+charWidth(c)>COLS)break;used+=charWidth(c);value+=c}if(value)out+='<span class="'+css(part.s)+'">'+esc(value)+'</span>'}out+=rep(' ',COLS-used);return '<div class="row"'+(row.hit?' data-hit="'+row.hit.index+'" role="button" aria-label="'+esc(currentItems[row.hit.index]?.label||'')+'"':'')+'>'+out+'</div>'}
+// A handled slash command is not echoed into the conversation. What it has to say
+// it says as a frame: a bullet and its title on one line (quiet for a system
+// frame, red for an error), the text indented two cells below.
+function frameRows(){const bad=S.tone==='bad';return[line('● ',style(bad?'203':'244','',true)).add(S.frameTitle,style('','',true)),...wrap(S.reply,COLS-2).map(t=>line('  ').add(t,bad?BAD:TXT))]}
+function render(){if(!S)return;const trans=SESSION_TYPE===null?[line(),line()]:[line(),line().pad(COLS-1,style('','238')),line('› ',style('74','238')).add('Remove the hard size cap with a minimal change.',style('252','238')).pad(COLS-1,style('','238')),line().pad(COLS-1,style('','238')),line(),...textRows('Removed the per-file and total size caps in 6 files.'),line(),line('─ Worked for 3m 45s '+rep('─',Math.max(0,COLS-22)),DIM),line()];
+ if(S.reply)trans.push(line(),...frameRows());
+ while(trans.length<15)trans.push(line());
+ const rows=[...trans,line(rep('─',COLS-1),style('90'))];
+ if(S.page!=='closed')rows.push(...panel());
+ rows.push(line(),line().pad(COLS-1,style('','238')),line('› ',style('74','238')).pad(COLS-1,style('','238')),line().pad(COLS-1,style('','238')),line(SESSION_TYPE==='batch'?'batch read-only':'deepseek-v4.1-flash-1017',HINT));
+ currentItems=items();$('#grid').innerHTML=rows.map(rowHTML).join('');$('#terminal-title').textContent='forebrain — '+COLS+'x40';
+ $('#page-position').textContent=S.page==='picker'?'Project type':S.page==='confirm'?'Confirm':S.tone==='ok'?'Saved':S.reply?'Not changed':'';
+ $('#announcement').textContent=(S.page==='closed'?'':pageTitle()+'. '+subtitle()+' '+(S.reply||''));renderInspector()}
+function renderInspector(){const facts=[['项目',PROJECT.name],['目录',PROJECT.path],['项目当前类型',labelOf(PROJECT.type)],['本会话出生类型',labelOf(SESSION_TYPE)||'未开始（尚无会话行）'],['写入（尝试 / 生效）',WRITES.tried+' / '+WRITES.applied],['最近回复',S.reply||'（无）']];$('#facts').innerHTML=facts.map(([k,v])=>'<dt>'+esc(k)+'</dt><dd>'+esc(v)+'</dd>').join('');$('#events').innerHTML=EVENTS.length?EVENTS.map(x=>'<div class="'+esc(x.tone)+'">'+esc(x.text)+'</div>').join(''):'<span>尚未写入；浏览和选择不会保存。</span>';$('#database').textContent=JSON.stringify({id:PROJECT.id,name:PROJECT.name,root:'/Users/doudou/workspace/hundsun/guangfa/wenquxing',project_type:PROJECT.type,batch_sandbox:PROJECT.sandbox},null,2)}
+function goScenario(id){sceneID=id;const scene=SCENES.find(s=>s.id===id)||SCENES[0];$('#scene-title').textContent=scene.title;$('#caption').textContent=scene.desc;document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('on',b.dataset.scene===id));
+ switch(id){
+  case 'fresh':seed('office',null);openPicker();break;
+  case 'fresh-saved':seed('office',null);openPicker();openConfirm('coding');save();break;
+  case 'confirm':case 'cancel':seed('office','office');openPicker();openConfirm('coding');break;
+  case 'saved':seed('office','office');openPicker();openConfirm('coding');save();break;
+  case 'reopen':seed('coding','coding');openPicker();break;
+  case 'to-batch':seed('coding','coding');openPicker();openConfirm('batch');break;
+  case 'from-batch':seed('batch','batch');openPicker();openConfirm('coding');break;
+  case 'failed':seed('office','office');openPicker();openConfirm('coding');FAIL_WRITES=true;break;
+  default:seed('office','office');openPicker()}
+ render()}
+function handleKey(eventOrKey){const e=typeof eventOrKey==='string'?{key:eventOrKey,preventDefault(){}}:eventOrKey;const k=e.key;if(e.altKey||e.metaKey||e.ctrlKey)return;if(!['ArrowUp','ArrowDown','Enter','Escape','Home','End'].includes(k))return;e.preventDefault();if(!S||S.page==='closed')return;
+ if(k==='Escape'){back();return}
+ const options=items();if(k==='ArrowDown')S.cursor=clamp(S.cursor+1,0,options.length-1);else if(k==='ArrowUp')S.cursor=clamp(S.cursor-1,0,options.length-1);else if(k==='Home')S.cursor=0;else if(k==='End')S.cursor=options.length-1;else if(k==='Enter'){activate();return}render()}
+
+$('#nav').innerHTML=SCENES.map((s,i)=>((i===0||SCENES[i-1].group!==s.group)?'<div class="group">'+esc(s.group)+'</div>':'')+'<button data-scene="'+s.id+'"><span class="num">'+String(i+1).padStart(2,'0')+'</span>'+esc(s.title)+'</button>').join('')+'<div class="nav-foot"><span class="legend"></span>演示数据，仅本页内存<br>切换场景会重置模拟的项目行与事件。</div>';
+$('#nav').addEventListener('click',e=>{const b=e.target.closest('[data-scene]');if(b){goScenario(b.dataset.scene);$('#terminal').focus({preventScroll:true})}});
+$('#terminal').addEventListener('keydown',handleKey);
+$('#terminal').addEventListener('click',e=>{$('#terminal').focus({preventScroll:true});const row=e.target.closest('[data-hit]');if(row&&S.page!=='closed')activate(Number(row.dataset.hit))});
+$('#terminal').addEventListener('wheel',e=>{if(!S||S.page==='closed')return;e.preventDefault();S.cursor=clamp(S.cursor+(e.deltaY>0?1:-1),0,items().length-1);render()},{passive:false});
+document.querySelectorAll('[data-key]').forEach(b=>b.addEventListener('click',()=>{$('#terminal').focus({preventScroll:true});handleKey(b.dataset.key)}));
+document.querySelectorAll('[data-width]').forEach(b=>b.addEventListener('click',()=>{COLS=Number(b.dataset.width);document.querySelectorAll('[data-width]').forEach(x=>x.classList.toggle('on',x===b));render()}));
+$('#reset').addEventListener('click',()=>goScenario(sceneID));
+window.projectTypeTuiPrototype={scene:goScenario,open:()=>{openPicker();render()},snapshot:()=>({scene:sceneID,page:S.page,cursor:S.cursor,pending:S.pending,project:clone(PROJECT),sessionType:SESSION_TYPE,options:items().map(o=>({label:o.label,desc:o.desc||'',value:o.value,mark:o.mark||''})),subtitle:subtitle(),reply:S.reply,tone:S.tone,frameTitle:S.frameTitle,writes:clone(WRITES),events:clone(EVENTS),columns:COLS}),setWidth:n=>{COLS=n;render()}};
+goScenario('fresh');
+</script>
+</body>
+</html>

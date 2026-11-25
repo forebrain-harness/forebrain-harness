@@ -50,6 +50,7 @@
   Do not run in parallel with 311/312 (they own `pkg/tui/setup.go`).
 - **Category**: feature
 - **Planned at**: commit `7611d6cc` + plan 313, 2026-11-16
+- **Landed**: `f48047b2`（2026-11-18「feat(web): the settings page owns the shared subagent registry」）＋同批 TUI 侧。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`frontend/src/components/settings/GlobalSubagentsGroup.vue` 与 `.test.ts` 在位，`pkg/tui/config_panel_test.go` 的 `TestConfigPanelAgentPageListsSharedSubagentsDisabled` 在位。
 
 ## Why this matters
 

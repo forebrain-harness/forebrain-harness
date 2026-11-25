@@ -18,6 +18,7 @@
   the retired-key filter), plan 319 (field types / pickers) — **land 319 first**.
 - **Category**: Feature / UX rebuild
 - **Planned at**: 2026-11-17, on top of `831c45b4`
+- **Landed**: `19cd12b5`（2026-11-18「feat(tui): a confirmed /config edit is the write」）——draft、Save 行、成功提示与 unsaved 文案整段删除，每次确认的编辑走同一个 store 路径。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`grep -c configSavedNotice pkg/tui/*.go` = 0、`Default (unset)` = 0，四 tab 仍在。要点 4 的「四 tab 顺序与文案」此后由 `plans/327`–`plans/329`、`plans/350` 继续按冻结原型收紧（本计划不重复实施）。
 
 ## Why this matters
 

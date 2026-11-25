@@ -17,6 +17,7 @@
 - **Category**: Feature / Bug Fix
 - **Depends on**: 无未完成前置计划；基线已具备模型行 caps、订阅注册表、行默认强度到请求参数的投影以及会话强度快照。原型门禁已解除（§0 确认留痕）；与 312 串行，索引建议 312 先行，若 311 先行则 312 开工前必须重新漂移核对。
 - **Planned at**: commit `7611d6cc`，2026-11-16，分支 `dev`
+- **Landed**: `c73511c8`（2026-11-17「feat(connect): configure a model default effort through connect」，提交正文点名 plan 311）——`/connect` 的订阅／API key／Custom 三条入口统一收在默认强度页，`Options.CapDefaultEffort` 存在，`turn.SetupReasoningEfforts` 是唯一可发送判定。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`grep -rn CapDefaultEffort pkg/` 命中 `pkg/tui/chat_session_test.go` 的默认强度断言；原型 `plans/311-connect-prototype.html` 仍在（本行哈希）。本文 drift 节里的锚点漂移记录是落地前的状态，不要再按它核对。
 - **Scope of investigation**: 只调查 `/connect`、共用 onboarding 向导、其配置/订阅/运行时直接链路，以及 Web 模型表单的 caps/默认强度入口（§2.5、§3.4），不是全仓审计。未审计插件私有协议、真实订阅服务、安全全景、Web 其他页面或数据库三引擎实现。
 
 ## 0. 高保真可交互原型（owner 已确认，2026-11-16）

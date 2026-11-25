@@ -58,6 +58,7 @@
   registry); land 313 first.
 - **Category**: feature
 - **Planned at**: commit `7611d6cc`, 2026-11-16
+- **Landed**: `fcfb4df1`（2026-11-17「feat(config): pick models from the global table, drop llm_providers」）引入 `AgentsSection.SubagentModels` 与 `ValidateSubagentModels`；plan-reviewer 的全局行由 `cd16f51d`/`2e4f6b77`/`774379d2`/`0c196753`/`c6856a69` 补齐，默认守卫 `f2be50e6`。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`pkg/config/agents.go:34` 的 `SubagentModels`、`:29` 的 `PlanReviewer` 与其校验、`agents_test.go` 的 `agents.plan_reviewer` 断言在位。注：`plans/320`、`plans/321` 文中写的「landed dev `831c45b4`」是 rebase 前哈希，dev 上的对应提交是 `f2be50e6`。
 
 ## Why this matters
 

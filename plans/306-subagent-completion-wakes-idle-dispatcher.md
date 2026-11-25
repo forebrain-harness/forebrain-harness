@@ -24,6 +24,7 @@
 - **Depends on**: 无（与 `305` 零文件交集：305 只动 pkg/tui，本计划动 pkg/run + pkg/process，可并行）
 - **Category**: feature（owner 需求）
 - **Planned at**: commit `0a4be487`，2026-11-12
+- **Landed**: `508c5ed9`（2026-11-18「feat(process): a finished fire-and-forget subagent wakes its dispatcher」）——`SubagentExecutionEnded` 经 `pkg/process/one_shot.go` 的 `deliverSubagentReport` 把未 awaited 的终态报告投给派发会话（运行中回合或另起回合），`run.SubagentExecutionEnd` 带 `Output`/`AwaitedByDispatcher`。2026-11-24 reconcile 在 dev `cba1bfba` 复核：本文件 drift 节 6 条 grep 的语义前提仍成立（`peerSendToDispatcher` 仍只 `SteerFromAgent`、`setPeerService` 仍在 `peer.Enabled()` 之后），唯一不符＝`pkg/process` 生产文件 33→34（`maxProductionFilesPerPackage` 仍 34，故「零新生产文件」不再是硬约束，计数闸门作废）。不要重复实施。
 
 ## Why this matters
 

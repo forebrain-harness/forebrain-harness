@@ -2,6 +2,8 @@
 
 计划编号：落地时写入 `plans/<编号>-per-project-type-present-files-copy.md`，编号取 `ls plans | rg '^[0-9]{3}-' | sort | tail -1` 的下一个（当前最大 345，不要预设 346 空闲），并在 `plans/README.md` 加索引行。
 
+> **已落地**：`a207700f`（2026-11-21「feat(tool): pick present_files wording per project type, drop the file cap」，分支 `present-files-copy`，已在 dev 历史内、分支已删）。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`pkg/tool/artifacts.go` 的 `presentFilesCopyFor`（描述＋结果句按类型）与 `pkg/tool/registry.go:326` 的注册注释在位，`artifacts_test.go` 的三份 golden 与 21 文件行为测试在位。不要重复实施。
+
 > **owner 裁决（本会话，四轮评审之后）**
 > 1. coding 描述按 dev 现状写（不承诺也不否认未来引擎补登）。
 > 2. 三类描述都写「用户点名要哪些就只交哪些」的优先句。

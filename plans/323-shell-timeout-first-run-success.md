@@ -21,6 +21,11 @@
 - **Depends on**: none
 - **Category**: bug / dx
 - **Planned at**: commit `8e936d7b`（dev），2026-11-18
+- **Landed**: `51b302d7`（2026-11-18「WIP: TUI footer/effort label and peer message card
+  fixes」——owner 的批量提交把这批工作区改动一并入库）。2026-11-24 reconcile 在 dev
+  `cba1bfba` 复核：`pkg/tool/shell_tool.go:85` 的 `defaultShellCommandTimeout = 120 *
+  time.Second`、`:83` description 里的「慢 vs 卡死」判据、`:706-707` 的
+  `timed_out`/`timeout_ms` 全部在位。不要重复实施。
 
 ## Why this matters
 

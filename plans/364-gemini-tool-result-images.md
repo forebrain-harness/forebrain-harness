@@ -23,6 +23,10 @@
 - **Category**: bug (`pkg/llm/google` silently drops pixels it was handed)
 - **Planned at**: commit `6541b8ab`, 2026-11-23 — **found by live verification**, see
   "Evidence" below (nothing here is a hypothesis)
+- **Landed**: `d519d3fd`（2026-11-23「fix(google): a tool result's image reaches the model as
+  its own user turn」）。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`git merge-base
+  --is-ancestor d519d3fd dev` 成立，`pkg/llm/google/agent_llm.go` 的 `trailingImageTurns`
+  在位。⚠ **live 仍未验证**：本机无 Google 凭证，计划要求的 UNVERIFIED 报告状态不变。
 
 ## Why this matters
 

@@ -33,6 +33,7 @@
 - **Depends on**: `plans/311` (it introduces the Off three-state contract and the `Provider default` / `none` semantics this plan reuses; it also edits `llmModelCatalogCaps`), `plans/313` (config rows / subagent contract)
 - **Category**: bug fix + consistency
 - **Planned at**: `1013b50f`, 2026-11-17
+- **Landed**: `7861c63e`（2026-11-18「fix(llm,run,turn): one protocol decision, one level filter」）——`opencode.ClientProtocol` 成为唯一协议判定，`pkg/run` 建客户端与 `turn.filterSendableEfforts` 同读它。2026-11-24 reconcile 在 dev `cba1bfba` 复核：`pkg/turn/models.go:227` 的 `SetupReasoningEfforts`、`:275` 的 `OrderedEfforts` 在位。
 - **Dispatch**: **owner approved on 2026-11-17** ("318/319 已批准派发").
   **Blocked by this plan's own STOP condition until 311 and 313 are in `dev`** —
   311 creates `turn.SetupReasoningEfforts` and edits `llmModelCatalogCaps`, 313
