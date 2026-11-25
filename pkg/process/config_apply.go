@@ -11,6 +11,7 @@ import (
 	"github.com/forebrain-harness/forebrain-harness/pkg/memory"
 	"github.com/forebrain-harness/forebrain-harness/pkg/safety"
 	"github.com/forebrain-harness/forebrain-harness/pkg/skill"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state"
 	"github.com/forebrain-harness/forebrain-harness/pkg/turn"
 )
 
@@ -112,6 +113,25 @@ func (env *Environment) applyComposedConfigLocked(loaded appcfg.Root) error {
 		_ = env.Runner.Events.Publish(context.Background(), event.NewRunEvent("", "", "", event.RunEventConfigReloaded, event.ConfigReloadedPayload{Path: env.ConfigPath}, time.Now()))
 	}
 	return nil
+}
+
+// ProjectTypeInput is the store input that changes an existing project's type —
+// the one way every surface does it (the web's PATCH /v1/projects/:id and the
+// terminal's /project). A project that becomes a batch project acquires the
+// sandbox switch now, from the install's default: the global value is a
+// starting point, and changing it later never reaches a project that already
+// has one (plans/216). It writes no trust record: a batch project needs none
+// (owner 2026-11-25).
+func ProjectTypeInput(current, next string, batchSandboxDefault bool) (state.UpdateProjectInput, error) {
+	projectType, err := state.ParseProjectType(next)
+	if err != nil {
+		return state.UpdateProjectInput{}, err
+	}
+	in := state.UpdateProjectInput{ProjectType: &projectType}
+	if current != state.ProjectTypeBatch && strings.TrimSpace(next) == state.ProjectTypeBatch {
+		in.BatchSandbox = appcfg.BoolPtr(batchSandboxDefault)
+	}
+	return in, nil
 }
 
 // AdoptLaunchTrust re-reads the launch project's trust decision and

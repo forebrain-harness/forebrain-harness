@@ -468,3 +468,55 @@ func TestApplyComposedConfigSeedsNewSessionsWithTheApprovalPreset(t *testing.T) 
 		t.Fatalf("existing session preset = %q err=%v, want the workspace_write row it was born with", preset, err)
 	}
 }
+
+// A project that becomes a batch project acquires the sandbox switch at that
+// moment, from the install default, and only then: the value is the project's
+// own from that point on (plans/216), so every path that changes a type has to
+// seed identically — the web's PATCH and the terminal's /project both go
+// through ProjectTypeInput.
+func TestProjectTypeInputSeedsSandboxOnlyWhenBecomingBatch(t *testing.T) {
+	cases := []struct {
+		name        string
+		current     string
+		next        string
+		seed        bool
+		wantType    string
+		wantSandbox *bool
+	}{
+		{name: "coding becomes batch seeds true", current: state.ProjectTypeCoding, next: "batch", seed: true, wantType: state.ProjectTypeBatch, wantSandbox: appcfg.BoolPtr(true)},
+		{name: "office becomes batch seeds the install default", current: state.ProjectTypeOffice, next: "batch", seed: false, wantType: state.ProjectTypeBatch, wantSandbox: appcfg.BoolPtr(false)},
+		{name: "batch stays batch keeps its switch", current: state.ProjectTypeBatch, next: "batch", seed: true, wantType: state.ProjectTypeBatch},
+		{name: "coding becomes office", current: state.ProjectTypeCoding, next: "office", seed: true, wantType: state.ProjectTypeOffice},
+		{name: "batch becomes coding", current: state.ProjectTypeBatch, next: "coding", seed: true, wantType: state.ProjectTypeCoding},
+		// The seeding condition is the exact stored value, as the web's PATCH
+		// always had it: a differently spelled batch type parses to batch but
+		// seeds nothing.
+		{name: "Batch spelled with a capital seeds nothing", current: state.ProjectTypeCoding, next: "Batch", seed: true, wantType: state.ProjectTypeBatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ProjectTypeInput(tc.current, tc.next, tc.seed)
+			if err != nil {
+				t.Fatalf("ProjectTypeInput: %v", err)
+			}
+			if got.ProjectType == nil || *got.ProjectType != tc.wantType {
+				t.Fatalf("project type = %v, want %q", got.ProjectType, tc.wantType)
+			}
+			if tc.wantSandbox == nil {
+				if got.BatchSandbox != nil {
+					t.Fatalf("batch sandbox = %v, want the stored value left alone", *got.BatchSandbox)
+				}
+				return
+			}
+			if got.BatchSandbox == nil || *got.BatchSandbox != *tc.wantSandbox {
+				t.Fatalf("batch sandbox = %v, want %v", got.BatchSandbox, *tc.wantSandbox)
+			}
+		})
+	}
+}
+
+func TestProjectTypeInputRejectsAnUnknownType(t *testing.T) {
+	if _, err := ProjectTypeInput(state.ProjectTypeCoding, "spreadsheet", true); err == nil {
+		t.Fatal("an unknown project type must be refused")
+	}
+}

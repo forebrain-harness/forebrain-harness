@@ -7335,27 +7335,23 @@ func (s *Server) handleProjectOne(w http.ResponseWriter, r *http.Request) {
 			in.MemoryScope = &body.MemoryScope
 		}
 		if body.ProjectType != "" {
-			projectType, err := state.ParseProjectType(body.ProjectType)
+			typeIn, err := process.ProjectTypeInput(p.ProjectType, body.ProjectType, s.batchSandboxDefault())
 			if err != nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_ = json.NewEncoder(w).Encode(map[string]any{"error": "project_type_invalid"})
 				return
 			}
-			in.ProjectType = &projectType
+			in.ProjectType = typeIn.ProjectType
+			if body.BatchSandbox == nil {
+				in.BatchSandbox = typeIn.BatchSandbox
+			}
 		}
 		if body.ResourceAccess != nil {
 			in.ResourceAccess = body.ResourceAccess
 		}
 		if body.BatchSandbox != nil {
 			in.BatchSandbox = body.BatchSandbox
-		} else if body.ProjectType != "" && p.ProjectType != state.ProjectTypeBatch &&
-			strings.TrimSpace(body.ProjectType) == state.ProjectTypeBatch {
-			// A project that becomes a batch project acquires the switch now,
-			// from the install's default: the global value is a starting
-			// point, and changing it later never reaches a project that
-			// already has one (plans/216).
-			in.BatchSandbox = config.BoolPtr(s.batchSandboxDefault())
 		}
 		if body.TaskNotify != nil {
 			if err := validateTaskNotifyTargets(*body.TaskNotify); err != nil {

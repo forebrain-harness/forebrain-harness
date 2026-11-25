@@ -10944,3 +10944,104 @@ func TestChatMessagesPeerRowAgentMessageCarriesSenderBodyAndIdentity(t *testing.
 		t.Fatalf("peer fields = %#v", raw[0])
 	}
 }
+
+// TestProjectPatchToBatchSeedsTheSandboxSwitch pins the seeding contract the web
+// PATCH and the terminal's /project share (process.ProjectTypeInput): a project
+// that becomes a batch project takes the install's default at that moment, an
+// explicit value in the same request wins, a project that already is one keeps
+// the switch it owns, and a differently spelled batch type parses to batch but
+// seeds nothing (plans/216).
+func TestProjectPatchToBatchSeedsTheSandboxSwitch(t *testing.T) {
+	cases := []struct {
+		name string
+		// create is the type the project is created as (empty: the launch
+		// default), installed under createDefault.
+		create        string
+		createDefault bool
+		// patchDefault, when set, replaces batch.sandbox_default before the
+		// PATCH: the seeding reads the install's value at the moment of the
+		// switch, and a project must be able to differ from it beforehand.
+		patchDefault *bool
+		body         map[string]any
+		want         bool
+	}{
+		{
+			name:          "becoming batch takes the install default",
+			createDefault: true,
+			patchDefault:  appcfg.BoolPtr(false),
+			body:          map[string]any{"project_type": "batch"},
+			want:          false,
+		},
+		{
+			name:          "an explicit switch wins over the seeded one",
+			createDefault: true,
+			body:          map[string]any{"project_type": "batch", "batch_sandbox": false},
+			want:          false,
+		},
+		{
+			name:          "a capitalized batch type seeds nothing",
+			createDefault: false,
+			patchDefault:  appcfg.BoolPtr(true),
+			body:          map[string]any{"project_type": "Batch"},
+			want:          false,
+		},
+		{
+			name:          "a project that already is batch keeps its switch",
+			create:        "batch",
+			createDefault: true,
+			patchDefault:  appcfg.BoolPtr(false),
+			body:          map[string]any{"project_type": "batch"},
+			want:          true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, store, _ := newProjectsTestServer(t)
+			// batch.sandbox_default is what a new project starts with; the
+			// server reads the live snapshot, which this test owns.
+			s.Env.Deps.SetConfig(&appcfg.Root{Batch: appcfg.BatchSection{SandboxDefault: appcfg.BoolPtr(tc.createDefault)}})
+			root := projectTempRoot(t)
+			create := map[string]any{"name": "switch", "root": root}
+			if tc.create != "" {
+				create["project_type"] = tc.create
+			}
+			rec := doJSON(t, s, http.MethodPost, "/api/v1/projects", create)
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("create: %d %s", rec.Code, rec.Body.String())
+			}
+			created := map[string]any{}
+			if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+				t.Fatal(err)
+			}
+			id, _ := created["id"].(string)
+			if got := storeBatchSandbox(t, store, id); got != tc.createDefault {
+				t.Fatalf("the created project's switch = %v, want the install default %v", got, tc.createDefault)
+			}
+
+			if tc.patchDefault != nil {
+				s.Env.Deps.SetConfig(&appcfg.Root{Batch: appcfg.BatchSection{SandboxDefault: tc.patchDefault}})
+			}
+			rec = doJSON(t, s, http.MethodPatch, "/api/v1/projects/"+id, tc.body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("patch: %d %s", rec.Code, rec.Body.String())
+			}
+			if got := storeBatchSandbox(t, store, id); got != tc.want {
+				t.Fatalf("batch_sandbox after the patch = %v, want %v", got, tc.want)
+			}
+			if p, err := store.Get(context.Background(), id); err != nil || state.NormalizeProjectType(p.ProjectType) != state.ProjectTypeBatch {
+				t.Fatalf("project type after the patch = %+v %v, want batch", p, err)
+			}
+		})
+	}
+}
+
+// storeBatchSandbox reads the stored switch back from the row the store holds,
+// so the assertion is about what a later launch would read.
+func storeBatchSandbox(t *testing.T, store *state.ProjectStore, id string) bool {
+	t.Helper()
+	p, err := store.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	return p.BatchSandbox
+}
