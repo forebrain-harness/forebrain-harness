@@ -1,0 +1,104 @@
+{
+  "name": "forebrain-vscode",
+  "displayName": "Forebrain",
+  "description": "The full Forebrain Harness Web UI in VS Code's side bar, plus native checklist, approvals and editor-to-chat commands.",
+  "version": "0.2.0",
+  "publisher": "forebrain",
+  "license": "Apache-2.0",
+  "engines": { "vscode": "^1.100.0" },
+  "categories": ["Other"],
+  "extensionKind": ["ui"],
+  "activationEvents": ["onView:forebrain.chat", "onView:forebrain.checklist"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "auxiliarybar": [{ "id": "forebrain", "title": "Forebrain", "icon": "assets/forebrain.svg" }]
+    },
+    "views": {
+      "forebrain": [
+        { "id": "forebrain.chat", "name": "Chat", "type": "webview", "contextualTitle": "Forebrain" },
+        { "id": "forebrain.checklist", "name": "Checklist", "contextualTitle": "Forebrain" }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "forebrain.checklist",
+        "contents": "No checklist yet. It fills in as the agent calls session_todo.",
+        "when": "forebrain.checklistEmpty"
+      }
+    ],
+    "commands": [
+      { "command": "forebrain.openPanel", "title": "Forebrain: Open Chat Panel" },
+      { "command": "forebrain.enterGatewayToken", "title": "Forebrain: Enter Gateway Token" },
+      { "command": "forebrain.openWebUiInBrowser", "title": "Forebrain: Open Web UI in Browser", "icon": "$(link-external)" },
+      { "command": "forebrain.reconnect", "title": "Forebrain: Reconnect to Gateway" },
+      { "command": "forebrain.askAboutSelection", "title": "Forebrain: Ask About Selection", "icon": "$(comment-discussion)" },
+      { "command": "forebrain.askAboutFile", "title": "Forebrain: Ask About File", "icon": "$(comment-discussion)" },
+      { "command": "forebrain.openDeliveredFile", "title": "Forebrain: Open Delivered File" }
+    ],
+    "keybindings": [
+      { "command": "forebrain.askAboutSelection", "key": "ctrl+alt+k", "mac": "ctrl+cmd+k", "when": "editorHasSelection" }
+    ],
+    "menus": {
+      "editor/context": [
+        { "when": "editorHasSelection", "command": "forebrain.askAboutSelection", "group": "9_forebrain" },
+        { "when": "!editorHasSelection", "command": "forebrain.askAboutFile", "group": "9_forebrain" }
+      ],
+      "explorer/context": [
+        { "when": "resourceScheme == file && !explorerResourceIsFolder", "command": "forebrain.askAboutFile", "group": "9_forebrain" }
+      ],
+      "view/title": [
+        { "when": "view == forebrain.chat", "command": "forebrain.openWebUiInBrowser", "group": "navigation@1" }
+      ]
+    },
+    "configuration": {
+      "title": "Forebrain",
+      "properties": {
+        "forebrain.gatewayUrl": {
+          "type": "string", "default": "http://127.0.0.1:6060",
+          "description": "The Forebrain gateway's HTTP(S) origin, without a path (e.g. http://127.0.0.1:6060)."
+        },
+        "forebrain.binaryPath": {
+          "type": "string", "default": "",
+          "description": "Path of the forebrain binary used to start a gateway when none is running. Empty: look up `forebrain` on PATH."
+        },
+        "forebrain.autoStartGateway": {
+          "type": "boolean", "default": true,
+          "description": "Start a gateway when the configured origin does not answer and no token is stored yet."
+        },
+        "forebrain.relayLogRequests": {
+          "type": "boolean", "default": false,
+          "description": "Write every relayed request's method and path to the Forebrain output channel (never headers)."
+        },
+        "forebrain.selectionTarget": {
+          "type": "string", "enum": ["current", "always-new"], "default": "current",
+          "description": "Where Ask About Selection/File sends: the session the panel is showing, or always a new one."
+        },
+        "forebrain.includeDiagnostics": {
+          "type": "boolean", "default": true,
+          "description": "Append the file's current diagnostics to the prompt of Ask About Selection/File."
+        },
+        "forebrain.approvalNotifications": {
+          "type": "boolean", "default": true,
+          "description": "Show a VS Code notification for an approval that arrives while the chat panel is not visible."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node build.mjs",
+    "typecheck": "tsc --noEmit",
+    "pretest": "node build.mjs --test",
+    "test": "node --test 'dist-test/*.test.js'"
+  },
+  "dependencies": {
+    "ws": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/vscode": "1.100.0",
+    "@types/ws": "8.18.2",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}

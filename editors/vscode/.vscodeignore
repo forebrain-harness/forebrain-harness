@@ -1,0 +1,8 @@
+.vscode/**
+src/**
+build.mjs
+tsconfig.json
+**/*.ts
+**/*.map
+dist-test/**
+out/**
