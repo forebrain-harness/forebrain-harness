@@ -773,6 +773,223 @@ func TestPendingExitPlanRequestCarriesPlanReviewsAndModels(t *testing.T) {
 	require.Contains(t, req.PlanReviews[0].Text, "rework")
 }
 
+// A plan resubmitted after a review delivered itself parks a brand new
+// approval, and the review stayed keyed to the action the delivery closed: the
+// new action's panel therefore has no review of its own, which is the gap the
+// latest-verdict line fills.
+func TestNewExitPlanActionSeesNoPriorReview(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	first, err := runs.CreateRun(ctx, sessionID, "plan the work")
+	require.NoError(t, err)
+	firstAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, first.ID, state.Wait{
+		RunID: first.ID, ActionID: firstAction.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+	appendPlanReviewed(t, runs, sessionID, firstAction.ID, "rev-old", "done", "Verdict: rework. The step order is wrong.")
+	// The review delivered itself: the engine closed the pending action, the
+	// planner absorbed the review, and this run ended with the resubmission.
+	_, err = DeliverPlanReview(ctx, actions, firstAction.ID)
+	require.NoError(t, err)
+	require.NoError(t, runs.SetStatus(ctx, first.ID, state.RunStatusDone))
+
+	resubmitted, err := runs.CreateRun(ctx, sessionID, "resubmit the plan")
+	require.NoError(t, err)
+	secondAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, resubmitted.ID, state.Wait{
+		RunID: resubmitted.ID, ActionID: secondAction.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+
+	gate := &PendingApprovalGate{Runs: runs, Actions: actions}
+	req, err := gate.Pending(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.Equal(t, secondAction.ID, req.ActionID)
+	// The review is still in the log; it is just not this action's review.
+	require.Empty(t, req.PlanReviews)
+}
+
+// appendPlanReviewedBy stores one plan_reviewed event with the reviewer and
+// text the test names, for the tests that need more than the one model
+// appendPlanReviewed pins.
+func appendPlanReviewedBy(t *testing.T, runs *state.RunStore, sessionID, actionID, reviewID, outcome, provider, model, text string) {
+	t.Helper()
+	payload, err := json.Marshal(event.PlanReviewedPayload{
+		ActionID: actionID, ReviewID: reviewID,
+		Provider: provider, Model: model,
+		Text: text, Outcome: outcome,
+	})
+	require.NoError(t, err)
+	_, err = runs.AppendSessionEvent(context.Background(), state.SessionEvent{
+		ID: "plan-review:" + reviewID + ":reviewed", SessionID: sessionID,
+		Type: event.RunEventPlanReviewed, Payload: payload,
+	})
+	require.NoError(t, err)
+}
+
+// The conclusion line a later approval shows is the conversation's newest
+// completed review, whatever approval it served: that is the review the
+// planner last absorbed, and the one the user is deciding after.
+func TestLatestPlanReviewVerdictTakesTheNewestDone(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+
+	verdict, ok := LatestPlanReviewVerdict(ctx, runs, sessionID)
+	require.False(t, ok, "no review yet")
+	require.Equal(t, PlanReviewVerdict{}, verdict)
+
+	// Two done reviews on different actions: the newest wins, with the model
+	// that wrote it.
+	appendPlanReviewedBy(t, runs, sessionID, "act-1", "rev-1", "done", "openai", "gpt-5.1",
+		"Verdict: rework. The step order is wrong.")
+	appendPlanReviewedBy(t, runs, sessionID, "act-2", "rev-2", "done", "zhipuai", "glm-5.3-flash",
+		"Verdict: approve with changes — one test needs its expected output pinned.\n\n## Problems\n1. The pinned test.")
+	verdict, ok = LatestPlanReviewVerdict(ctx, runs, sessionID)
+	require.True(t, ok)
+	require.Equal(t, "Verdict: approve with changes — one test needs its expected output pinned.", verdict.Line)
+	require.Equal(t, "zhipuai", verdict.Provider)
+	require.Equal(t, "glm-5.3-flash", verdict.Model)
+	require.Equal(t, llm.ListingDisplayName("zhipuai", "glm-5.3-flash"), verdict.ModelName)
+
+	// A newer review that did not finish is a report on its own card, not a
+	// conclusion: the newest completed one still answers.
+	for _, outcome := range []string{"failed", "stopped", "timed_out"} {
+		appendPlanReviewedBy(t, runs, sessionID, "act-3", "rev-"+outcome, outcome, "openai", "gpt-5.1", "")
+		verdict, ok = LatestPlanReviewVerdict(ctx, runs, sessionID)
+		require.True(t, ok)
+		require.Equal(t, "Verdict: approve with changes — one test needs its expected output pinned.", verdict.Line,
+			"a %s review is not a conclusion", outcome)
+	}
+
+	// A done review with no text and one whose payload does not parse say
+	// nothing, so they are skipped rather than shown as an empty line.
+	appendPlanReviewedBy(t, runs, sessionID, "act-3", "rev-empty", "done", "openai", "gpt-5.1", "  \n\t\n")
+	_, err := runs.AppendSessionEvent(ctx, state.SessionEvent{
+		ID: "plan-review:rev-corrupt:reviewed", SessionID: sessionID,
+		Type: event.RunEventPlanReviewed, Payload: []byte("{not json"),
+	})
+	require.NoError(t, err)
+	verdict, ok = LatestPlanReviewVerdict(ctx, runs, sessionID)
+	require.True(t, ok)
+	require.Equal(t, "Verdict: approve with changes — one test needs its expected output pinned.", verdict.Line)
+}
+
+// The conclusion line is the reviewer's first non-empty line as written: the
+// prompt makes it the verdict plus one sentence, and real reviews write it in
+// English or Chinese, plain or bold, so nothing is parsed out of it.
+func TestLatestPlanReviewVerdictKeepsTheFirstLineVerbatim(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct{ text, want string }{
+		"plain":    {"Verdict: approve — the two fixes hold.\n\n## Notes\n1. None.", "Verdict: approve — the two fixes hold."},
+		"bold":     {"**Verdict: rework** — the mechanism claim is falsified.\n\nStep 3 cannot read it.", "**Verdict: rework** — the mechanism claim is falsified."},
+		"chinese":  {"\n\n**结论：approve** — 三处问题都已修正。\n\n细节略。", "**结论：approve** — 三处问题都已修正。"},
+		"indented": {"   Verdict: approve with changes — one sentence.   \nMore.", "Verdict: approve with changes — one sentence."},
+	} {
+		_, runs, sessionID := planReviewEventDB(t)
+		appendPlanReviewedBy(t, runs, sessionID, "act-1", "rev-1", "done", "openai", "gpt-5.1", tc.text)
+		verdict, ok := LatestPlanReviewVerdict(context.Background(), runs, sessionID)
+		require.True(t, ok, name)
+		require.Equal(t, tc.want, verdict.Line, name)
+	}
+}
+
+// A nil log or an unnamed conversation has no conversation to read, so no
+// conclusion comes back — the panel simply shows none.
+func TestLatestPlanReviewVerdictNeedsAConversation(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	appendPlanReviewedBy(t, runs, sessionID, "act-1", "rev-1", "done", "openai", "gpt-5.1", "Verdict: approve.")
+
+	_, ok := LatestPlanReviewVerdict(ctx, nil, sessionID)
+	require.False(t, ok)
+	_, ok = LatestPlanReviewVerdict(ctx, runs, "  ")
+	require.False(t, ok)
+}
+
+// A re-submitted approval shows the conclusion line of the review it never
+// collected: the delivery closed that review's action, so its own review list
+// is empty and the conversation's newest completed review answers instead.
+func TestPendingExitPlanRequestCarriesLatestReviewVerdict(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	first, err := runs.CreateRun(ctx, sessionID, "plan the work")
+	require.NoError(t, err)
+	firstAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, first.ID, state.Wait{
+		RunID: first.ID, ActionID: firstAction.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+	appendPlanReviewedBy(t, runs, sessionID, firstAction.ID, "rev-old", "done", "zhipuai", "glm-5.3-flash",
+		"Verdict: approve with changes — one test needs its expected output pinned.\n\n## Problems\n1. The pinned test.")
+	_, err = DeliverPlanReview(ctx, actions, firstAction.ID)
+	require.NoError(t, err)
+	require.NoError(t, runs.SetStatus(ctx, first.ID, state.RunStatusDone))
+
+	resubmitted, err := runs.CreateRun(ctx, sessionID, "resubmit the plan")
+	require.NoError(t, err)
+	secondAction, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, resubmitted.ID, state.Wait{
+		RunID: resubmitted.ID, ActionID: secondAction.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+	gate := &PendingApprovalGate{Runs: runs, Actions: actions}
+
+	req, err := gate.Pending(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.Empty(t, req.PlanReviews, "the review belonged to the action the delivery closed")
+	require.NotNil(t, req.LatestReviewVerdict, "the resubmitted approval decides with the verdict in view")
+	require.Equal(t, "Verdict: approve with changes — one test needs its expected output pinned.", req.LatestReviewVerdict.Line)
+	require.Equal(t, "zhipuai", req.LatestReviewVerdict.Provider)
+	require.Equal(t, "glm-5.3-flash", req.LatestReviewVerdict.Model)
+
+	// A review this very approval collected is already shown in full above
+	// it, so the conclusion line stays out of the way.
+	appendPlanReviewed(t, runs, sessionID, secondAction.ID, "rev-own", "done", "Verdict: rework. The plan is unfinished.")
+	req, err = gate.Pending(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.Len(t, req.PlanReviews, 1)
+	require.Nil(t, req.LatestReviewVerdict, "an action's own review is not repeated as a verdict line")
+}
+
+// A conversation nobody has reviewed has no conclusion line to show, and the
+// panel opens on the plan alone.
+func TestPendingExitPlanRequestWithoutReviewCarriesNoVerdict(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, runs, sessionID := planReviewEventDB(t)
+	actions := &state.ActionService{DB: runs.DB}
+	run, err := runs.CreateRun(ctx, sessionID, "plan the work")
+	require.NoError(t, err)
+	action, err := actions.CreatePending(ctx, sessionID, "exit_plan_mode", map[string]any{"session_id": sessionID})
+	require.NoError(t, err)
+	require.NoError(t, runs.SetWaitingAction(ctx, run.ID, state.Wait{
+		RunID: run.ID, ActionID: action.ID, ToolName: "exit_plan_mode", ToolInputJSON: "{}",
+	}))
+
+	gate := &PendingApprovalGate{Runs: runs, Actions: actions}
+	req, err := gate.Pending(ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+	require.Empty(t, req.PlanReviews)
+	require.Nil(t, req.LatestReviewVerdict)
+}
+
 // Each reviewer offer names the endpoint its row sends to — the picker's second
 // column — and the api path that column keeps when it is too narrow for the
 // whole URL. Two rows of one provider/model are two offers, each naming its

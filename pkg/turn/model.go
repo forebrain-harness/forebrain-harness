@@ -600,6 +600,13 @@ type ToolApprovalRequest struct {
 	AvailableDecisions   []safety.ApprovalDecisionOption
 	PlanReviewModels     []PlanReviewModelOption
 	PlanReviews          []PlanReviewNote
+	// LatestReviewVerdict is the conversation's newest completed review's
+	// conclusion line, shown when this approval collected no reviews of its
+	// own: the planner already absorbed that review and resubmitted, and the
+	// user decides with its verdict in view. Nil when there is none, or when
+	// PlanReviews already carries this action's own reviews. Display only —
+	// it never feeds the model-side deny feedback.
+	LatestReviewVerdict *PlanReviewVerdict
 	// PreviousPlanReview is the conversation's previous review when it can be
 	// continued: its subagent session is still known, so "review it again"
 	// means continuing that reviewer's conversation rather than dispatching a
@@ -697,6 +704,18 @@ type PlanReviewNote struct {
 	ModelName string
 	Text      string
 	Duration  time.Duration
+}
+
+// PlanReviewVerdict is the conclusion line of a completed plan review, as a
+// later approval shows it: the reviewer's first line — verdict plus one
+// sentence of justification, verbatim — with the model that wrote it. The line
+// keeps its markdown; each surface renders it the way it renders the plan
+// itself.
+type PlanReviewVerdict struct {
+	Provider  string
+	Model     string
+	ModelName string
+	Line      string
 }
 
 type ToolApprovalDecision struct {

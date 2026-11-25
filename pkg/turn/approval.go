@@ -1633,6 +1633,58 @@ const (
 	planReviewOutcomeFailed   = "failed"
 )
 
+// LatestPlanReviewVerdict returns the conclusion line of the conversation's
+// newest completed review — the verdict the planner last absorbed, which a
+// later approval shows because the review itself stayed keyed to the action
+// the delivery closed. Only outcome "done" with a non-empty first line counts;
+// that line is the review's first non-empty line, verbatim, because the
+// reviewer prompt makes it the verdict plus one sentence of justification and
+// real reviews write it in English or Chinese, plain or bold.
+func LatestPlanReviewVerdict(ctx context.Context, log PlanReviewLog, sessionID string) (PlanReviewVerdict, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	if log == nil || sessionID == "" {
+		return PlanReviewVerdict{}, false
+	}
+	records, err := log.ListSessionEventsOfType(ctx, sessionID, event.RunEventPlanReviewed, 0)
+	if err != nil {
+		return PlanReviewVerdict{}, false
+	}
+	// Newest first: the conclusion a resubmitted plan answers is the last
+	// review that completed, not the first.
+	for i := len(records) - 1; i >= 0; i-- {
+		var payload event.PlanReviewedPayload
+		if json.Unmarshal(records[i].Payload, &payload) != nil {
+			continue
+		}
+		if strings.TrimSpace(payload.Outcome) != planReviewOutcomeDone {
+			continue
+		}
+		line := planReviewFirstLine(payload.Text)
+		if line == "" {
+			continue
+		}
+		provider, model := strings.TrimSpace(payload.Provider), strings.TrimSpace(payload.Model)
+		return PlanReviewVerdict{
+			Provider:  provider,
+			Model:     model,
+			ModelName: llm.ListingDisplayName(provider, model),
+			Line:      line,
+		}, true
+	}
+	return PlanReviewVerdict{}, false
+}
+
+// planReviewFirstLine is the review's conclusion as written: its first line
+// that carries anything, trimmed, with its markdown left alone.
+func planReviewFirstLine(text string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // planReviewOutcomeOf names how a review ended in the one vocabulary
 // plan_reviewed carries: "stopped", "timed_out" and "failed".
 func planReviewOutcomeOf(err error) string {
@@ -1952,6 +2004,14 @@ func (g *PendingApprovalGate) PendingForRun(ctx context.Context, sessionID, runI
 		results, err := PlanReviewsForAction(ctx, g.Runs, sessionID, actionID)
 		if err == nil {
 			req.PlanReviews = planReviewNotesFrom(results)
+		}
+		// A review this approval did not collect — because its own action was
+		// closed by the delivery — is still what the planner just revised
+		// against, so its conclusion line is shown in the panel's place.
+		if len(req.PlanReviews) == 0 {
+			if verdict, ok := LatestPlanReviewVerdict(ctx, g.Runs, sessionID); ok {
+				req.LatestReviewVerdict = &verdict
+			}
 		}
 		// The review the user may ask to continue: the conversation's newest
 		// one, offered only when its model is still configured (a deleted row
