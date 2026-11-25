@@ -2284,6 +2284,7 @@ const zh = {
   'chat.exitPlanReviewAgain': '请 {model} 再评审',
   'chat.exitPlanReviewRunning': '{model} 正在评审这份计划…',
   'chat.exitPlanReviewStop': '停止',
+  'chat.exitPlanReviewVerdict': '{model} 的评审结论',
   'chat.exitPlanReviewHint': '时间线里的“正在运行 1 个 plan-reviewer 任务…”卡片可以点进去看它在做什么。',
   'chat.exitPlanReviewCurrent': '当前',
   // 选完模型后的第二屏（plan 310）：问句点名具体模型，返回入口回到模型列表。
@@ -4878,6 +4879,7 @@ const en: Record<keyof typeof zh, string> = {
   'chat.exitPlanReviewAgain': 'Ask {model} to review again',
   'chat.exitPlanReviewRunning': '{model} is reviewing this plan…',
   'chat.exitPlanReviewStop': 'Stop',
+  'chat.exitPlanReviewVerdict': 'Review by {model}',
   'chat.exitPlanReviewHint': 'Open the "Running 1 plan-reviewer task…" card in the timeline to watch it work.',
   'chat.exitPlanReviewCurrent': 'current',
   'chat.exitPlanEffortChoose': 'Which reasoning effort should {model} use?',

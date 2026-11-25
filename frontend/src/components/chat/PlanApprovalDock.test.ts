@@ -718,6 +718,36 @@ describe('PlanApprovalDock', () => {
     wrapper.unmount()
   })
 
+  // plan 382: a plan resubmitted after a review delivered itself carries that
+  // review's conclusion line, because the review stayed keyed to the approval
+  // the delivery closed. The line sits between the plan and the question, under
+  // the model that wrote it.
+  it('shows the latest review verdict a re-submitted plan answers', async () => {
+    const { wrapper } = mountDock(exitPlanAction(), {
+      latestReviewVerdict: {
+        provider: 'openai',
+        model: 'gpt-5.1',
+        line: '**Verdict: approve with changes** — one test needs its expected output pinned.',
+      },
+    })
+    await flushPromises()
+
+    const verdict = wrapper.get('[data-testid="exit-plan-review-verdict"]')
+    expect(verdict.get('.cap').text()).toBe('openai/gpt-5.1 的评审结论')
+    await vi.waitFor(() => {
+      expect(verdict.text()).toContain('Verdict: approve with changes')
+      expect(verdict.text()).toContain('one test needs its expected output pinned')
+    })
+    wrapper.unmount()
+  })
+
+  it('shows no verdict line when the conversation has no review', async () => {
+    const { wrapper } = mountDock(exitPlanAction())
+    await flushPromises()
+    expect(wrapper.find('[data-testid="exit-plan-review-verdict"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('leaves a coding plan on the four verdicts it always had', async () => {
     const { wrapper } = mountDock(exitPlanAction(), {}, undefined, { sessionType: 'coding' })
     await flushPromises()

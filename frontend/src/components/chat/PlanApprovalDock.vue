@@ -32,6 +32,13 @@
     <div v-if="planText.trim()" class="xp-doc" data-testid="exit-plan-text">
       <MessageResponse :content="planText" />
     </div>
+    <!-- The latest completed review's conclusion line: the planner already
+         absorbed it and resubmitted; the user decides with the verdict in
+         view (plan 382). The full review stays in the reviewer's card. -->
+    <div v-if="latestVerdict" class="xp-verdict" data-testid="exit-plan-review-verdict">
+      <span class="cap">{{ t('chat.exitPlanReviewVerdict', { model: verdictModelLabel }) }}</span>
+      <MessageResponse :content="latestVerdict.line" />
+    </div>
     <div class="gate-ask">
       <!-- A review in flight leaves the footer one line and its stop; the
            review's own progress is the subagent card above, in the thread. -->
@@ -327,6 +334,13 @@ const planText = computed(() => String(request.value?.planText ?? ''))
 
 const reviewActive = computed(() => Boolean(request.value?.planReviewActive))
 const reviewModels = computed(() => request.value?.planReviewModels ?? [])
+/** The conclusion line of the review this re-submitted plan answers (plan 382):
+ *  the review delivered itself, so this approval collected none of its own. */
+const latestVerdict = computed(() => request.value?.latestReviewVerdict ?? null)
+const verdictModelLabel = computed(() => {
+  const v = latestVerdict.value
+  return v ? [v.provider, v.modelName || v.model].filter(Boolean).join('/') : ''
+})
 const feedbackOpen = computed(() => Boolean(store.planFeedbackOpen.value[props.action.id]))
 const picking = computed(() => Boolean(store.modelPicking.value[props.action.id]))
 /** What the open picker is for: a reviewer, or the model the plan is handed to
@@ -556,6 +570,22 @@ function enterTakesTheOpeningChoice() {
   font-size: 13px;
   line-height: 1.7;
   color: var(--forebrain-text);
+}
+
+/* The latest review's conclusion line, between the plan and the question: its
+   model as the caption, the line itself rendered like the plan (plan 382). */
+.xp-verdict {
+  display: grid;
+  gap: 4px;
+  padding: 0 14px 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--forebrain-text);
+}
+
+.xp-verdict .cap {
+  font-size: 12.5px;
+  color: var(--forebrain-text-2);
 }
 
 /* The footer every approval closes on (prototype .gate-ask) with the plan's

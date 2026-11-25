@@ -1739,6 +1739,15 @@ export interface PlanReviewNote {
   durationMs?: number
 }
 
+/** The latest completed review's conclusion line, shown on a re-submitted
+ *  exit-plan approval (plan 382). Absent when there is none. */
+export interface PlanReviewVerdict {
+  provider?: string
+  model: string
+  modelName?: string
+  line: string
+}
+
 /** The review a pending exit-plan approval is waiting on, from its events. */
 export interface PlanReviewInFlight {
   reviewId: string
@@ -1763,6 +1772,12 @@ export interface SessionApprovalRequest {
   planReviewModels?: PlanReviewModelOption[]
   planReviews?: PlanReviewNote[]
   planReviewActive?: PlanReviewInFlight | null
+  /**
+   * The conclusion line of the review this re-submitted plan answers: the
+   * planner already absorbed that review and resubmitted, so this approval
+   * collected none of its own and shows the verdict in their place (plan 382).
+   */
+  latestReviewVerdict?: PlanReviewVerdict | null
   /**
    * The review "review it again" would continue (plan 283): the review the user
    * asked last and the model that ran it. Absent when there is nothing to
