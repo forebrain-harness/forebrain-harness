@@ -10,6 +10,7 @@ import (
 
 	appcfg "github.com/forebrain-harness/forebrain-harness/pkg/config"
 	"github.com/forebrain-harness/forebrain-harness/pkg/state"
+	"github.com/forebrain-harness/forebrain-harness/pkg/state/dbx"
 	"github.com/stretchr/testify/require"
 )
 
@@ -176,7 +177,9 @@ func TestSubagentMigrationDoesNothingWithoutARegistry(t *testing.T) {
 	require.NoError(t, migrateSharedSubagents(ctx, env.SQL))
 
 	var backup string
-	err := env.SQL.QueryRowContext(ctx, `SELECT value_json FROM fb_config WHERE section = ?`, subagentMergeBackupSection).Scan(&backup)
+	err := env.SQL.QueryRowContext(ctx,
+		dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT value_json FROM fb_config WHERE section = ?`),
+		subagentMergeBackupSection).Scan(&backup)
 	require.Error(t, err, "a no-op migration wrote a backup row")
 	require.Equal(t, `{"definitions":{"main":{"primary":true}}}`, storedSectionForTest(t, env, ctx, "agents"))
 }
@@ -208,7 +211,8 @@ func TestSubagentMigrationRunsAtStartup(t *testing.T) {
 
 	var raw string
 	require.NoError(t, env.SQL.QueryRowContext(ctx,
-		`SELECT value_json FROM fb_config WHERE section = ?`, "agents").Scan(&raw))
+		dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT value_json FROM fb_config WHERE section = ?`),
+		"agents").Scan(&raw))
 	var section appcfg.AgentsSection
 	require.NoError(t, json.Unmarshal([]byte(raw), &section))
 	def, ok := section.Definitions["repo-auditor"]
@@ -222,7 +226,8 @@ func TestSubagentMigrationRunsAtStartup(t *testing.T) {
 	// it, and it still carries the registry the merge consumed.
 	var backup string
 	require.NoError(t, env.SQL.QueryRowContext(ctx,
-		`SELECT value_json FROM fb_config WHERE section = ?`, subagentMergeBackupSection).Scan(&backup))
+		dbx.Rebind(dbx.DialectOf(env.SQL), `SELECT value_json FROM fb_config WHERE section = ?`),
+		subagentMergeBackupSection).Scan(&backup))
 	var backupDoc preMergeAgentsSection
 	require.NoError(t, json.Unmarshal([]byte(backup), &backupDoc))
 	require.Len(t, backupDoc.SharedSubagents, 1)
