@@ -53,6 +53,9 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "tar into scratch", cmd: "tar -xzf /tmp/a.tgz -C /tmp/x", want: ShellScratchWritesClean, why: "-C names the directory"},
 		{name: "tar creating an archive in scratch", cmd: "tar -czf /tmp/a.tgz -C /tmp/x .", want: ShellScratchWritesClean, why: "-f names the archive; -C only moves the read base"},
 		{name: "tar creating an archive in scratch without -C", cmd: "tar -cf /tmp/a.tar .", want: ShellScratchWritesClean, why: "a creating tar writes only -f, so its cwd is read rather than written"},
+		{name: "tar listing a scratch archive", cmd: "tar -tzf /tmp/a.tgz", want: ShellScratchWritesClean, why: "a listing writes nothing, so its cwd is not a write"},
+		{name: "tar listing an uncompressed archive", cmd: "tar -tf /tmp/a.tar", want: ShellScratchWritesClean, why: "the long and short list modes are the same mode"},
+		{name: "tar listing with a project -C", cmd: "tar -tzf /tmp/a.tgz -C pkg/tool", want: ShellScratchWritesClean, why: "-C only moves where the listing reads, and it writes nothing"},
 		{name: "grep -c on a scratch file", cmd: "grep -c x /tmp/f", want: ShellScratchWritesClean, why: "grep's -c counts matches; it is not a shell's -c"},
 		{name: "unzip -c writes to stdout", cmd: "unzip -c /tmp/a.zip", want: ShellScratchWritesClean, why: "-c extracts to stdout, so no directory has to be inside a region"},
 		{name: "git clone into scratch", cmd: "git clone https://example.com/x.git /tmp/repo", want: ShellScratchWritesClean, why: "clone's last operand is the destination"},
@@ -94,6 +97,7 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "an interpreter the proof cannot read", cmd: "python3 /tmp/x.py", want: ShellScratchWritesUnread, why: "python3 is not in any table"},
 		{name: "an unknown command", cmd: "frobnicate /tmp/x", want: ShellScratchWritesUnread, why: "unknown name, no redirect"},
 		{name: "go test alone", cmd: "go test ./pkg/tool", want: ShellScratchWritesUnread, why: "the tier is unproven and no redirect names a file"},
+		{name: "a pager is not read-only", cmd: "less /tmp/f", want: ShellScratchWritesUnread, why: "less can hand the user a shell, so its name proves nothing"},
 		{name: "a provable scratch write beside an unreadable command", cmd: "mkdir -p /tmp/x && go test ./pkg/tool", want: ShellScratchWritesUnread, why: "the worst clause answers for the line, and go test is only a question"},
 		{name: "an exported expansion", cmd: `export A="$PWD/$(go env GOOS)"`, want: ShellScratchWritesUnread, why: "export writes nothing but is not in the read-only table"},
 		{name: "an interpreter reading a heredoc", cmd: "python3 - <<'EOF'\nprint(1)\nEOF", want: ShellScratchWritesUnread, why: "python3 is not a data reader, so the body parses as commands"},
@@ -127,6 +131,7 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "git subcommand beyond clone", cmd: "git clone https://example.com/x.git /tmp/repo && git -C /tmp/repo checkout .", want: ShellScratchWritesOutside, why: "only clone's destination is in the text; checkout writes a repository this proof does not read"},
 		{name: "unzip without -d extracts into the cwd", cmd: "unzip /tmp/x.zip", want: ShellScratchWritesOutside, why: "the cwd is the project"},
 		{name: "tar without -C extracts into the cwd", cmd: "tar -xzf /tmp/a.tgz", want: ShellScratchWritesOutside, why: "the cwd is the project"},
+		{name: "tar extracting into a project -C", cmd: "tar -xzf /tmp/a.tgz -C pkg/tool", want: ShellScratchWritesOutside, why: "extraction still lands where -C names"},
 		{name: "tar creating an archive in the project", cmd: "tar -czf pkg/tool/x.tar .", want: ShellScratchWritesOutside, why: "-f names the archive and it is in the project"},
 		{name: "tee into the project", cmd: "tee pkg/tool/x.txt", want: ShellScratchWritesOutside, why: "the operand is in the project"},
 		{name: "unknown flag on a writer", cmd: "rm --frobnicate /tmp/x", want: ShellScratchWritesUnplaceable, why: "an unread flag can decide a write"},
@@ -137,6 +142,11 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "a cd back to the previous directory", cmd: "cd /tmp && cd - && echo hi > state.go", want: ShellScratchWritesUnplaceable, why: "cd - leaves the directory unknown"},
 		{name: "a relative cd under CDPATH", cmd: "cd /tmp && CDPATH=" + project + "/pkg cd tool && echo pwned > x.go", want: ShellScratchWritesUnplaceable, why: "bash searches CDPATH before the tracked directory"},
 		{name: "a subshell cd does not bound the write", cmd: "(cd pkg && echo hi > state.go)", want: ShellScratchWritesOutside, why: "the tracked directory is the project's pkg"},
+		{name: "a closed subshell restores the tracked directory", cmd: "(cd /tmp) && echo hi > x", want: ShellScratchWritesOutside, why: "the cd ran in a subshell, so the second clause writes the project"},
+		{name: "a closed subshell restore before a writer", cmd: "(cd pkg && rm -rf tool)", want: ShellScratchWritesOutside, why: "the write is inside the subshell's directory, which is the project's pkg"},
+		{name: "a writer after a closed subshell cd", cmd: "(cd /tmp); rm -rf pkg/tool", want: ShellScratchWritesOutside, why: "the cd left with the subshell, so the rm runs in the project"},
+		{name: "a writer inside a subshell in scratch", cmd: "(cd /tmp && rm -rf pkg/tool)", want: ShellScratchWritesClean, why: "the cd and the rm are both inside the subshell, so the target is /tmp/pkg/tool"},
+		{name: "a closing token with nothing to close", cmd: ") && echo hi > x", want: ShellScratchWritesUnplaceable, why: "a ) whose ( the walk never saw leaves the directory unknown"},
 
 		// Command substitution that writes.
 		{name: "substitution writing the project behind a scratch redirect", cmd: "echo $(rm -rf pkg/tool) > /tmp/x", want: ShellScratchWritesUnplaceable, why: "a substitution source that writes cannot be placed"},
@@ -159,6 +169,15 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "bash -lc writing the project", cmd: "bash -lc 'rm -rf pkg/tool'", want: ShellScratchWritesOutside, why: "-c inside a cluster is the same form"},
 		{name: "sh -ec writing the project", cmd: "sh -ec 'rm -rf pkg/tool'", want: ShellScratchWritesOutside, why: "same"},
 		{name: "nested sh -c", cmd: `sh -c "sh -c 'rm -rf pkg/tool'"`, want: ShellScratchWritesOutside, why: "each layer is unwrapped"},
+
+		// eval runs its operand as shell source, so a literal operand is read as
+		// the line it is - the same way a `sh -c` script is.
+		{name: "eval writing the project", cmd: "eval 'rm -rf pkg/tool'", want: ShellScratchWritesOutside, why: "the operand is the line that runs"},
+		{name: "eval cd then a project write", cmd: "eval 'cd pkg && rm -rf tool'", want: ShellScratchWritesOutside, why: "the operand is walked as its own line"},
+		{name: "eval redirecting into the project", cmd: "eval 'echo hi > state.go'", want: ShellScratchWritesOutside, why: "the redirect lands in the tracked directory"},
+		{name: "eval writing scratch", cmd: "eval 'echo hi > /tmp/x'", want: ShellScratchWritesClean, why: "the operand's only write is scratch"},
+		{name: "eval reading", cmd: "eval 'ls -la'", want: ShellScratchWritesClean, why: "the operand writes nothing"},
+		{name: "eval of an unreadable operand", cmd: `eval "$X"`, want: ShellScratchWritesUnread, why: "the operand is not literal, so the line is a question rather than a refusal"},
 
 		// Writers behind grouping, negation, exec and reserved words (owner
 		// ruling 2026-11-26: these are refused).
@@ -183,6 +202,34 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 				t.Fatalf("ShellScratchWriteVerdict(%q) = %v, want %v (%s)", tt.cmd, got, tt.want, tt.why)
 			}
 		})
+	}
+}
+
+// The subshell counts are what let the walk put a directory back after a ")",
+// and a substitution's own parentheses are not one of them: "$(cd /tmp)" is a
+// value the clause expands, not a subshell the clause is inside.
+func TestSplitShellClassifyClausesSubshellCounts(t *testing.T) {
+	cases := []struct {
+		cmd         string
+		open, close int
+	}{
+		{"(cd /tmp) && echo hi > x", 1, 1},
+		{"(cd /tmp && echo hi > x)", 1, 1},
+		{"{ ls; }", 1, 1},
+		{"echo $(cd /tmp) > /tmp/x", 0, 0},
+		{"echo $((1+2)) > /tmp/x", 0, 0},
+		{"echo hi > /tmp/x", 0, 0},
+	}
+	for _, tt := range cases {
+		clauses, _, _ := splitShellClassifyClauses(tt.cmd)
+		open, closing := 0, 0
+		for _, clause := range clauses {
+			open += clause.SubshellOpen
+			closing += clause.SubshellClose
+		}
+		if open != tt.open || closing != tt.close {
+			t.Fatalf("%q = %d open, %d close; want %d, %d", tt.cmd, open, closing, tt.open, tt.close)
+		}
 	}
 }
 

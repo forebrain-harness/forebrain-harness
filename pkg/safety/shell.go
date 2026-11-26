@@ -636,9 +636,10 @@ func shellDashCScriptAt(name string, args []string) (string, bool) {
 	return shellDashCScript(command)
 }
 
-// shellScriptFromClause returns the script a clause runs through a shell's `-c`,
-// looking through the wrapper commands the classifier already unwraps, so a
-// scratch verdict and the tier cannot disagree about what a clause runs.
+// shellScriptFromClause returns the script a clause runs through a shell's `-c`
+// or through eval, looking through the wrapper commands the classifier already
+// unwraps, so a scratch verdict and the tier cannot disagree about what a clause
+// runs.
 //
 // The command has to be a shell before its options are read as a shell's: asking
 // first made `tar -czf` and `grep -c` carry a "script" that is really an archive
@@ -654,6 +655,11 @@ func shellScriptFromClause(name string, args []string) (string, bool) {
 		if shellScriptShell(line[0]) {
 			return shellDashCScript(line)
 		}
+		if line[0] == "eval" {
+			// eval runs its operand as shell source, exactly as `sh -c` runs
+			// its own.
+			return evalScript(line[1:])
+		}
 		if _, ok := shellWrapperCommands[line[0]]; !ok {
 			return "", false
 		}
@@ -664,6 +670,26 @@ func shellScriptFromClause(name string, args []string) (string, bool) {
 		line = rest
 	}
 	return "", false
+}
+
+// evalScript returns the shell source an eval clause runs: one operand whose
+// text is what the text says. That operand is a line this package can read, so
+// it is classified like a `sh -c` script. Anything else - no operand, several,
+// an option, or an operand an expansion decides - is source that only exists
+// while the line runs, which stays unproven rather than becoming a refusal.
+func evalScript(args []string) (string, bool) {
+	operands := make([]string, 0, len(args))
+	for _, arg := range args {
+		a := strings.TrimSpace(arg)
+		if a == "" || strings.HasPrefix(a, "-") {
+			return "", false
+		}
+		operands = append(operands, a)
+	}
+	if len(operands) != 1 || !shellScratchLiteralTarget(operands[0]) {
+		return "", false
+	}
+	return operands[0], true
 }
 
 // The literal scan is deliberately only a dangerous-command detector. A match
@@ -1286,12 +1312,18 @@ func executableLines(command string) []string {
 // complete shell grammar: prefix suggestions are permissions, so false
 // positives merely fall back to the exact-command choice while false negatives
 // could derive a broad permission from heredoc content.
+//
+// "<<<" is a herestring, not a heredoc: its operand is data on the line itself
+// and nothing follows it, so it costs a command no reusable prefix. That is the
+// rule the clause walker applies to the same token; the two read it alike rather
+// than each deciding what "<<" means.
 func hasShellHeredocOperator(command string) bool {
 	inSingle := false
 	inDouble := false
 	escaped := false
 	runes := []rune(command)
-	for i, ch := range runes {
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
 		if escaped {
 			escaped = false
 			continue
@@ -1308,9 +1340,16 @@ func hasShellHeredocOperator(command string) bool {
 			inDouble = !inDouble
 			continue
 		}
-		if !inSingle && !inDouble && ch == '<' && i+1 < len(runes) && runes[i+1] == '<' {
-			return true
+		if inSingle || inDouble || ch != '<' || i+1 >= len(runes) || runes[i+1] != '<' {
+			continue
 		}
+		if i+2 < len(runes) && runes[i+2] == '<' {
+			// A herestring: step over its operator and keep scanning, so its
+			// second "<" is not read as the start of a heredoc.
+			i += 2
+			continue
+		}
+		return true
 	}
 	return false
 }
@@ -1804,6 +1843,14 @@ type shellClause struct {
 	Args          []string
 	Substitutions []string
 	Grouping      bool
+	// SubshellOpen and SubshellClose count the grouping tokens this clause
+	// opens and closes - "(" and "{" for the first, ")" and "}" for the
+	// second - outside any recorded substitution. bash runs a clause's cd in a
+	// subshell, so a cd between "(" and ")" moves a directory that ends with
+	// the closing token: the parenthesised counts are what lets the walk that
+	// follows directories put it back.
+	SubshellOpen  int
+	SubshellClose int
 	// CDPATH records that this clause assigns CDPATH. bash searches it before
 	// the working directory, so a later relative cd lands somewhere this
 	// walker's tracked directory is not.
@@ -2097,6 +2144,8 @@ func (c *shellClause) recordFacts(text []rune, skip []shellSpan) {
 	c.Args = facts.args
 	c.Substitutions = facts.substitutions
 	c.Grouping = facts.grouping
+	c.SubshellOpen = facts.subshellOpen
+	c.SubshellClose = facts.subshellClose
 	c.CDPATH = facts.cdpath
 	c.Unread = facts.unread
 }
@@ -2107,6 +2156,8 @@ type shellClauseFacts struct {
 	args          []string
 	substitutions []string
 	grouping      bool
+	subshellOpen  int
+	subshellClose int
 	cdpath        bool
 	unread        bool
 }
@@ -2173,6 +2224,14 @@ func shellClauseFactsOf(text []rune, skip []shellSpan) shellClauseFacts {
 			closeWord(i)
 		case ch == '(' || ch == ')' || ch == '{' || ch == '}':
 			closeWord(i)
+			// Counted here, in the same scan that flags the clause: a grouping
+			// token inside a substitution was consumed above, so "$(cd x)" and
+			// "$((1+2))" contribute nothing.
+			if ch == '(' || ch == '{' {
+				out.subshellOpen++
+			} else {
+				out.subshellClose++
+			}
 			if ch == '(' || ch == '{' || !shellOnlyClosersFollow(text, i) {
 				// An opening token can host a cd whose effect this walker
 				// cannot scope, and a closing one only matters when something
@@ -2593,10 +2652,14 @@ func classifyCommandWordsDepth(words []string, allowedRoots []string, cwd string
 // shellReadOnlyCommands are the commands proven to write nothing, whatever
 // their arguments. Argument-level forms that do write are handled by the switch
 // in classifyCommand, which every name here goes through first.
+//
+// A pager is not one of them, however read-only its name reads: less, more,
+// bat and batcat hand the user a shell on a tty ("!cmd", "s file", "-o"), so
+// nothing here may promise they write nothing whatever their arguments.
 var shellReadOnlyCommands = map[string]struct{}{
-	// File listing, inspection and pagination.
+	// File listing and inspection.
 	"pwd": {}, "ls": {}, "cat": {}, "head": {}, "tail": {}, "wc": {}, "file": {}, "stat": {},
-	"tree": {}, "less": {}, "more": {}, "du": {}, "df": {},
+	"tree": {}, "du": {}, "df": {},
 	// Pattern search.
 	"grep": {}, "rg": {}, "egrep": {}, "fgrep": {},
 	// Output only: the scanner has already refused a redirect by the time the
@@ -2621,8 +2684,6 @@ var shellReadOnlyCommands = map[string]struct{}{
 	"md5": {}, "md5sum": {}, "sha1sum": {}, "sha256sum": {}, "shasum": {}, "cksum": {},
 	// Line counting.
 	"tokei": {},
-	// File viewers that cannot write.
-	"bat": {}, "batcat": {},
 	// No-ops.
 	"true": {}, "false": {},
 }
@@ -2694,6 +2755,14 @@ func classifyCommandDepth(name string, args []string, allowedRoots []string, cwd
 		return classifyFDCommand(args, allowedRoots, cwd)
 	case "cd":
 		return classifyCDCommand(args, allowedRoots, cwd)
+	case "eval":
+		// eval runs its operand as shell source, so a literal operand is
+		// classified as the line it is, one layer deeper - the same reading
+		// `sh -c` gets. An operand the text cannot read stays unproven.
+		if script, ok := evalScript(args); ok {
+			return shellScriptMutation(script, allowedRoots, cwd, depth+1)
+		}
+		return ShellMutationUnproven
 	}
 	if shellScriptShell(name) {
 		// The command that runs is the script in -c, not this shell: without
@@ -2788,12 +2857,13 @@ func classifySortCommand(args []string, allowedRoots []string, cwd string) Shell
 }
 
 // classifyBase64Command rejects base64's -o/--output, which writes to a file.
+// The names are compared exactly: a prefix test reads "-overlay" as "-o" and
+// turns a run that writes nothing into a write.
 func classifyBase64Command(args []string, allowedRoots []string, cwd string) ShellMutation {
 	for _, arg := range args {
 		a := strings.ToLower(strings.TrimSpace(arg))
 		switch {
-		case a == "-o" || a == "--output" || strings.HasPrefix(a, "--output="),
-			strings.HasPrefix(a, "-o") && len(a) > 2:
+		case a == "-o" || a == "--output" || strings.HasPrefix(a, "--output=") || strings.HasPrefix(a, "-o="):
 			return ShellMutationWrites
 		}
 	}
@@ -2818,6 +2888,32 @@ func classifyGofmtCommand(args []string, allowedRoots []string, cwd string) Shel
 // classifyGoCommand splits the go tool by what each subcommand does. Building,
 // testing and tidying all write; reporting does not.
 func classifyGoCommand(args []string, allowedRoots []string, cwd string) ShellMutation {
+	// go's global flags sit between the name and the subcommand, so -C <dir>
+	// would otherwise be read as the subcommand: `go -C pkg test -c ./tool`
+	// answered unproven and then wrote a test binary into the project. -C names
+	// the directory the whole invocation runs in, and a value-carrying
+	// "-flag=value" hides its value in its own word; a bare unknown flag stays
+	// unproven, because whether it takes a value is what decides where the
+	// subcommand is.
+	for len(args) > 0 {
+		arg := strings.TrimSpace(args[0])
+		if arg == "" || arg == "-" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		switch {
+		case arg == "-C":
+			if len(args) < 2 {
+				return ShellMutationUnproven
+			}
+			args = args[2:]
+		case strings.Contains(arg, "="):
+			// A value-carrying flag written in one word keeps its value there:
+			// -C=pkg, -overlay=/tmp/x.json.
+			args = args[1:]
+		default:
+			return ShellMutationUnproven
+		}
+	}
 	if len(args) == 0 {
 		return ShellMutationUnproven
 	}

@@ -154,12 +154,38 @@ func shellScratchWriteVerdictDepth(cmd string, roots []string, cwd string, depth
 	}
 	dir, known := shellScratchStartDir(cwd)
 	state := ShellScratchWritesClean
+	frames := make([]shellSubshellFrame, 0, 2)
 	for _, clause := range clauses {
+		for open := 0; open < clause.SubshellOpen; open++ {
+			// A "(" opens a subshell, and a cd runs in it: the directory the
+			// walk has reached by the matching ")" is not one the next clause
+			// runs in, so the pair is saved here and restored at the close.
+			frames = append(frames, shellSubshellFrame{dir: dir, known: known})
+		}
 		next, nextKnown, clauseState := shellScratchClauseWrite(clause, dir, known, cdpath, roots, depth)
+		for close := 0; close < clause.SubshellClose; close++ {
+			if len(frames) == 0 {
+				// A ")" whose "(" this walk never saw: the directory the rest
+				// of the line runs in is not in the text.
+				next, nextKnown = "", false
+				break
+			}
+			frame := frames[len(frames)-1]
+			frames = frames[:len(frames)-1]
+			next, nextKnown = frame.dir, frame.known
+		}
 		dir, known = next, nextKnown
 		state = worseShellScratchWrite(state, clauseState)
 	}
 	return state
+}
+
+// shellSubshellFrame is the directory the walk had before a clause opened a
+// subshell. bash runs that clause's cd inside the subshell, so the directory it
+// reaches ends with the closing token and the next clause starts from the frame.
+type shellSubshellFrame struct {
+	dir   string
+	known bool
 }
 
 // shellScratchClauseWrite decides one clause and reports the directory the next
@@ -333,7 +359,8 @@ func shellScratchTargetState(raw, dir string, roots []string) ShellScratchWriteS
 // shellScratchLiteralTarget reports whether a written path is the path in the
 // text. "~", a glob, a parameter and a substitution all give the shell a name
 // this proof cannot resolve, so none of them may reach a comparison against a
-// region.
+// region. eval reads its operand through this same test: the characters that
+// make a path unreadable are the ones that make a script unreadable.
 func shellScratchLiteralTarget(path string) bool {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -499,6 +526,11 @@ func shellScratchOperandState(name string, parsed scratchArgs, dir string, roots
 		if creates == reads {
 			// No mode, or two of them: the archive's role is not read.
 			return ShellScratchWritesUnplaceable
+		}
+		if !creates && parsed.any("-t", "--list") {
+			// A listing writes nothing anywhere, whatever -C says: -C only moves
+			// the directory the members are read from.
+			return ShellScratchWritesClean
 		}
 		state := ShellScratchWritesClean
 		if creates {

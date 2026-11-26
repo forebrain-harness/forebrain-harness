@@ -906,6 +906,16 @@ func TestClassifyShellCommand(t *testing.T) {
 		{name: "true", cmd: "true", want: ShellMutationReadOnly},
 		{name: "path-prefixed", cmd: "/usr/bin/ls -la", want: ShellMutationReadOnly},
 		{name: "sha256sum", cmd: "sha256sum file.bin", want: ShellMutationReadOnly},
+		{name: "cat a file", cmd: "cat /tmp/f", want: ShellMutationReadOnly},
+		// A pager can hand the user a shell ("!cmd", "s file", "-o"), so its
+		// name proves nothing about what it writes.
+		{name: "less a file", cmd: "less /tmp/f", want: ShellMutationUnproven},
+
+		// eval runs its operand as shell source: a literal operand is the line
+		// that runs, and an expanded one is a line this package cannot read.
+		{name: "eval of a writing script", cmd: "eval 'rm -rf pkg/tool'", want: ShellMutationWrites},
+		{name: "eval of a reading script", cmd: "eval 'ls -la'", want: ShellMutationReadOnly},
+		{name: "eval of an expanded operand", cmd: `eval "$X"`, want: ShellMutationUnproven},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1124,6 +1134,86 @@ func TestClassifyGoCommandFlagTiers(t *testing.T) {
 	for _, cmd := range unproven {
 		if got := ClassifyShellCommand(cmd, nil, ""); got != ShellMutationUnproven {
 			t.Fatalf("ClassifyShellCommand(%q) = %s, want unproven", cmd, got)
+		}
+	}
+}
+
+// go's global flags sit between the name and the subcommand, so -C <dir> hid
+// the subcommand behind an operand: `go -C pkg test -c ./tool` was unproven and
+// ran under full access while writing a test binary into the project. The flags
+// are skipped, a value-carrying "-flag=value" hides its value in its own word,
+// and a bare unknown flag stays unproven rather than guessing whether it takes
+// a value.
+func TestClassifyGoCommandGlobalFlagsHideNoSubcommand(t *testing.T) {
+	writes := []string{
+		"go -C pkg test -c ./tool",
+		"go -C pkg test -o=/tmp/t ./tool",
+		"go -C pkg build ./...",
+	}
+	for _, cmd := range writes {
+		if got := ClassifyShellCommand(cmd, nil, ""); got != ShellMutationWrites {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want writes", cmd, got)
+		}
+	}
+	unproven := []string{
+		"go -C pkg test ./tool",
+		"go -C pkg vet ./...",
+		"go -overlay=/tmp/x.json test ./pkg/tool",
+		"go -v test ./pkg/tool",
+	}
+	for _, cmd := range unproven {
+		if got := ClassifyShellCommand(cmd, nil, ""); got != ShellMutationUnproven {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want unproven", cmd, got)
+		}
+	}
+}
+
+// base64's output flag is compared by its exact name. A prefix test reads
+// "-overlay" as "-o" and turns a run that writes nothing into a write.
+func TestClassifyShellCommandBase64OutputFlagIsExact(t *testing.T) {
+	writes := []string{
+		"base64 -o /tmp/x",
+		"base64 --output /tmp/x",
+		"base64 --output=/tmp/x",
+	}
+	for _, cmd := range writes {
+		if got := ClassifyShellCommand(cmd, nil, ""); got != ShellMutationWrites {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want writes", cmd, got)
+		}
+	}
+	// Neither is a write: -overlay is not -o, and base64 has no
+	// --output-dir, so its operand is not a file either.
+	for _, cmd := range []string{"base64 -overlay x", "base64 --output-dir x"} {
+		if got := ClassifyShellCommand(cmd, nil, ""); got == ShellMutationWrites {
+			t.Fatalf("ClassifyShellCommand(%q) = writes, want anything but a write", cmd)
+		}
+	}
+}
+
+// A herestring feeds data to a command and has no body, so it is not the
+// heredoc whose "everything after this line is input" rule costs a command its
+// reusable approval prefix. The walker already tells the two apart; this helper
+// is the same reading, so the two cannot disagree.
+func TestShellHeredocOperatorIsNotHerestring(t *testing.T) {
+	heredocs := []string{
+		"cat <<'EOF'\nx\nEOF",
+		"cat <<EOF\nx\nEOF",
+		"cat <<-EOF\n\tx\n\tEOF",
+	}
+	for _, cmd := range heredocs {
+		if !hasShellHeredocOperator(cmd) {
+			t.Fatalf("hasShellHeredocOperator(%q) = false, want true", cmd)
+		}
+	}
+	notHeredocs := []string{
+		"cat <<< hi",
+		"grep -c '<<<' file",
+		`echo "a << b"`,
+		"tar -tzf /tmp/a.tgz",
+	}
+	for _, cmd := range notHeredocs {
+		if hasShellHeredocOperator(cmd) {
+			t.Fatalf("hasShellHeredocOperator(%q) = true, want false", cmd)
 		}
 	}
 }

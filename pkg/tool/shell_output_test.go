@@ -638,6 +638,10 @@ func TestPlanModeShellGateScratchVerdictMatrix(t *testing.T) {
 		"timeout 5 sh -c 'tar -xzf /tmp/a.tgz -C /tmp/x'",
 		// Read-only shapes the owner ruled keep running.
 		"{ ls; }",
+		"(cd /tmp && echo hi > x)",
+		"(cd /tmp && rm -rf pkg/tool)",
+		"eval 'ls -la'",
+		"eval 'echo hi > /tmp/x'",
 		"ls ~/.forebrain",
 		// The owner ruled this shape keeps running; either answer does, because
 		// nothing writes.
@@ -657,6 +661,10 @@ func TestPlanModeShellGateScratchVerdictMatrix(t *testing.T) {
 		"mkdir -p /tmp/x && go test ./pkg/tool",
 		"(cd pkg && go test ./...)",
 		"python3 /tmp/x.py",
+		// A pager can hand the user a shell, and an expanded eval operand is a
+		// line this proof cannot read: both are questions, not refusals.
+		"less /tmp/f",
+		`eval "$X"`,
 		"go test -overlay /tmp/x/overlay.json ./pkg/tui",
 		"go test -tags fts5 -overlay=/tmp/x/overlay.json ./pkg/tui -count=1",
 	}
@@ -689,6 +697,15 @@ func TestPlanModeShellGateScratchVerdictMatrix(t *testing.T) {
 		"sh -c 'rm -rf pkg/tool'",
 		"bash -lc 'rm -rf pkg/tool'",
 		"(cd pkg && echo hi > state.go)",
+		// The cd ran in a subshell, so the directory it reached is gone by the
+		// time the second clause writes.
+		"(cd /tmp) && echo hi > x",
+		"(cd /tmp); rm -rf pkg/tool",
+		"(cd pkg && rm -rf tool)",
+		// eval runs its operand as shell source.
+		"eval 'rm -rf pkg/tool'",
+		"eval 'cd pkg && rm -rf tool'",
+		"eval 'echo hi > state.go'",
 		"cd /tmp && pushd /etc && echo hi > x",
 		"cd /tmp && cd - && echo hi > state.go",
 		"cd /tmp && CDPATH=" + project + "/pkg cd tool && echo pwned > x.go",
