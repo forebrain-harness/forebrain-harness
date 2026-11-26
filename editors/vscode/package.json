@@ -2,7 +2,7 @@
   "name": "forebrain-vscode",
   "displayName": "Forebrain",
   "description": "The full Forebrain Harness Web UI in VS Code's side bar, plus native checklist, approvals and editor-to-chat commands.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "forebrain",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.100.0" },
@@ -12,7 +12,7 @@
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
-      "auxiliarybar": [{ "id": "forebrain", "title": "Forebrain", "icon": "assets/forebrain.svg" }]
+      "secondarySidebar": [{ "id": "forebrain", "title": "Forebrain", "icon": "assets/forebrain.svg" }]
     },
     "views": {
       "forebrain": [
