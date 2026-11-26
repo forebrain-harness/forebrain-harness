@@ -102,7 +102,9 @@ describe('ForebrainPromptTextarea', () => {
     expect(composer.findAll('li')).toHaveLength(0)
   })
 
-  it('lists built-in commands and skills as two groups, and keeps the highlight in view', async () => {
+  // Pressing "/" opens the skill picker: the web offers no built-in command,
+  // so a "/" at the start of the message lists skills and nothing else.
+  it('lists only skills at the start of the message, and keeps the highlight in view', async () => {
     const record = (name: string, category: string): SlashCommandRecord => ({
       canonicalName: name,
       name,
@@ -117,7 +119,7 @@ describe('ForebrainPromptTextarea', () => {
       visibility: 'public',
     } as SlashCommandRecord)
     const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
-      records: [record('model', 'model'), record('mcp', 'tools'), record('model-tuning', 'skill')],
+      records: [record('model', 'model'), record('mcp', 'tools'), record('model-tuning', 'skill'), record('audit', 'skill')],
     } as Awaited<ReturnType<typeof forebrainApi.slashCommands>>)
     const scrolled = vi.fn()
     const scrollIntoView = Element.prototype.scrollIntoView
@@ -128,18 +130,20 @@ describe('ForebrainPromptTextarea', () => {
       ;(textarea.element as HTMLTextAreaElement).value = '/m'
       ;(textarea.element as HTMLTextAreaElement).setSelectionRange(2, 2)
       await textarea.trigger('input')
-      await vi.waitFor(() => expect(composer.findAll('[role="menuitem"]')).toHaveLength(3))
+      await vi.waitFor(() => expect(composer.findAll('[role="menuitem"]')).toHaveLength(2))
       expect(list).toHaveBeenLastCalledWith('webchat', 'm', expect.anything())
-      expect(composer.findAll('.slash-group').map((group) => group.text())).toEqual(['Commands', 'Skills'])
-      expect(composer.findAll('[role="menuitem"]').map((item) => item.find('.font-medium').text())).toEqual(['/model', '/mcp', '/model-tuning'])
+      expect(composer.findAll('.slash-group').map((group) => group.text())).toEqual(['Skills'])
+      expect(composer.findAll('[role="menuitem"]').map((item) => item.find('.font-medium').text())).toEqual([
+        '/model-tuning',
+        '/audit',
+      ])
 
-      await textarea.trigger('keydown', { key: 'ArrowDown' })
       await textarea.trigger('keydown', { key: 'ArrowDown' })
       await nextTick()
       const items = composer.findAll('[role="menuitem"]')
-      expect(items.map((item) => item.attributes('data-highlighted'))).toEqual([undefined, undefined, 'true'])
+      expect(items.map((item) => item.attributes('data-highlighted'))).toEqual([undefined, 'true'])
       expect(scrolled).toHaveBeenCalledWith({ block: 'nearest' })
-      expect(scrolled.mock.contexts[scrolled.mock.contexts.length - 1]).toBe(items[2].element)
+      expect(scrolled.mock.contexts[scrolled.mock.contexts.length - 1]).toBe(items[1].element)
     } finally {
       list.mockRestore()
       Element.prototype.scrollIntoView = scrollIntoView
@@ -253,7 +257,7 @@ describe('ForebrainPromptTextarea', () => {
   it('keeps the message a leading command was typed in front of', async () => {
     const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
       records: [{
-        canonicalName: 'plan', name: 'plan', description: 'plan does its thing', category: 'mode',
+        canonicalName: 'plan', name: 'plan', description: 'plan does its thing', category: 'skill',
         argumentHint: '', actionKind: 'local', allowedModes: [], supportsInlineArgs: false,
         availableDuringRun: true, availableInSideConversation: true, visibility: 'public',
       } as SlashCommandRecord],
@@ -279,7 +283,7 @@ describe('ForebrainPromptTextarea', () => {
   it('asks for a subagent view’s commands when it belongs to a subagent tab', async () => {
     const list = vi.spyOn(forebrainApi, 'slashCommands').mockResolvedValue({
       records: [{
-        canonicalName: 'compact', name: 'compact', description: 'compact does its thing', category: 'subagent',
+        canonicalName: 'compact', name: 'compact', description: 'compact does its thing', category: 'skill',
         argumentHint: '', actionKind: 'local', allowedModes: [], supportsInlineArgs: false,
         availableDuringRun: true, availableInSideConversation: true, visibility: 'public',
       } as SlashCommandRecord],

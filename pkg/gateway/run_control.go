@@ -68,7 +68,12 @@ type runInputRequest struct {
 }
 
 func (req runInputRequest) input() run.Input {
-	return run.Input{Text: req.Message, Attachments: req.Attachments, MentionImages: req.MentionImages}
+	return run.Input{
+		Text:          req.Message,
+		Display:       strings.TrimSpace(req.Message),
+		Attachments:   req.Attachments,
+		MentionImages: req.MentionImages,
+	}
 }
 
 // queuedInputReply is a queued message handed back to its client whole —
@@ -76,7 +81,7 @@ func (req runInputRequest) input() run.Input {
 func queuedInputReply(item run.Input, accepted bool, preview turn.PendingInputPreview) map[string]any {
 	return map[string]any{
 		"accepted":       accepted,
-		"message":        item.Text,
+		"message":        firstNonBlank(item.Display, item.Text),
 		"attachments":    item.Attachments,
 		"mention_images": item.MentionImages,
 		"preview":        preview,
@@ -146,7 +151,9 @@ func (s *Server) handleRunInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	in, err := s.withWebInputParts(r.Context(), s.runnerFor(r.Context(), sessionID), sessionID, req.input())
+	in := req.input()
+	modelText := s.skillCommandPrompt(&in)
+	in, err := s.withWebInputParts(r.Context(), s.runnerFor(r.Context(), sessionID), sessionID, in, modelText)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -270,7 +277,7 @@ func runBoundaryForStatus(status state.RunStatus) run.Boundary {
 }
 
 func releasedInput(in run.Input) event.ReleasedInput {
-	return event.ReleasedInput{Text: in.Text, Attachments: in.Attachments, MentionImages: in.MentionImages}
+	return event.ReleasedInput{Text: firstNonBlank(in.Display, in.Text), Attachments: in.Attachments, MentionImages: in.MentionImages}
 }
 
 // splitReleasedInputs separates what the page still obeys — the person's own
@@ -422,7 +429,7 @@ func (s *Server) watchRunQueue(q *run.InputQueue, runID, sessionID string) {
 		ctx := context.Background()
 		for _, in := range q.TakeDelivered() {
 			payload := event.InputDeliveredPayload{
-				Text:          in.Text,
+				Text:          firstNonBlank(in.Display, in.Text),
 				Attachments:   in.Attachments,
 				MentionImages: in.MentionImages,
 			}
@@ -1276,16 +1283,26 @@ func (s *Server) prepareWebTurnInput(ctx context.Context, sessionID, content str
 }
 
 // withWebInputParts gives a message that joins a running turn — a steer into
-// the conversation's run, a message to one of its subagents — what a new turn
-// sends for the same words and attachments: the text naming each attached file
-// and where it was saved, each image, and the line naming the image's file
-// (run.UserInputParts). The message keeps its own text and attachment lists,
-// which are what its queue shows and hands back for editing.
-func (s *Server) withWebInputParts(ctx context.Context, runner *run.Runner, sessionID string, in run.Input) (run.Input, error) {
+// the conversation's run, a message to one of its subagents — the parts the
+// model reads: modelText — the prompt a skill command expanded into, empty when
+// the message is its own model text — followed by what it attached, resolved
+// into image parts: the text naming each attached file and where it was saved,
+// each image, and the line naming the image's file (run.UserInputParts). The
+// parts carry the words as written: the queue's own text is only a preview,
+// whitespace collapsed, and the model must not read a multi-line message as one
+// line. The message keeps its own text and attachment lists, which are what its
+// queue shows and hands back for editing.
+func (s *Server) withWebInputParts(ctx context.Context, runner *run.Runner, sessionID string, in run.Input, modelText string) (run.Input, error) {
+	if modelText == "" {
+		modelText = in.Text
+	}
 	if len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
+		if strings.TrimSpace(modelText) != "" {
+			in.Parts = []llm.ContentPart{llm.Text(modelText)}
+		}
 		return in, nil
 	}
-	turnInput, err := s.prepareWebTurnInput(ctx, sessionID, in.Text, in.Attachments, in.MentionImages)
+	turnInput, err := s.prepareWebTurnInput(ctx, sessionID, modelText, in.Attachments, in.MentionImages)
 	if err != nil {
 		return in, err
 	}

@@ -3508,18 +3508,26 @@ func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	in := run.Input{Text: strings.TrimSpace(req.Message), Attachments: req.Attachments, MentionImages: req.MentionImages}
+	in := run.Input{
+		Text:          strings.TrimSpace(req.Message),
+		Display:       strings.TrimSpace(req.Message),
+		Attachments:   req.Attachments,
+		MentionImages: req.MentionImages,
+	}
+	modelText := ""
 	if strings.HasPrefix(in.Text, "/") {
-		if code, ok := s.subagentCommandInput(&in); !ok {
+		expanded, code, ok := s.subagentCommandInput(&in)
+		if !ok {
 			writeSubagentViewError(w, code, "this command belongs to the conversation", http.StatusBadRequest)
 			return
 		}
+		modelText = expanded
 	}
 	if in.Text == "" && len(in.Attachments) == 0 && len(in.MentionImages) == 0 {
 		http.Error(w, "empty message", http.StatusBadRequest)
 		return
 	}
-	in, err := s.withWebInputParts(r.Context(), runner, sid, in)
+	in, err := s.withWebInputParts(r.Context(), runner, sid, in, modelText)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -3546,34 +3554,62 @@ func (s *Server) handleSubagentInput(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"delivery": string(delivery), "preview": subagentInputPreview(runner, sid, agentKey)})
 }
 
+// skillCommandPrompt resolves a leading skill command on a message about to
+// steer a running turn or subagent — one rule for both views: the trusted
+// selection rides on the input, and the prompt the command expanded into is
+// what the model reads, while Text and Display keep the line as typed — the
+// queue previews it and the transcript draws it, the way the terminal does for
+// either view. A built-in command is left alone (it belongs to the
+// conversation, and the caller decides what that means for its view), and a
+// line that is no skill is the message itself: both come back empty, meaning
+// "nothing to expand — the message is its own model text". Never runs a
+// built-in here: parseSlashCommandWithOptions executes what it parses.
+func (s *Server) skillCommandPrompt(in *run.Input) string {
+	line := strings.TrimSpace(in.Text)
+	if !strings.HasPrefix(line, "/") {
+		return ""
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
+	if name == "" || turn.IsBuiltinName(name) {
+		return ""
+	}
+	outcome := parseSlashCommandWithOptions(s, "", "webchat", line, turn.Context{}, nil)
+	if strings.TrimSpace(outcome.SkillName) == "" && strings.TrimSpace(outcome.SkillPath) == "" {
+		return ""
+	}
+	in.SkillName = strings.TrimSpace(outcome.SkillName)
+	in.SkillPath = strings.TrimSpace(outcome.SkillPath)
+	return strings.TrimSpace(outcome.ContinueInput)
+}
+
 // subagentCommandInput turns a slash line the user typed in a subagent's view
-// into what is sent. A skill command is expanded through the shared slash path
-// and its trusted selection rides along; a command that belongs to the
-// conversation is refused with its stable code (the caller writes it).
-func (s *Server) subagentCommandInput(in *run.Input) (code string, ok bool) {
+// into what is sent, and reports the stable code of a command that belongs to
+// the conversation (the caller writes it). The line itself stays on the input:
+// the queue previews it and the view draws it, while the expansion is only what
+// the model reads.
+func (s *Server) subagentCommandInput(in *run.Input) (modelText, code string, ok bool) {
 	fields := strings.Fields(strings.TrimSpace(in.Text))
 	name := strings.ToLower(strings.TrimPrefix(fields[0], "/"))
 	switch name {
 	case "context":
-		return useDedicatedEndpointCode, false
+		return "", useDedicatedEndpointCode, false
 	}
 	// The registry lists skill commands beside the built-ins, so a name it
 	// finds may still be a skill: only the built-in table itself says
 	// otherwise. A built-in that acts on the conversation (hidden, or global)
 	// is not sent here; the page runs it in the main view instead.
 	if turn.IsBuiltinName(name) {
-		return subagentViewCommandCode, false
+		return "", subagentViewCommandCode, false
 	}
-	outcome := parseSlashCommandWithOptions(s, "", "webchat", in.Text, turn.Context{}, nil)
-	if strings.TrimSpace(outcome.SkillName) == "" && strings.TrimSpace(outcome.SkillPath) == "" {
-		return subagentViewCommandCode, false
+	modelText = s.skillCommandPrompt(in)
+	if strings.TrimSpace(in.SkillName) == "" && strings.TrimSpace(in.SkillPath) == "" {
+		return "", subagentViewCommandCode, false
 	}
-	in.SkillName = strings.TrimSpace(outcome.SkillName)
-	in.SkillPath = strings.TrimSpace(outcome.SkillPath)
-	if expanded := strings.TrimSpace(outcome.ContinueInput); expanded != "" {
-		in.Text = expanded
-	}
-	return "", true
+	return modelText, "", true
 }
 
 func (s *Server) handleSubagentQueuedInput(w http.ResponseWriter, r *http.Request) {
@@ -3613,7 +3649,7 @@ func (s *Server) handleSubagentQueuedInput(w http.ResponseWriter, r *http.Reques
 	}
 	writeJSON(w, map[string]any{
 		"accepted":       true,
-		"message":        item.Text,
+		"message":        firstNonBlank(item.Display, item.Text),
 		"attachments":    item.Attachments,
 		"mention_images": item.MentionImages,
 		"preview":        subagentInputPreview(runner, sid, agentKey),

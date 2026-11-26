@@ -111,10 +111,8 @@ const mentionQuery = ref('')
 const highlightIndex = ref(0)
 const slashOpen = ref(false)
 const slashQuery = ref('')
-// The "/" token's offset and whether it begins the message. Mid-sentence the
-// menu lists skills only and an accept replaces just the token.
+// The "/" token's offset: an accept replaces just the token.
 const slashStart = ref(0)
-const slashAtStart = ref(true)
 const slashCommands = ref<SlashCommandRecord[]>([])
 const slashHighlightIndex = ref(0)
 const slashLoading = ref(false)
@@ -367,7 +365,7 @@ watch(argumentHint, async (hint) => {
   area.style.minHeight = hint && hintOverlayRef.value ? `${hintOverlayRef.value.scrollHeight}px` : ''
 })
 
-watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation, () => props.subagentView, slashAtStart], async ([open, query]) => {
+watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversation, () => props.subagentView], async ([open, query]) => {
   if (!open) {
     slashCommands.value = []
     slashLoading.value = false
@@ -383,9 +381,10 @@ watch([slashOpen, slashQuery, () => props.duringRun, () => props.sideConversatio
     })
     if (req !== slashRequestSeq) return
     const records = Array.isArray(res.records) ? res.records : []
-    // A "/" that is not the start of the message only ever names a skill, so
-    // the built-in commands are not offered there.
-    slashCommands.value = slashAtStart.value ? records : records.filter((record) => record.category === 'skill')
+    // Pressing "/" opens the skill picker: only skills are offered, wherever
+    // the "/" stands in the draft (owner, 2026-11-26). The web exposes no
+    // built-in command.
+    slashCommands.value = records.filter((record) => record.category === 'skill')
   } catch {
     if (req !== slashRequestSeq) return
     slashCommands.value = []
@@ -520,7 +519,6 @@ function syncMentionState() {
     slashOpen.value = true
     slashQuery.value = slashParsed.query
     slashStart.value = slashParsed.start
-    slashAtStart.value = slashParsed.atStart
     mentionOpen.value = false
     return
   }

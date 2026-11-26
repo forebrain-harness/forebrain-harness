@@ -6110,8 +6110,8 @@ func TestSubagentInputSendsARegisteredSkillCommand(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
 	require.Equal(t, string(run.SubagentDeliverySteered), out.Delivery)
-	require.Equal(t, []string{"use probe-skill: go"}, out.Preview.PendingSteers,
-		"the skill's expansion is what the subagent is sent")
+	require.Equal(t, []string{"/probe-skill go"}, out.Preview.PendingSteers,
+		"the line as typed is what the queue previews; the expansion rides in the parts")
 	close(release)
 	require.Eventually(t, func() bool {
 		return !run.SubagentRunning(s.Runner, "sid", "agent-1")
@@ -11224,4 +11224,70 @@ func TestBatchProjectRoutesNeedNoTrustRecord(t *testing.T) {
 	if enabled, ok := skillEnabled(); !ok || enabled {
 		t.Fatalf("the toggle was not stored: ok=%v enabled=%v", ok, enabled)
 	}
+}
+
+// A skill command typed into a subagent's web view keeps the line the person
+// typed as the message the queue previews and the view draws — the skill's
+// expansion rides in the parts the model reads, beside the selection that makes
+// the execution load it.
+func TestSubagentInputSkillCommandKeepsTypedLineAndExpandsParts(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+	release := holdSubagentRunning(t, s)
+	registerProbeSkillCommand(t)
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"/probe-skill go"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Delivery string                   `json:"delivery"`
+		Preview  turn.PendingInputPreview `json:"preview"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.Equal(t, []string{"/probe-skill go"}, out.Preview.PendingSteers)
+
+	steer, ok := run.RecallSubagentInput(s.Runner, "sid", "agent-1")
+	require.True(t, ok, "the queued steer must be there to recall")
+	require.Equal(t, "/probe-skill go", steer.Text)
+	require.Equal(t, "/probe-skill go", steer.Display)
+	require.Equal(t, "probe-skill", steer.SkillName)
+	require.Equal(t, "/skills/probe-skill/SKILL.md", steer.SkillPath)
+	require.Len(t, steer.Parts, 1)
+	require.Equal(t, "use probe-skill: go", steer.Parts[0].Text)
+
+	close(release)
+	require.Eventually(t, func() bool {
+		return !run.SubagentRunning(s.Runner, "sid", "agent-1")
+	}, 5*time.Second, 20*time.Millisecond, "the held execution never ended")
+}
+
+// Recalling a queued message in a subagent's view hands back the line as the
+// person wrote it: a multi-line message keeps its breaks for the composer.
+func TestSubagentQueuedInputRecallHandsBackTheTypedLine(t *testing.T) {
+	s, ws := newSubagentViewTestServer(t)
+	seedSubagentRecord(t, ws, "sid", "agent-1")
+	release := holdSubagentRunning(t, s)
+
+	req := subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"message":"a\nb"}`)
+	w := httptest.NewRecorder()
+	s.handleSubagentInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	req = subagentViewRequest(http.MethodPost, "sid", "agent-1", `{"action":"edit_last"}`)
+	w = httptest.NewRecorder()
+	s.handleSubagentQueuedInput(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var out struct {
+		Accepted bool   `json:"accepted"`
+		Message  string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	require.True(t, out.Accepted)
+	require.Equal(t, "a\nb", out.Message)
+
+	close(release)
+	require.Eventually(t, func() bool {
+		return !run.SubagentRunning(s.Runner, "sid", "agent-1")
+	}, 5*time.Second, 20*time.Millisecond, "the held execution never ended")
 }

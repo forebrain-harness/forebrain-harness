@@ -518,6 +518,25 @@ func TestHandleRunInputSteerAndQueueExposePendingInputPreview(t *testing.T) {
 	require.Equal(t, []string{"next turn"}, queueResp.Preview.QueuedMessages)
 }
 
+// A web steer with nothing attached reaches the model with its own line
+// breaks: the queue's text is only a preview, whitespace collapsed, and a
+// multi-line message must not reach the model as one line.
+func TestRunInputKeepsLineBreaksForAMessageWithNothingAttached(t *testing.T) {
+	s := &Server{}
+	runID := "run-multiline"
+	q := queue(t, s, runID)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/input", strings.NewReader(`{"message":"first\nsecond"}`))
+	req.SetPathValue("id", runID)
+	rr := httptest.NewRecorder()
+	s.handleRunInput(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	snapshot := q.Runtime().Snapshot()
+	require.Len(t, snapshot, 1)
+	require.Equal(t, "first\nsecond", llm.TextContent(snapshot[0].Parts...))
+}
+
 func TestHandleRunQueuedInputEditLastQueuedMessage(t *testing.T) {
 	s := &Server{}
 	runID := "run-edit"
@@ -3336,4 +3355,131 @@ func TestPendingInputPreviewUnwrapsAgentMessage(t *testing.T) {
 	require.Equal(t, []string{"a message the person typed"}, last.QueuedMessages)
 	require.Contains(t, q.Preview().Steers[0], "<agent-message",
 		"the queue still holds what the model reads")
+}
+
+// registerProbeSkillCommand registers the skill command the gateway tests type,
+// in the shape a real skill registers with: the request rides inline and the
+// handler only answers what the command expands into.
+func registerProbeSkillCommand(t *testing.T) {
+	t.Helper()
+	turn.ResetDynamic()
+	t.Cleanup(turn.ResetDynamic)
+	require.NoError(t, turn.ReplaceDynamicSource("gw-run-input-test", []turn.DynamicCommand{{
+		Command: turn.Command{
+			Name: "probe-skill", Description: "probe", Category: turn.SkillCategory,
+			AllowedSurfaces:    []turn.Surface{turn.SurfaceTUI, turn.SurfaceWebChat},
+			SupportsInlineArgs: true, ArgumentHint: "[request]", Visibility: turn.VisibilityPublic,
+		},
+		SkillPath: "/skills/probe-skill/SKILL.md",
+		Handler: func(turn.Context, string, []string) turn.Result {
+			return turn.Result{
+				Handled: true, ShouldContinueRun: true, ContinueInput: "use probe-skill: go",
+				SkillName: "probe-skill", SkillPath: "/skills/probe-skill/SKILL.md",
+			}
+		},
+	}}))
+}
+
+// A skill command typed into the web conversation while its run is live steers
+// with the skill selected — the same rule the terminal follows in either view:
+// the model reads the prompt the command expanded into, while the line as typed
+// is what the queue previews and the transcript draws.
+func TestRunInputSteersASkillCommandWithItsSelection(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-skill-steer"
+	q := trackedQueue(t, s, runID)
+	registerProbeSkillCommand(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/input", strings.NewReader(`{"message":"/probe-skill go"}`))
+	req.SetPathValue("id", runID)
+	rr := httptest.NewRecorder()
+	s.handleRunInput(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	var resp struct {
+		Accepted bool `json:"accepted"`
+		Preview  struct {
+			PendingSteers []string `json:"pending_steers"`
+		} `json:"preview"`
+	}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	require.True(t, resp.Accepted)
+	require.Equal(t, []string{"/probe-skill go"}, resp.Preview.PendingSteers)
+
+	entries := q.Runtime().Snapshot()
+	require.Len(t, entries, 1)
+	require.Equal(t, "probe-skill", entries[0].SkillName)
+	require.Equal(t, "/skills/probe-skill/SKILL.md", entries[0].SkillPath)
+	require.Equal(t, "/probe-skill go", entries[0].Display)
+	require.Len(t, entries[0].Parts, 1)
+	require.Equal(t, "use probe-skill: go", entries[0].Parts[0].Text,
+		"the model reads what the command expanded into")
+}
+
+// A built-in command and a plain line steer as they always did: nothing here
+// executes a built-in or rewrites an ordinary message.
+func TestRunInputLeavesBuiltinAndPlainLinesAlone(t *testing.T) {
+	s := newRunInputTestServer(t)
+	registerProbeSkillCommand(t)
+	cases := []struct{ name, message string }{
+		{name: "built-in", message: "/model"},
+		{name: "plain", message: "plain text"},
+	}
+	for _, tc := range cases {
+		runID := "run-" + tc.name
+		q := trackedQueue(t, s, runID)
+		body, err := json.Marshal(map[string]string{"message": tc.message})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/runs/"+runID+"/input", strings.NewReader(string(body)))
+		req.SetPathValue("id", runID)
+		rr := httptest.NewRecorder()
+		s.handleRunInput(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+		entries := q.Runtime().Snapshot()
+		require.Len(t, entries, 1, tc.name)
+		require.Empty(t, entries[0].SkillName, tc.name)
+		require.Empty(t, entries[0].SkillPath, tc.name)
+		require.Len(t, entries[0].Parts, 1, tc.name)
+		require.Equal(t, tc.message, entries[0].Parts[0].Text, tc.name)
+	}
+}
+
+// A delivered steer reaches the page as the line the person typed, its line
+// breaks kept: the queue's own text is only a whitespace-collapsed preview.
+func TestWatchRunQueuePublishesDeliveredSteerAsWritten(t *testing.T) {
+	s := newRunInputTestServer(t)
+	runID := "run-delivered-typed"
+	q := trackedQueue(t, s, runID)
+	require.True(t, q.Steer(run.Input{Text: "a b", Display: "a\nb"}))
+
+	delivery := q.Runtime().BeginSteerDelivery(context.Background())
+	require.NotNil(t, delivery)
+	require.True(t, delivery.Commit())
+
+	events, err := s.RunRT.ListRunEvents(context.Background(), runID, 100)
+	require.NoError(t, err)
+	var delivered []event.InputDeliveredPayload
+	for _, evt := range events {
+		if evt.Type != event.RunEventInputDelivered {
+			continue
+		}
+		var payload event.InputDeliveredPayload
+		require.NoError(t, json.Unmarshal(evt.Payload, &payload))
+		delivered = append(delivered, payload)
+	}
+	require.Len(t, delivered, 1)
+	require.Equal(t, "a\nb", delivered[0].Text)
+}
+
+// What a queued message hands back — a released follow-up for the client to
+// resend, a recall for the composer — is the line as written, so a multi-line
+// message keeps its breaks across the round trip.
+func TestReleasedAndRecalledInputsKeepTheTypedLine(t *testing.T) {
+	in := run.Input{Text: "a b", Display: "a\nb"}
+	require.Equal(t, "a\nb", releasedInput(in).Text)
+	reply := queuedInputReply(in, true, turn.PendingInputPreview{})
+	require.Equal(t, "a\nb", reply["message"])
+	require.Equal(t, "a b", queuedInputReply(run.Input{Text: "a b"}, true, turn.PendingInputPreview{})["message"],
+		"a message with no line of its own falls back to its text")
 }
