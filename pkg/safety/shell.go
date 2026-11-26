@@ -578,7 +578,28 @@ func dangerousCommandFromWords(command []string, depth int) *DangerousCommandMat
 	return nil
 }
 
-// shellDashCScript returns the script operand of a `-c` shell invocation.
+// shellScriptShells are the shells whose `-c` operand is the command that runs.
+// One table, because the tier classifier and the scratch verdict both have to
+// recognise the same form - and because only these read a script from "-c": a
+// writer's own "-c" ("tar -czf", "grep -c") names nothing but an operand.
+//
+// It is narrower than engine.go's shellInterpreters on purpose: that table names
+// every head whose arguments may hold a nested program (fish, csh and tcsh
+// included), while this one is the set classifyCommandDepth reads a "-c" string
+// from. The other three are still unclassified, as they were before plan 390.
+var shellScriptShells = map[string]struct{}{
+	"sh": {}, "bash": {}, "zsh": {}, "dash": {}, "ksh": {},
+}
+
+// shellScriptShell reports whether name is one of those shells.
+func shellScriptShell(name string) bool {
+	_, ok := shellScriptShells[name]
+	return ok
+}
+
+// shellDashCScript returns the script operand of a `-c` shell invocation. The
+// caller must have established that the command is a shell: this reads the
+// options of that form, and every other command's "-c" means something else.
 //
 // `-c` may sit inside a short-option cluster - `-lc`, `-ec`, `-xc` - because
 // bash and sh read the script from the next word in that form too, and `-lc
@@ -606,7 +627,7 @@ func shellDashCScript(command []string) (string, bool) {
 	return "", false
 }
 
-// shellDashCScriptAt reads the `-c` form out of a command name and its
+// shellDashCScriptAt reads the `-c` form out of a shell's name and its
 // arguments.
 func shellDashCScriptAt(name string, args []string) (string, bool) {
 	command := make([]string, 0, len(args)+1)
@@ -618,6 +639,10 @@ func shellDashCScriptAt(name string, args []string) (string, bool) {
 // shellScriptFromClause returns the script a clause runs through a shell's `-c`,
 // looking through the wrapper commands the classifier already unwraps, so a
 // scratch verdict and the tier cannot disagree about what a clause runs.
+//
+// The command has to be a shell before its options are read as a shell's: asking
+// first made `tar -czf` and `grep -c` carry a "script" that is really an archive
+// path or a pattern.
 func shellScriptFromClause(name string, args []string) (string, bool) {
 	if name == "" {
 		return "", false
@@ -626,11 +651,8 @@ func shellScriptFromClause(name string, args []string) (string, bool) {
 	line = append(line, name)
 	line = append(line, args...)
 	for hop := 0; hop <= len(shellWrapperCommands)+1; hop++ {
-		if script, ok := shellDashCScript(line); ok {
-			return script, true
-		}
-		if line[0] == "sh" || line[0] == "bash" || line[0] == "zsh" || line[0] == "dash" || line[0] == "ksh" {
-			return "", false
+		if shellScriptShell(line[0]) {
+			return shellDashCScript(line)
 		}
 		if _, ok := shellWrapperCommands[line[0]]; !ok {
 			return "", false
@@ -2672,7 +2694,8 @@ func classifyCommandDepth(name string, args []string, allowedRoots []string, cwd
 		return classifyFDCommand(args, allowedRoots, cwd)
 	case "cd":
 		return classifyCDCommand(args, allowedRoots, cwd)
-	case "sh", "bash", "zsh", "dash", "ksh":
+	}
+	if shellScriptShell(name) {
 		// The command that runs is the script in -c, not this shell: without
 		// unwrapping it, `sh -c 'rm -rf pkg'` would hide behind a name no table
 		// describes. `sh script.sh` stays Unproven - that file is not in the

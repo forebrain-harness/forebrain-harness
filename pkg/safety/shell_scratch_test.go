@@ -51,11 +51,16 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "tee two scratch files", cmd: "tee /tmp/a /tmp/b", want: ShellScratchWritesClean, why: "both operands are written and both are scratch"},
 		{name: "dd into scratch", cmd: "dd if=/dev/zero of=/tmp/z bs=1k count=1", want: ShellScratchWritesClean, why: "of= is the only destination"},
 		{name: "tar into scratch", cmd: "tar -xzf /tmp/a.tgz -C /tmp/x", want: ShellScratchWritesClean, why: "-C names the directory"},
+		{name: "tar creating an archive in scratch", cmd: "tar -czf /tmp/a.tgz -C /tmp/x .", want: ShellScratchWritesClean, why: "-f names the archive; -C only moves the read base"},
+		{name: "tar creating an archive in scratch without -C", cmd: "tar -cf /tmp/a.tar .", want: ShellScratchWritesClean, why: "a creating tar writes only -f, so its cwd is read rather than written"},
+		{name: "grep -c on a scratch file", cmd: "grep -c x /tmp/f", want: ShellScratchWritesClean, why: "grep's -c counts matches; it is not a shell's -c"},
+		{name: "unzip -c writes to stdout", cmd: "unzip -c /tmp/a.zip", want: ShellScratchWritesClean, why: "-c extracts to stdout, so no directory has to be inside a region"},
 		{name: "git clone into scratch", cmd: "git clone https://example.com/x.git /tmp/repo", want: ShellScratchWritesClean, why: "clone's last operand is the destination"},
 		{name: "no redirect and no output: writes nothing", cmd: `curl -s 'https://example.com/x.json'`, want: ShellScratchWritesClean, why: "no -o and no -O saves nothing"},
 		{name: "mkdir in /tmp after a cd", cmd: "cd /tmp && mkdir x", want: ShellScratchWritesClean, why: "the tracked directory is scratch"},
 		{name: "the reported research pipeline", cmd: `cd /tmp && curl -s -o cc.vsix 'https://example.com/cc.vsix' && rm -rf claude-x && mkdir claude-x && cd claude-x && unzip -q ../cc.vsix`, want: ShellScratchWritesClean, why: "every step stays under /tmp"},
 		{name: "git clone with literal operands", cmd: "git clone /tmp/a /tmp/b", want: ShellScratchWritesClean, why: "the destination is scratch"},
+		{name: "a wrapper around a scratch writer", cmd: "nohup tar -czf /tmp/a.tgz .", want: ShellScratchWritesClean, why: "the wrapper is unwrapped and the tar clause writes scratch"},
 
 		// Command substitution is classified, not merely doubted: a source that
 		// writes nothing leaves the line clean.
@@ -111,7 +116,7 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "parameter expansion hides the path", cmd: "echo hi > /tmp/$NAME", want: ShellScratchWritesUnplaceable, why: "the target is not literal"},
 		{name: "home expansion", cmd: "rm -rf ~/Documents", want: ShellScratchWritesUnplaceable, why: "a word-start ~ puts the target outside the proof's reach"},
 		{name: "a shell wrapper onto the project", cmd: "sh -c 'rm -rf pkg'", want: ShellScratchWritesOutside, why: "the script's operand resolves inside the project"},
-		{name: "an env prefix does not hide the writer", cmd: "env FOO=1 rm -rf pkg", want: ShellScratchWritesUnplaceable, why: "the wrapper is unwrapped by the tier, which proves a write nothing here bounds"},
+		{name: "an env prefix does not hide the writer", cmd: "env FOO=1 rm -rf pkg", want: ShellScratchWritesOutside, why: "the wrapper is unwrapped and rm's operand resolves inside the project"},
 		{name: "a second clause still writes the project", cmd: "rm -rf /tmp/x; rm -rf pkg", want: ShellScratchWritesOutside, why: "the worst clause answers for the line"},
 		{name: "tar -C escaping the region", cmd: "tar -xzf /tmp/a.tgz -C /tmp/../../workspace/forebrain-harness", want: ShellScratchWritesOutside, why: "the resolved -C is the project"},
 		{name: "mv -t naming the project", cmd: "mv -t pkg/tool /tmp/x", want: ShellScratchWritesOutside, why: "-t is the destination"},
@@ -122,6 +127,7 @@ func TestShellScratchWriteVerdict(t *testing.T) {
 		{name: "git subcommand beyond clone", cmd: "git clone https://example.com/x.git /tmp/repo && git -C /tmp/repo checkout .", want: ShellScratchWritesOutside, why: "only clone's destination is in the text; checkout writes a repository this proof does not read"},
 		{name: "unzip without -d extracts into the cwd", cmd: "unzip /tmp/x.zip", want: ShellScratchWritesOutside, why: "the cwd is the project"},
 		{name: "tar without -C extracts into the cwd", cmd: "tar -xzf /tmp/a.tgz", want: ShellScratchWritesOutside, why: "the cwd is the project"},
+		{name: "tar creating an archive in the project", cmd: "tar -czf pkg/tool/x.tar .", want: ShellScratchWritesOutside, why: "-f names the archive and it is in the project"},
 		{name: "tee into the project", cmd: "tee pkg/tool/x.txt", want: ShellScratchWritesOutside, why: "the operand is in the project"},
 		{name: "unknown flag on a writer", cmd: "rm --frobnicate /tmp/x", want: ShellScratchWritesUnplaceable, why: "an unread flag can decide a write"},
 		{name: "chmod with no target", cmd: "chmod +x", want: ShellScratchWritesUnplaceable, why: "the proof cannot read where it writes"},

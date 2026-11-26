@@ -199,6 +199,28 @@ func shellScratchClauseWrite(clause shellClause, dir string, known, cdpath bool,
 	tier := classifyCommandDepth(clause.Command, clause.Args, roots, base, 0)
 	writes := len(clause.Redirects) > 0 || shellScratchWritesByName(clause.Command) || tier == ShellMutationWrites
 	script, hasScript := shellScriptFromClause(clause.Command, clause.Args)
+	// A wrapper runs the command in its own arguments, so the inner command is
+	// what this clause runs: `nohup tar -czf /tmp/a.tgz .` is the tar clause,
+	// and judging the wrapper's own name would call every wrapped form
+	// unreadable. The inner clause answers for itself, -c script included.
+	if _, ok := shellWrapperCommands[clause.Command]; ok {
+		if rest := stripWrapperArgs(clause.Command, clause.Args); len(rest) > 0 {
+			inner := shellClause{
+				Command:  strings.ToLower(filepath.Base(rest[0])),
+				Args:     rest[1:],
+				Grouping: clause.Grouping,
+				Heredoc:  clause.Heredoc,
+			}
+			outer := ShellScratchWritesClean
+			if len(clause.Redirects) > 0 {
+				// The wrapper's own redirect is this clause's write; the inner
+				// command cannot see it.
+				outer = shellScratchWrittenTargets(clause, base, known, roots)
+			}
+			_, _, innerState := shellScratchClauseWrite(inner, base, known, cdpath, roots, depth+1)
+			return dir, known, worseShellScratchWrite(outer, innerState)
+		}
+	}
 	if !writes && !hasScript {
 		// Nothing this clause names is written, so what is left to decide is
 		// whether it was read at all.
@@ -464,6 +486,11 @@ func shellScratchOperandState(name string, parsed scratchArgs, dir string, roots
 		if dirs := parsed.value("-d"); len(dirs) > 0 {
 			return shellScratchDirsState(dirs, dir, roots)
 		}
+		if parsed.any("-c", "-p", "-l", "-t", "-v") {
+			// These modes send what they read to stdout and write nothing to
+			// disk, so no directory has to be inside a region.
+			return ShellScratchWritesClean
+		}
 		// Without -d, members land in the working directory.
 		return shellScratchCWDState(dir, roots)
 	case "tar":
@@ -474,14 +501,16 @@ func shellScratchOperandState(name string, parsed scratchArgs, dir string, roots
 			return ShellScratchWritesUnplaceable
 		}
 		state := ShellScratchWritesClean
+		if creates {
+			// Writing an archive is a write, and -f names it: -C only moves the
+			// directory the members are read from, which is a read.
+			return shellScratchPathsState(parsed.value("-f", "--file"), dir, roots)
+		}
 		if dirs := parsed.value("-C", "--directory"); len(dirs) > 0 {
 			state = worseShellScratchWrite(state, shellScratchDirsState(dirs, dir, roots))
 		} else {
+			// Extraction without -C unpacks into the working directory.
 			state = worseShellScratchWrite(state, shellScratchCWDState(dir, roots))
-		}
-		if creates {
-			// Writing an archive is a write; reading one only reads it.
-			state = worseShellScratchWrite(state, shellScratchPathsState(parsed.value("-f", "--file"), dir, roots))
 		}
 		return state
 	}
@@ -824,7 +853,7 @@ var shellScratchCommands = map[string]scratchFlagTable{
 		"-q -c -N -r -nH -nv -S -4 -6 --no-clobber --continue --quiet --no-verbose --server-response --no-host-directories --timestamping",
 		"-O --output-document -P --directory-prefix -o --output-file --tries --timeout --header --user-agent",
 	),
-	"unzip": scratchFlags("-q -o -j -n -X -v -l -t -p", "-d -x -P -I -O"),
+	"unzip": scratchFlags("-q -o -j -n -X -v -l -t -p -c", "-d -x -P -I -O"),
 	"tar": scratchFlags(
 		"-c -r -u -x -t -z -j -J -a -v -p -k -m --create --append --update --extract --list --get --gzip --bzip2 --xz --zstd --verbose --preserve-permissions --keep-old-files",
 		"-C --directory -f --file --strip-components -T --files-from --exclude",

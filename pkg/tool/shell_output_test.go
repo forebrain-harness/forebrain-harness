@@ -620,6 +620,13 @@ func TestPlanModeShellGateScratchVerdictMatrix(t *testing.T) {
 		// A quoted body is data even when it reads like a project write.
 		"cat <<'EOF' | head -1\nrm -rf pkg/tool\nEOF",
 		"git clone /tmp/a /tmp/b",
+		// A writer's own -c is an operand, not a shell script, and the tar and
+		// unzip modes the review named write only what they name.
+		"tar -czf /tmp/a.tgz -C /tmp/x .",
+		"tar -cf /tmp/a.tar .",
+		"grep -c x /tmp/f",
+		"unzip -c /tmp/a.zip",
+		"nohup tar -czf /tmp/a.tgz .",
 		// Templates and expansions the proof can now read.
 		`printf '%s' "$PWD" > /tmp/x`,
 		"echo $(date) > /tmp/x",
