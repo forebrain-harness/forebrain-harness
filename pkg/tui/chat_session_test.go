@@ -22411,7 +22411,11 @@ func TestApplySlashOutcomeCarriesExplicitSkillSelection(t *testing.T) {
 	}
 }
 
-func TestActiveRunQueuesExplicitSkillSlashInsteadOfSteering(t *testing.T) {
+// A skill command typed into the main view's composer while the run is live
+// steers like any other line: the steer carries the trusted selection, so the
+// turn loads the skill at the boundary that takes it, and the view draws the
+// line as typed ahead of the Skill card - the same as the subagent's view.
+func TestActiveRunSteersExplicitSkillSlash(t *testing.T) {
 	session := &fakeSession{
 		steerAccepted: true,
 		streamSlashReply: map[string]SlashOutcome{
@@ -22430,14 +22434,53 @@ func TestActiveRunQueuesExplicitSkillSlashInsteadOfSteering(t *testing.T) {
 
 	q := session.SurfaceInputQueue("s1")
 	preview := q.Preview()
-	if len(preview.Steers) != 0 {
-		t.Fatalf("explicit skill invocation must not steer active context: %+v", preview.Steers)
+	if len(preview.Steers) != 1 || preview.Steers[0] != "/review change" {
+		t.Fatalf("steers = %+v, want the line as typed", preview.Steers)
 	}
-	if len(preview.FollowUp) != 1 {
-		t.Fatalf("queued turns=%+v", preview.FollowUp)
+	if len(preview.FollowUp) != 0 || len(preview.Rejected) != 0 {
+		t.Fatalf("follow-up=%+v rejected=%+v, want the steer lane only", preview.FollowUp, preview.Rejected)
+	}
+	entries := q.Runtime().Snapshot()
+	if len(entries) != 1 {
+		t.Fatalf("runtime entries = %+v, want the steer", entries)
+	}
+	entry := entries[0]
+	if entry.SkillName != "review" || entry.SkillPath != "/skills/review/SKILL.md" {
+		t.Fatalf("entry skill = %q/%q, want the trusted selection", entry.SkillName, entry.SkillPath)
+	}
+	if entry.Display != "/review change" {
+		t.Fatalf("entry display = %q, want the line as typed", entry.Display)
+	}
+	if len(entry.Parts) != 1 || entry.Parts[0].Text != "change" {
+		t.Fatalf("entry parts = %+v, want the request the command expanded into", entry.Parts)
 	}
 	if in, ok := q.Recall(); !ok || in.Payload.(ComposerSubmission).SkillName != "review" {
-		t.Fatalf("queued turns=%+v", preview.FollowUp)
+		t.Fatalf("recall = %+v ok=%v, want the whole submission back", in, ok)
+	}
+}
+
+// A line typed while only the user's own shell commands run is not steerable:
+// it waits for its own turn, because the shell never consults the model.
+func TestActiveRunStillQueuesUserShellFollowUp(t *testing.T) {
+	session := &fakeSession{
+		steerAccepted: true,
+		streamSlashReply: map[string]SlashOutcome{
+			"/review change": {
+				Handled:           true,
+				ShouldContinueRun: true,
+				ContinueInput:     "change",
+				SkillName:         "review",
+				SkillPath:         "/skills/review/SKILL.md",
+			},
+		},
+	}
+	state := &streamState{sessionID: "s1", session: session, activeRunIsUserShell: true}
+
+	handleActiveRunSlash(context.Background(), session, nil, nil, state, newCommandController(session, nil, &stubSelector{}, nil, ""), "/review change", ComposerSubmission{})
+
+	preview := session.SurfaceInputQueue("s1").Preview()
+	if len(preview.FollowUp) != 1 || len(preview.Steers) != 0 {
+		t.Fatalf("follow-up=%+v steers=%+v, want the line queued for its own turn", preview.FollowUp, preview.Steers)
 	}
 }
 

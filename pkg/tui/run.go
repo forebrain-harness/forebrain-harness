@@ -3205,9 +3205,12 @@ func (s *streamState) sessionQueue() *run.InputQueue {
 // message comes back whole — text, attachments, folded pastes and all.
 func queueInput(submission ComposerSubmission) run.Input {
 	return run.Input{
-		Text:    composerSubmissionPreview(submission),
-		Parts:   append([]llm.ContentPart(nil), submission.Parts...),
-		Payload: submission,
+		Text:      composerSubmissionPreview(submission),
+		Display:   strings.TrimSpace(submission.DisplayText),
+		Parts:     append([]llm.ContentPart(nil), submission.Parts...),
+		Payload:   submission,
+		SkillName: strings.TrimSpace(submission.SkillName),
+		SkillPath: strings.TrimSpace(submission.SkillPath),
 	}
 }
 
@@ -5527,11 +5530,14 @@ func handleActiveRunSlash(ctx context.Context, session Session, renderer *Render
 		handled, continueRun, submission, _ := dispatchStreamSlashCommand(ctx, cmds, renderer, tracker, state, line, draft)
 		if handled {
 			if continueRun {
-				// A steer joins an already-built agent session and cannot safely add
-				// trusted run metadata. Queue explicit skill invocations as the next
-				// turn so their activation is injected before that turn's first LLM
-				// call instead of degrading back to prompt text.
-				if strings.TrimSpace(submission.SkillPath) != "" || state.onlyUserShellCommandsRunning() {
+				// A user shell command is not steerable: steering it would
+				// attach the message to a shell invocation that never consults
+				// the model, so it waits for its own turn. Everything else the
+				// command expands into steers - an explicit skill included: the
+				// steer carries the trusted selection, the turn loads the skill
+				// at the boundary that takes it, and the view shows the user's
+				// line, the Skill card, then the answer, in both views alike.
+				if state.onlyUserShellCommandsRunning() {
 					state.sessionQueue().FollowUp(queueInput(submission))
 					state.resetComposerForActiveRunDraft()
 					return

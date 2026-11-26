@@ -1710,6 +1710,7 @@ func (s *ChatSession) SendToSubagent(sessionID, agentKey string, submission Comp
 	}
 	in := run.Input{
 		Text:      composerSubmissionPreview(submission),
+		Display:   strings.TrimSpace(submission.DisplayText),
 		Parts:     append([]llm.ContentPart(nil), submission.Parts...),
 		Payload:   submission,
 		SkillName: strings.TrimSpace(submission.SkillName),
