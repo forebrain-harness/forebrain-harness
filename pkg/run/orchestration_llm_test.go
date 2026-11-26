@@ -2630,7 +2630,10 @@ func TestPlanModeE2EFullCycle(t *testing.T) {
 
 	// --- Step 5: GuardWrite blocks non-plan paths, allows plan file ---
 	planCtx := toolpkg.WithMode(toolpkg.WithAllowedPlanPath(baseCtx, planDir), "plan")
-	nonPlan := filepath.Join(home, "evil.txt")
+	// A path outside the plan directory, and outside OS temp scratch: plan mode
+	// keeps the project read-only and lets disposable research through (plan
+	// 387), so a fixture inside $TMPDIR would be measuring the second rule.
+	nonPlan := filepath.Join(string(filepath.Separator), "e2e-project", "evil.txt")
 	if err := st.GuardWrite(planCtx, nonPlan); err == nil || !strings.Contains(err.Error(), "plan mode: write blocked") {
 		t.Fatalf("expected GuardWrite to block non-plan path, got %v", err)
 	}

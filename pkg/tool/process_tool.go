@@ -345,21 +345,59 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 		}
 		workDir = wd
 	}
+	// The command is contained exactly like a shell command: the same config, the
+	// same manager, and - since plan mode - the same per-call profile. Reading
+	// the config profile directly here meant a background start could write the
+	// project while the identical shell call was refused (plan 388). A background
+	// server is not a reason to weaken containment.
+	cfg := sessionConfig(ctx, st, rt)
+	profile := callSandboxProfile(ctx, cfg)
+	snap := permissionSnapshotForRun(permissionSnapshotForContext(ctx, st, rt), RunIDFromContext(ctx))
+	manager := safety.NewManager()
+	defer manager.Close()
+	runtimeCfg := manager.UpdateConfig(cfg, shellToolSettingsSources(rt, cfg), snap, workDir, workDir, os.TempDir(), sandboxAdditionalDirs(ctx, st))
+	env := append(planModeShellEnv(ctx, rt), agentRuntimeEnv(rt)...)
+	// Plan mode judges the command before the start reserves anything: a refusal
+	// leaves no id, no log and no ledger record to reap, and an unproven command
+	// is the operator's question to answer - the same three answers shell gives,
+	// because this tool runs the same kind of command (plan 388).
+	mutation := safety.ClassifyShellCommand(command, shellAllowedRoots(ctx, st, rt), workDir)
+	switch planModeShellGate(ctx, cfg != nil && cfg.DangerFullAccessEnabled(), mutation, command, workDir) {
+	case PlanModeShellRefuse:
+		err := fmt.Errorf("plan mode: %q modifies files; call exit_plan_mode first", strings.TrimSpace(command))
+		CaptureToolError(ctx, err)
+		return "", err
+	case PlanModeShellAsk:
+		if hook := st.ActionHook(); hook != nil {
+			payload := map[string]any{
+				"action":          "start",
+				"command":         command,
+				"work_dir":        workDir,
+				"sandbox_profile": string(profile),
+			}
+			markPlanModeApproval(payload)
+			actionID, ok, hookErr := hook(ctx, "process", payload)
+			if hookErr != nil {
+				return "", hookErr
+			}
+			if ok && strings.TrimSpace(actionID) != "" {
+				CaptureToolRequiresAction(ctx, actionID, "process", appendToolExecutionMetadata(ctx, st, map[string]any{
+					"requires_action": true,
+					"sandbox_profile": string(profile),
+				}, rt, safety.ToolKindShell))
+				return "", &RequiresActionError{
+					RunID: RunIDFromContext(ctx), AgentID: HookAgentIDFromContext(ctx), SubagentType: SubagentTypeFromContext(ctx),
+					ActionID: actionID, ActionKind: "process", ToolName: "process", ToolInput: payload,
+				}
+			}
+		}
+	}
 	dir := processStateDir(st.stateRootForProcess())
 	registry := st.processRegistryFor()
 	id, logFile, logPath, err := registry.reserve(dir)
 	if err != nil {
 		return "", err
 	}
-	// The command is sandboxed exactly like a shell command: same config, same
-	// manager, same request. A background server is not a reason to weaken
-	// containment.
-	cfg := sessionConfig(ctx, st, rt)
-	snap := permissionSnapshotForRun(permissionSnapshotForContext(ctx, st, rt), RunIDFromContext(ctx))
-	manager := safety.NewManager()
-	defer manager.Close()
-	runtimeCfg := manager.UpdateConfig(cfg, shellToolSettingsSources(rt, cfg), snap, workDir, workDir, os.TempDir(), sandboxAdditionalDirs(ctx, st))
-	env := append(planModeShellEnv(ctx, rt), agentRuntimeEnv(rt)...)
 	var outputEmitter *shellOutputEmitter
 	if step := StepHookFromContext(ctx, st); step != nil {
 		stepID := ToolStepIDFromContext(ctx)
@@ -401,16 +439,38 @@ func processStart(ctx context.Context, st *State, rt *AgentToolRuntime, in *Proc
 		_, _ = logFile.Write(chunk)
 		outputEmitter.Push(stream, chunk)
 	}
+	// The write set, resolved exactly as the shell tool resolves it: a read-only
+	// call keeps the project read-only and may still write its structured grants,
+	// a plan review's scratch directories and OS temp scratch - and promotion
+	// makes those the whole policy, so the exception cannot also hand over the
+	// workspace. A Go build then gets the caches it needs without them.
+	request := sandboxedShellRequest{profile: profile, cwd: workDir}
+	var extraBinds, allowRead []string
+	if profile == safety.ProfileReadOnly {
+		extraBinds = readOnlyExtraWriteRoots(ctx, st, snap, workDir)
+		allowRead = promoteReadOnlyWriteScope(&request, extraBinds, nil)
+	}
+	contained := manager.DecideShellCommand(cfg, command, safety.SandboxPermissionsUseDefault, request.profile, false).UseSandbox
+	var goCache goCacheAccess
+	if shellProfilePlumbsGoCache(request.profile, contained, runtimeCfg.Filesystem.AllowWrite, workDir) {
+		goCache = resolveGoCacheAccess(ctx, rt, workDir)
+		extraBinds = MergeAllowedRootPaths(extraBinds, goCache.Writable)
+		allowRead = MergeAllowedRootPaths(allowRead, goCache.Readable)
+		allowRead = promoteReadOnlyWriteScope(&request, extraBinds, allowRead)
+	}
 	req := safety.CommandRequest{
-		ToolKind:       safety.ToolKindShell,
-		Command:        command,
-		WorkDir:        workDir,
-		Profile:        safety.ProfileForConfig(cfg),
-		AllowNetwork:   runtimeCfg.NetworkEnabled,
-		AllowLoopback:  runtimeCfg.NetworkLoopback,
-		Env:            env,
-		OnOutput:       onOutput,
-		OutputSpoolDir: dir,
+		ToolKind:                safety.ToolKindShell,
+		Command:                 command,
+		WorkDir:                 workDir,
+		Profile:                 request.profile,
+		AdditionalWritablePaths: extraBinds,
+		ExclusiveWritablePaths:  request.exclusiveWritablePaths,
+		AdditionalReadablePaths: allowRead,
+		AllowNetwork:            runtimeCfg.NetworkEnabled,
+		AllowLoopback:           runtimeCfg.NetworkLoopback,
+		Env:                     shellAttemptEnv(env, goCache.Env, contained),
+		OnOutput:                onOutput,
+		OutputSpoolDir:          dir,
 	}
 	handle, err := manager.StartCommand(ctx, cfg, req)
 	if err != nil {

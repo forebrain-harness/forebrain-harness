@@ -289,11 +289,13 @@ func ConvertToRuntimeConfig(sources []SourceSettings, snap Snapshot, cwd, origin
 	}
 	if workspaceWrite {
 		out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, cwd)
-		// The sandbox's own temp directory and /tmp are writable by definition:
-		// there is no setting that withholds them (plan 206).
+		// The sandbox's own temp directory and the OS scratch regions are
+		// writable by definition: there is no setting that withholds them (plan
+		// 206). ShellScratchRoots is the one definition of that pair, because
+		// plan mode's scratch proof reads the same list (plan 387).
 		out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, tempDir)
-		if filepath.Separator == '/' {
-			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, "/tmp")
+		for _, dir := range ShellScratchRoots() {
+			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, dir)
 		}
 		for _, p := range additionalDirs {
 			out.Filesystem.AllowWrite = appendUniquePath(out.Filesystem.AllowWrite, p)

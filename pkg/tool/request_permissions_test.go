@@ -2675,6 +2675,45 @@ func TestPlanModeWriteFileBlocksNonPlanPath(t *testing.T) {
 	}
 }
 
+// Plan mode keeps the project read-only, not the whole disk: disposable
+// research output (a download, an extracted archive, a scratch draft) is
+// investigation, and the file tools own the same two regions the shell proof
+// admits. The project path and the temp root itself stay walls.
+func TestPlanModeGuardWriteAdmitsOSScratchAndBlocksProject(t *testing.T) {
+	workspace := t.TempDir()
+	st := NewState(workspace)
+	ctx := WithMode(context.Background(), "plan")
+
+	scratchRoots := safety.ShellScratchRoots()
+	if len(scratchRoots) == 0 {
+		t.Fatal("no OS scratch roots")
+	}
+	draft := filepath.Join(scratchRoots[0], "fb-387-draft.md")
+	if err := st.GuardWrite(ctx, draft); err != nil {
+		t.Fatalf("scratch draft in plan mode rejected: %v", err)
+	}
+	// Every root, not just the first: $TMPDIR and /tmp are separate names for
+	// the same policy.
+	for _, root := range scratchRoots {
+		if err := st.GuardWrite(ctx, filepath.Join(root, "nested", "fb-387-draft.md")); err != nil {
+			t.Fatalf("scratch draft under %q rejected: %v", root, err)
+		}
+		// The region itself is not one of its files.
+		if err := st.GuardWrite(ctx, root); err == nil || !strings.Contains(err.Error(), "plan mode: write blocked") {
+			t.Fatalf("the scratch root %q itself was writable in plan mode: %v", root, err)
+		}
+	}
+	project := filepath.Join(workspace, "pkg", "tool", "plan-mode-probe.txt")
+	if err := st.GuardWrite(ctx, project); err == nil || !strings.Contains(err.Error(), "plan mode: write blocked") {
+		t.Fatalf("project write in plan mode was admitted: %v", err)
+	}
+	// The same scratch path is an ordinary write in agent mode: this exception
+	// belongs to the plan phase, not to the state.
+	if err := st.GuardWrite(WithMode(context.Background(), "agent"), draft); err != nil {
+		t.Fatalf("agent-mode scratch write rejected: %v", err)
+	}
+}
+
 func TestPlanModeReadOnlySubagentCannotWritePlanFile(t *testing.T) {
 	home := t.TempDir()
 	workspace := t.TempDir()
@@ -3022,7 +3061,13 @@ func TestPlanWriteGuardJudgesTheDirectoryAFileLandsIn(t *testing.T) {
 		}
 
 		ctx := WithMode(WithAllowedPlanPath(context.Background(), planDirAlias), "plan")
-		st := NewState(t.TempDir())
+		// The tree these paths live in is the workspace, as in a real session:
+		// the plan directory is inside the project, so "outside the plan
+		// directory" is "inside the project". (A state rooted elsewhere would
+		// make these paths OS temp scratch, which plan mode writes by design -
+		// plan 387 - and the containment this test proves would not be the
+		// thing being measured.)
+		st := NewState(realRoot)
 		for _, outside := range []string{
 			filepath.Join(planDirReal, "nested", "p.md"),
 			filepath.Join(realRoot, "workspace", "plans", "proj", "other-sid", "p.md"),

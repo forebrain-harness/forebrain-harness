@@ -398,14 +398,23 @@ func TestPlanModeUsesReadOnlyShellProfile(t *testing.T) {
 // three answers, not two: a proven write is refused, and a command whose effect
 // nothing can prove is a question for the operator. Refusing those as well is
 // what made plan mode deny every command outside a whitelist.
+//
+// A write proven to land in OS temp scratch is investigation rather than
+// implementation, so it joins the read-only tier: plan mode walling off
+// disposable research work cost more than it protected (owner ruling
+// 2026-11-26). The project stays on the refuse side.
 func TestPlanModeShellGateSplitsReadOnlyWritesAndUnproven(t *testing.T) {
 	danger := &AgentToolRuntime{Cfg: &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess}}
 	sandboxed := &AgentToolRuntime{Cfg: &appcfg.Root{}}
 	planCtx := planModeShellCtx()
 	agentCtx := WithMode(context.Background(), "agent")
+	project := t.TempDir()
+	const vsix = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.0/vspackage"
+	transcript := `cd /tmp && curl -s --max-time 60 -o claude-code.vsix '` + vsix + `' && rm -rf claude-x && mkdir claude-x && cd claude-x && unzip -q ../claude-code.vsix && ls -la`
 
 	gate := func(ctx context.Context, rt *AgentToolRuntime, cmd string) PlanModeShellGateDecision {
-		return planModeShellGate(ctx, rt != nil && rt.Cfg != nil && rt.Cfg.DangerFullAccessEnabled(), safety.ClassifyShellCommand(cmd, nil, ""))
+		return planModeShellGate(ctx, rt != nil && rt.Cfg != nil && rt.Cfg.DangerFullAccessEnabled(),
+			safety.ClassifyShellCommand(cmd, nil, ""), cmd, project)
 	}
 
 	if got := gate(planCtx, danger, "sed -i '' s/a/b/ main.go"); got != PlanModeShellRefuse {
@@ -413,6 +422,18 @@ func TestPlanModeShellGateSplitsReadOnlyWritesAndUnproven(t *testing.T) {
 	}
 	if got := gate(planCtx, danger, "find . -name '*.go' -delete"); got != PlanModeShellRefuse {
 		t.Fatalf("find -delete in plan mode = %d, want refuse", got)
+	}
+	if got := gate(planCtx, danger, "rm -rf pkg/tool"); got != PlanModeShellRefuse {
+		t.Fatalf("project delete in plan mode = %d, want refuse", got)
+	}
+	if got := gate(planCtx, danger, "echo hi > pkg/tool/x.txt"); got != PlanModeShellRefuse {
+		t.Fatalf("project redirect in plan mode = %d, want refuse", got)
+	}
+	// Scratch research is neither a refusal nor a question.
+	for _, cmd := range []string{transcript, "mkdir /tmp/x", "rm -rf /tmp/x", "echo hi > /tmp/x.txt", `curl -s -o /tmp/x.zip 'https://example.com/x.zip'`} {
+		if got := gate(planCtx, danger, cmd); got != PlanModeShellAllow {
+			t.Fatalf("scratch-confined %q in plan mode = %d, want allow", cmd, got)
+		}
 	}
 	if got := gate(planCtx, danger, "rg TODO internal"); got != PlanModeShellAllow {
 		t.Fatalf("read-only command in plan mode = %d, want allow", got)
@@ -435,6 +456,17 @@ func TestPlanModeShellGateSplitsReadOnlyWritesAndUnproven(t *testing.T) {
 	}
 	if got := gate(agentCtx, danger, "sed -i '' s/a/b/ main.go"); got != PlanModeShellAllow {
 		t.Fatalf("agent mode must be unaffected: %d", got)
+	}
+	// The approval boundary holds no cwd, so the proof there starts from none:
+	// a command that names its scratch directory outright (or cd's into it)
+	// still answers Allow, while one that would write relatively has no answer
+	// and stays with today's behaviour - the boundary defers to the tool, which
+	// does know the cwd.
+	if got := PlanModeShellGateForCommand(planCtx, true, transcript); got != PlanModeShellAllow {
+		t.Fatalf("scratch-confined command at the approval boundary = %d, want allow", got)
+	}
+	if got := PlanModeShellGateForCommand(planCtx, true, "sed -i '' s/a/b/ main.go"); got != PlanModeShellRefuse {
+		t.Fatalf("proven project write at the approval boundary = %d, want refuse", got)
 	}
 }
 
@@ -945,7 +977,7 @@ func TestShellToolUnknownCommandNeverUsesEmptyGuardWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = tool.Handle(context.Background(), `{"command":"go test ./internal/permissions"}`)
-	if err != nil && strings.Contains(err.Error(), "only the plan directory is writable") {
+	if err != nil && strings.Contains(err.Error(), "plan mode: write blocked") {
 		t.Fatalf("unknown command was coupled to file-write policy: %v", err)
 	}
 }

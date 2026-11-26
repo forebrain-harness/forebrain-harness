@@ -984,6 +984,70 @@ func TestHostShellDoesNotUseIsolatedGoCache(t *testing.T) {
 // that those exceptions are the whole policy - otherwise the managed profile
 // also inherits the configured workspace roots and a command granted its build
 // cache could edit the project the session is still planning.
+// Plan mode's read-only shell profile may still write OS temp scratch, where
+// disposable research goes (plan 387). The exceptions ride the same promotion a
+// plan review's roots use, so the OS receives one managed request whose whole
+// write policy is the scratch regions - the project stays read-only.
+func TestPlanModeReadOnlyProfileGainsScratchWritesOnly(t *testing.T) {
+	ctx := planModeShellCtx()
+	allowed := safety.ShellScratchRoots()
+	// A project outside the regions: every region is scratch for it.
+	outside := NewState(filepath.Join(string(filepath.Separator), "workspace", "fb387-project"))
+	scratch := planModeScratchWrites(ctx, outside)
+	if len(scratch) == 0 || len(scratch) != len(allowed) {
+		t.Fatalf("plan-mode scratch writes = %v, want the OS scratch roots %v", scratch, allowed)
+	}
+	for i, root := range scratch {
+		if root != allowed[i] {
+			t.Fatalf("plan-mode scratch writes = %v, want %v", scratch, allowed)
+		}
+	}
+	// Every other mode keeps the empty write list a read-only profile had.
+	for _, mode := range []string{"agent", ""} {
+		if got := planModeScratchWrites(WithMode(context.Background(), mode), outside); len(got) != 0 {
+			t.Fatalf("mode %q gained scratch writes: %v", mode, got)
+		}
+	}
+
+	// A workspace that lives inside a region takes that whole region out of the
+	// grant: the OS grant is per directory and cannot keep the project out of it.
+	inside := t.TempDir()
+	kept := planModeScratchWrites(ctx, NewState(inside))
+	for _, root := range kept {
+		if PathWithinRoot(inside, root) {
+			t.Fatalf("a region holding the workspace is still writable: root=%q workspace=%q granted=%v", root, inside, kept)
+		}
+	}
+	if len(allowed) > 1 && len(kept) == 0 {
+		t.Fatalf("the regions beside the workspace were dropped too: %v", kept)
+	}
+
+	// The exceptions the profile carries become its whole write policy, and the
+	// project is only ever among the paths it may read.
+	for _, project := range []string{outside.AllowedRoots()[0], inside} {
+		writablePaths := append([]string(nil), planModeScratchWrites(ctx, NewState(project))...)
+		for _, path := range writablePaths {
+			if path == project {
+				t.Fatalf("the project is in the write exceptions: %v", writablePaths)
+			}
+		}
+		req := sandboxedShellRequest{profile: safety.ProfileReadOnly, cwd: project}
+		allowRead := promoteReadOnlyWriteScope(&req, writablePaths, nil)
+		if req.profile != safety.ProfileManaged || !req.exclusiveWritablePaths {
+			t.Fatalf("project %q: promoted request = %q exclusive=%v, want managed/exclusive", project, req.profile, req.exclusiveWritablePaths)
+		}
+		readable := false
+		for _, root := range allowRead {
+			if root == project {
+				readable = true
+			}
+		}
+		if !readable {
+			t.Fatalf("project %q: the promoted request lost the project it still has to read: %v", project, allowRead)
+		}
+	}
+}
+
 func TestPromoteReadOnlyWriteScopeStatesItsOwnWriteSet(t *testing.T) {
 	cwd := t.TempDir()
 	cache := t.TempDir()

@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -1252,5 +1253,170 @@ func TestReapOrphanProcessesSparesALiveHarness(t *testing.T) {
 				t.Fatalf("the live harness's record was dropped: %v", err)
 			}
 		})
+	}
+}
+
+// waitForFileWithin polls for a path to appear: a background start returns
+// before its command has run, so "the file exists" has to be waited for.
+func waitForFileWithin(t *testing.T, path string, deadline time.Duration) {
+	t.Helper()
+	limit := time.Now().Add(deadline)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(limit) {
+			t.Fatalf("file %s never appeared", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// Plan 388: `process start` is a second way to run a command, so it owes plan
+// mode the same answer the shell tool gives. Under danger-full-access - the
+// owner's YOLO environment - no sandbox holds the line, so the tool's own gate
+// is the only wall, and without it `process start "echo x > pkg/f"` wrote the
+// project while the identical `shell` call was refused.
+func TestProcessStartInPlanModeRefusesProjectWrites(t *testing.T) {
+	st, tl, _, projectDir := newProcessToolForTest(t)
+	probe := filepath.Join(projectDir, "probe.txt")
+	ctx := WithMode(processTestContext(projectDir), "plan")
+
+	_, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "echo probe > " + probe})
+	if err == nil || !strings.Contains(err.Error(), "exit_plan_mode") {
+		t.Fatalf("plan-mode process start of a project write = %v, want a plan-mode refusal", err)
+	}
+	if _, statErr := os.Stat(probe); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused start still wrote the project: stat=%v", statErr)
+	}
+	// A refusal reserves nothing: no id, no log, no ledger record to reap.
+	listed, listErr := callProcess(t, tl, ctx, ProcessInput{Action: "list"})
+	if listErr != nil {
+		t.Fatalf("list: %v", listErr)
+	}
+	if count, _ := listed["count"].(float64); count != 0 {
+		t.Fatalf("a refused start left %v process(es) behind: %+v", count, listed["processes"])
+	}
+	if entries, dirErr := os.ReadDir(processStateDir(st.stateRootForProcess())); dirErr == nil {
+		for _, entry := range entries {
+			if strings.HasSuffix(entry.Name(), ".log") {
+				t.Fatalf("a refused start left a log file behind: %s", entry.Name())
+			}
+		}
+	}
+}
+
+// The other half of the same wall: a write confined to OS temp scratch is
+// investigation, so plan mode lets it through unasked (plan 387's proof).
+func TestProcessStartInPlanModeAllowsScratch(t *testing.T) {
+	_, tl, _, projectDir := newProcessToolForTest(t)
+	// The harness' project sits under $TMPDIR, which takes that whole region out
+	// of the grant (the project outranks the region), so /tmp is the region the
+	// tool's own proof still admits from here.
+	scratch := filepath.Join("/tmp", fmt.Sprintf("fb-388-scratch-%d.txt", os.Getpid()))
+	_ = os.Remove(scratch)
+	t.Cleanup(func() { _ = os.Remove(scratch) })
+	ctx := WithMode(processTestContext(projectDir), "plan")
+
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "echo hi > " + scratch}); err != nil {
+		t.Fatalf("plan-mode scratch write was not admitted: %v", err)
+	}
+	waitForFileWithin(t, scratch, 10*time.Second)
+}
+
+// An unproven command is a question for the operator, exactly as it is for
+// shell: it is not a proven write, so refusing it would deny every command the
+// classifier has never seen.
+func TestProcessStartInPlanModeAsksForUnproven(t *testing.T) {
+	st, tl, _, projectDir := newProcessToolForTest(t)
+	script := filepath.Join(projectDir, "server.py")
+	ctx := WithMode(processTestContext(projectDir), "plan")
+
+	asked := 0
+	askedKind := ""
+	var payload map[string]any
+	st.SetActionHook(func(_ context.Context, kind string, p any) (string, bool, error) {
+		asked++
+		askedKind = kind
+		if m, ok := p.(map[string]any); ok {
+			payload = m
+		}
+		return "act-388", true, nil
+	})
+
+	_, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "python3 " + script})
+	var req *RequiresActionError
+	if !errors.As(err, &req) {
+		t.Fatalf("plan-mode unproven process start = %v, want a RequiresActionError", err)
+	}
+	if asked != 1 || askedKind != "process" {
+		t.Fatalf("action hook calls=%d kind=%q, want 1 process approval", asked, askedKind)
+	}
+	if req.ToolName != "process" || req.ActionKind != "process" || req.ActionID != "act-388" {
+		t.Fatalf("requires-action record = %+v, want the process tool", req)
+	}
+	if reason, _ := payload["approval_reason"].(string); reason != "plan_mode_unproven_command" {
+		t.Fatalf("approval_reason = %q, want plan_mode_unproven_command (payload %+v)", reason, payload)
+	}
+	if _, statErr := os.Stat(script); !os.IsNotExist(statErr) {
+		t.Fatalf("the asked command ran before the answer: stat=%v", statErr)
+	}
+}
+
+// And nothing outside plan mode narrows: an ordinary agent-mode start writes the
+// project through the config's own profile, as before.
+func TestProcessStartAgentModeUnaffected(t *testing.T) {
+	_, tl, _, projectDir := newProcessToolForTest(t)
+	probe := filepath.Join(projectDir, "agent-probe.txt")
+	ctx := WithMode(processTestContext(projectDir), "agent")
+
+	if _, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "echo probe > " + probe}); err != nil {
+		t.Fatalf("agent-mode process start was gated: %v", err)
+	}
+	waitForFileWithin(t, probe, 10*time.Second)
+}
+
+// Under a config that does apply the OS sandbox, the same start is denied there
+// instead of being refused by the gate: the profile is read-only for this call
+// rather than the config's workspace-write. Either way the project file is not
+// written; the difference is which wall answers (plan 388).
+func TestProcessStartInPlanModeIsReadOnlyUnderTheSandbox(t *testing.T) {
+	if !safety.SandboxAvailable() {
+		t.Skip("no OS sandbox on this host")
+	}
+	root := t.TempDir()
+	projectDir := filepath.Join(root, "project")
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rt := &AgentToolRuntime{Home: root, WorkspaceRoot: projectDir, Cfg: &appcfg.Root{}}
+	st := NewState(projectDir)
+	t.Cleanup(st.KillProcesses)
+	tl, err := NewProcessTool(st, rt)
+	if err != nil {
+		t.Fatalf("NewProcessTool: %v", err)
+	}
+	ctx := WithMode(processTestContext(projectDir), "plan")
+	if got := callSandboxProfile(ctx, rt.Cfg); got != safety.ProfileReadOnly {
+		t.Fatalf("plan-mode call profile = %q, want %q", got, safety.ProfileReadOnly)
+	}
+
+	probe := filepath.Join(projectDir, "sandboxed-probe.txt")
+	started, err := callProcess(t, tl, ctx, ProcessInput{Action: "start", Command: "echo probe > " + probe})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	rec := processRecordForTest(t, st, processTestID(t, started))
+	select {
+	case <-rec.handle.Done():
+	case <-time.After(30 * time.Second):
+		t.Fatal("the sandboxed command never exited")
+	}
+	waitForProcessSettled(t, rec)
+	if _, statErr := os.Stat(probe); !os.IsNotExist(statErr) {
+		t.Fatalf("the read-only profile still wrote the project: stat=%v", statErr)
+	}
+	if result, _ := rec.handle.Result(); result.ExitCode == 0 {
+		t.Fatalf("the sandboxed write reported success: %+v", result)
 	}
 }

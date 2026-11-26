@@ -1106,6 +1106,11 @@ func HookTranscriptPathFromContext(ctx context.Context) string {
 // contract a dispatch was made under — a subagent may work in its worktree and
 // nowhere else.
 //
+// Plan mode is a wall around the project, not around the disk: its writable
+// regions are the plan directory and the OS temp scratch, which is where
+// disposable research goes (plan 387). Everything in the project stays refused
+// until the plan is approved.
+//
 // Everything else a write can run into — agent metadata directories, FOREBRAIN_HOME,
 // git”'s execution surfaces, a loaded skill”'s own files — is a question for the
 // user rather than a wall: see ProtectedWriteReason.
@@ -1117,7 +1122,12 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 	planTarget := isSanctionedPlanWrite(ctx, absPath)
 	mode := strings.ToLower(strings.TrimSpace(ModeFromContext(ctx)))
 	if mode == "plan" && !planTarget {
-		return fmt.Errorf("plan mode: write blocked (only the plan directory is writable); call exit_plan_mode first")
+		// OS temp scratch is the other writable region, but only for a write
+		// that would otherwise be ordinary: the project and every protected
+		// path keep the refusal they already had.
+		if !s.planModeScratchTarget(absPath) || s.ProtectedWriteReason(ctx, absPath) != "" {
+			return fmt.Errorf("plan mode: write blocked (only the plan directory and OS temp scratch are writable); call exit_plan_mode first")
+		}
 	}
 	// A coding plan review may write only what reproduces the plan's claims:
 	// new test files, its scratch directory, and its worktree directory.
@@ -1149,6 +1159,34 @@ func (s *State) GuardWrite(ctx context.Context, absPath string) error {
 // the deepest existing parent when the target does not exist yet).
 func pathWithinWorkspace(absPath, workspace string) bool {
 	return PathWithinRoot(absPath, workspace)
+}
+
+// planModeScratchTarget reports whether absPath is a file in the OS temp scratch
+// regions plan mode may write (plan 387). The regions are the shell proof's own
+// definition, the root itself is not one of its files (a write to /tmp would
+// replace the directory every scratch file lives in), and nothing inside one of
+// this state's roots counts: a workspace that happens to live under $TMPDIR is
+// still the project.
+func (s *State) planModeScratchTarget(absPath string) bool {
+	target := normalizeRootPath(absPath)
+	if target == "" {
+		return false
+	}
+	for _, root := range s.AllowedRoots() {
+		if PathWithinRoot(absPath, root) {
+			return false
+		}
+	}
+	for _, root := range safety.ShellScratchRoots() {
+		root = normalizeRootPath(root)
+		if root == "" || target == root {
+			continue
+		}
+		if PathWithinRoot(absPath, root) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProtectedWriteReason returns the one sentence the approval prompt shows for a

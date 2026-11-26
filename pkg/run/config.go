@@ -1101,7 +1101,7 @@ func buildPlanModeReminder(planDir, planFile string, planExists bool, kind strin
 	if isSubagent {
 		if kind == "sparse" {
 			return fmt.Sprintf(
-				"Plan mode active (subagent). Write/edit plan files only inside %s (write_file creates the directory if it does not exist yet - do not create it with shell) - all other writes blocked. Use AskUserQuestion to clarify the approach.",
+				"Plan mode active (subagent). Write/edit plan files only inside %s (write_file creates the directory if it does not exist yet - do not create it with shell) - project writes blocked; OS temp scratch ($TMPDIR, /tmp) is writable. Use AskUserQuestion to clarify the approach.",
 				planDir,
 			)
 		}
@@ -1111,15 +1111,16 @@ You are a subagent operating in plan mode. You MUST NOT make any edits to the co
 
   %s
 
-Files directly in this directory are the ONLY files you are allowed to edit. The directory may not exist yet: write_file creates the directory on the first plan file, so do not create it with shell. All write_file/edit_file calls to paths outside this directory are blocked.
+Files directly in this directory are the ONLY project files you are allowed to edit. The directory may not exist yet: write_file creates the directory on the first plan file, so do not create it with shell. Every other project path is read-only; OS temp scratch ($TMPDIR, /tmp) is writable for research output.
 
 ## Tool guidance in subagent plan mode
 
 - read_file, code_search, references, definitions, list_directory, and shell (under the subagent's sandbox profile): free use
 - user_interaction (AskUserQuestion): free use to clarify the approach
-- write_file, edit_file: ALLOWED only for files inside the plan directory above
+- write_file, edit_file: ALLOWED for files inside the plan directory above and inside OS temp scratch ($TMPDIR, /tmp)
 - read-only shell commands: free use, no prompt
-- shell commands that modify files, and write_file/edit_file to other paths: BLOCKED
+- shell writes confined to OS temp scratch (downloads, extraction, temp files): free use, no prompt
+- shell writes inside the project, and write_file/edit_file to other project paths: BLOCKED
 - shell commands whose effect cannot be proven read-only: you will be asked to approve them before they run
 - exit_plan_mode: NOT available (only the parent agent can exit plan mode)
 - subagent_run, subagent_fanout: NOT available within a subagent
@@ -1134,12 +1135,12 @@ Files directly in this directory are the ONLY files you are allowed to edit. The
 	if kind == "sparse" {
 		if planExists {
 			return fmt.Sprintf(
-				"Plan mode active. Write/edit plan files only inside %s (current: %s) - all other writes blocked. Call exit_plan_mode when plan ready.",
+				"Plan mode active. Write/edit plan files only inside %s (current: %s) - project writes blocked; OS temp scratch ($TMPDIR, /tmp) is writable. Call exit_plan_mode when plan ready.",
 				planDir, planFile,
 			)
 		}
 		return fmt.Sprintf(
-			"Plan mode active. Write/edit plan files only inside %s - all other writes blocked. No plan file yet: create a NEW <descriptive-name>.md file (do NOT use plan.md; write_file creates the directory if it does not exist yet - do not create it with shell). Call exit_plan_mode when plan ready.",
+			"Plan mode active. Write/edit plan files only inside %s - project writes blocked; OS temp scratch ($TMPDIR, /tmp) is writable. No plan file yet: create a NEW <descriptive-name>.md file (do NOT use plan.md; write_file creates the directory if it does not exist yet - do not create it with shell). Call exit_plan_mode when plan ready.",
 			planDir,
 		)
 	}
@@ -1170,7 +1171,7 @@ You are in plan mode. You MUST NOT make any edits to the codebase except to plan
 
   %s
 %s
-%sFiles directly in this directory are the ONLY files you are allowed to edit. Author them with the normal file tools - write_file (create/replace) or edit_file (targeted change). All write_file/edit_file calls to paths outside this directory are blocked by GuardWrite.
+%sFiles directly in this directory are the ONLY project files you are allowed to edit. Author them with the normal file tools - write_file (create/replace) or edit_file (targeted change). Every other project path is read-only until the plan is approved; OS temp scratch ($TMPDIR, /tmp) is writable too, for downloads, extracted archives and research drafts.
 
 ## Plan files preserve history
 
@@ -1198,14 +1199,16 @@ Phase 5 - Exit: call exit_plan_mode when the plan is complete and ready for user
 - subagent_run subtype=explore, subagent_fanout subtype=explore: free use for research
 - subagent_run subtype=plan: independent read-only critique of your draft design or plan; it returns findings and cannot write files
 - user_interaction (canonical AskUserQuestion): free use to clarify approach
-- write_file, edit_file: ALLOWED only for files directly inside the plan directory above; all other paths blocked
+- write_file, edit_file: ALLOWED for files directly inside the plan directory above and inside OS temp scratch ($TMPDIR, /tmp); every other project path is read-only
 - read-only shell commands: free use, no prompt
-- shell commands that modify files: BLOCKED until exit_plan_mode
+- shell writes confined to OS temp scratch (downloads, extraction, temp files): free use, no prompt
+- shell writes inside the project: BLOCKED until exit_plan_mode
 - shell commands whose effect cannot be proven read-only: you will be asked to approve them; proceed if approved
+- process start: the same plan-mode rules as shell (the project is read-only, OS temp scratch is free)
 
 ## Important
 
-- MUST NOT make codebase edits outside the plan directory. This is a hard guarantee.
+- MUST NOT make project edits outside the plan directory or OS temp scratch. This is a hard guarantee.
 - Do not use user_interaction to ask "is this plan okay?" - that's exit_plan_mode's job.
 - Do use user_interaction for a decision that is the user's to make, including every open question a plan review returned: one call, all of them, each with your recommendation. A question only the user can answer is never yours to settle silently.
 - When ready, call exit_plan_mode to request user approval.`,
@@ -1222,11 +1225,11 @@ const (
 	// re-entry section in that order.
 	officeMainPlanFullFormat = `PLAN MODE ACTIVE - read carefully.
 
-The user switched this conversation to plan mode: plan the work before doing it. You MUST NOT create or change any file except plan files inside this dedicated plan directory:
+The user switched this conversation to plan mode: plan the work before doing it. You MUST NOT create or change any project file except plan files inside this dedicated plan directory:
 
   %s
 %s
-%sAuthor plan files with write_file (create or replace) or edit_file (targeted change). Every other write is blocked.
+%sAuthor plan files with write_file (create or replace) or edit_file (targeted change). Every other project write is blocked; OS temp scratch ($TMPDIR, /tmp) is writable for research output.
 
 ## Plan files keep their history
 
@@ -1245,8 +1248,8 @@ The user switched this conversation to plan mode: plan the work before doing it.
 
 - Reading files, searching, web research and read-only commands: free use.
 - user_interaction: free use to clarify the plan.
-- write_file, edit_file: only inside the plan directory above.
-- Anything that creates or changes other files: blocked until the plan is approved.
+- write_file, edit_file: only inside the plan directory above and inside OS temp scratch ($TMPDIR, /tmp).
+- Anything that creates or changes other project files: blocked until the plan is approved.
 
 ## Important
 
@@ -1256,7 +1259,7 @@ The user switched this conversation to plan mode: plan the work before doing it.
 	// officeSubagentPlanFull takes planDir.
 	officeSubagentPlanFull = `PLAN MODE ACTIVE (subagent) - read carefully.
 
-You are a subagent helping with office planning. You MUST NOT create or change any file except plan files inside this dedicated plan directory:
+You are a subagent helping with office planning. You MUST NOT create or change any project file except plan files inside this dedicated plan directory:
 
   %s
 
@@ -1264,8 +1267,8 @@ You are a subagent helping with office planning. You MUST NOT create or change a
 
 - Reading documents and data, searching the folder, web research and read-only commands: free use.
 - user_interaction: free use to clarify the approach with the parent agent or the user.
-- write_file, edit_file: only inside the plan directory above.
-- Anything that creates or changes other files: blocked.
+- write_file, edit_file: only inside the plan directory above and inside OS temp scratch ($TMPDIR, /tmp).
+- Anything that creates or changes other project files: blocked.
 - exit_plan_mode: NOT available; only the parent agent can exit plan mode.
 - subagent_run, subagent_fanout: NOT available within a subagent.
 
@@ -1275,7 +1278,7 @@ You are a subagent helping with office planning. You MUST NOT create or change a
 - Do not produce the deliverable itself. When done, summarize your findings; the parent agent will decide how to proceed.`
 
 	// officeSubagentPlanSparseFormat takes planDir.
-	officeSubagentPlanSparseFormat = `Plan mode active (subagent). Write/edit plan files only inside %s - all other writes blocked. Use user_interaction to clarify the approach.`
+	officeSubagentPlanSparseFormat = `Plan mode active (subagent). Write/edit plan files only inside %s - project writes blocked; OS temp scratch ($TMPDIR, /tmp) is writable. Use user_interaction to clarify the approach.`
 
 	// officeImplementationSparseFormat takes the marker, the plan file, and
 	// the implementation heading in that order.

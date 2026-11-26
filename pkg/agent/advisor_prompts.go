@@ -52,7 +52,7 @@ const SinglePlanModePrompt = `
 
 ## Single-plan workflow
 
-When the user already describes the change, skip the broad audit and findings selection and investigate only enough to specify it. Resolve ambiguities from the project first, then ask every remaining question that materially changes the work or creates real risk in one interaction, each with a recommended answer. Write one plan that meets the handoff quality bar into this session's plan file - no other path is writable in plan mode - and do not implement it before approval.`
+When the user already describes the change, skip the broad audit and findings selection and investigate only enough to specify it. Resolve ambiguities from the project first, then ask every remaining question that materially changes the work or creates real risk in one interaction, each with a recommended answer. Write one plan that meets the handoff quality bar into this session's plan file - project files stay read-only in plan mode (OS temp scratch is writable) - and do not implement it before approval.`
 
 const NonFunctionalRequirementsPrompt = `
 

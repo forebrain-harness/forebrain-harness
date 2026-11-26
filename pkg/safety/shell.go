@@ -1699,15 +1699,26 @@ func ClassifyShellCommand(cmd string, allowedRoots []string, cwd string) ShellMu
 	if strings.TrimSpace(cmd) == "" {
 		return ShellMutationUnproven
 	}
-	clauses, floor := splitShellClassifyClauses(cmd)
+	clauses, floor, _ := splitShellClassifyClauses(cmd)
 	worst := floor
 	if len(clauses) == 0 {
 		return worseShellMutation(worst, ShellMutationUnproven)
 	}
 	for _, clause := range clauses {
-		worst = worseShellMutation(worst, classifyShellClause(clause, allowedRoots, cwd))
+		worst = worseShellMutation(worst, classifyShellClause(clause.Text, allowedRoots, cwd))
 	}
 	return worst
+}
+
+// shellClause is one simple command of a classified line, with the parts its text
+// cannot carry once the operators are gone: the file each redirection named, and
+// whether a heredoc fed the clause. The text itself is byte-for-byte what the
+// walker produced before these fields existed, so the tiers this package reports
+// cannot move with them.
+type shellClause struct {
+	Text      string
+	Redirects []string
+	Heredoc   bool
 }
 
 // splitShellClassifyClauses splits a command line into its simple clauses and
@@ -1718,18 +1729,47 @@ func ClassifyShellCommand(cmd string, allowedRoots []string, cwd string) ShellMu
 // "$(cmd)", backticks) hides a command or a path this package cannot see. Both
 // are reported through the returned floor rather than as a failure to split, so
 // the rest of the line is still classified clause by clause.
-func splitShellClassifyClauses(cmd string) ([]string, ShellMutation) {
+//
+// A redirection's target is recorded on its clause as well as floored, and a
+// heredoc is flagged: the write a line performs is decided by those words, and a
+// caller proving where the writes land cannot read them out of the text. doubt
+// reports the structural doubt on its own, because the floor cannot: a
+// redirection floors at Writes, which outranks the Unproven an expansion would
+// otherwise contribute.
+func splitShellClassifyClauses(cmd string) (clauses []shellClause, floor ShellMutation, doubt bool) {
 	runes := []rune(cmd)
 	buf := make([]rune, 0, len(runes))
-	clauses := make([]string, 0, 4)
-	floor := ShellMutationReadOnly
+	clauses = make([]shellClause, 0, 4)
+	redirects := make([]string, 0, 2)
+	heredoc := false
+	doubt = false
+	floor = ShellMutationReadOnly
 	inSingle, inDouble, escaped := false, false, false
 	atWordStart := true
 	flush := func() {
 		if clause := strings.TrimSpace(string(buf)); clause != "" {
-			clauses = append(clauses, clause)
+			clauses = append(clauses, shellClause{Text: clause, Redirects: redirects, Heredoc: heredoc})
 		}
 		buf = buf[:0]
+		redirects = nil
+		heredoc = false
+	}
+	// doubtful records structural doubt: the floor for a caller reading tiers,
+	// and the flag for a caller proving where the writes land, since a
+	// redirection's Writes outranks this Unproven in the floor.
+	doubtful := func() {
+		doubt = true
+		floor = worseShellMutation(floor, ShellMutationUnproven)
+	}
+	// redirectTarget records the word a redirection just opened, so a caller can
+	// bound where the write lands. An empty target is recorded as such: the line
+	// names no file, and a caller must not read that as "writes nothing".
+	redirectTarget := func(from int) {
+		word, _, _, ok := consumeShellWord(string(runes[from:]), 0)
+		if !ok {
+			word = ""
+		}
+		redirects = append(redirects, word)
 	}
 	write := func(ch rune) {
 		buf = append(buf, ch)
@@ -1770,7 +1810,7 @@ func splitShellClassifyClauses(cmd string) ([]string, ShellMutation) {
 			// Inside double quotes only the substitutions stay active; the
 			// operators and the redirections are literal text.
 			if ch == '$' || ch == '`' {
-				floor = worseShellMutation(floor, ShellMutationUnproven)
+				doubtful()
 			}
 			write(ch)
 			continue
@@ -1797,6 +1837,7 @@ func splitShellClassifyClauses(cmd string) ([]string, ShellMutation) {
 					i++
 				}
 				atWordStart = true
+				redirectTarget(i + 1)
 			default:
 				// A single "&" backgrounds the clause; it runs either way.
 				separate()
@@ -1813,6 +1854,7 @@ func splitShellClassifyClauses(cmd string) ([]string, ShellMutation) {
 				i++
 			}
 			atWordStart = true
+			redirectTarget(i + 1)
 		case '<':
 			// Reading a file in changes no file; a descriptor duplication
 			// names no file at all.
@@ -1821,24 +1863,29 @@ func splitShellClassifyClauses(cmd string) ([]string, ShellMutation) {
 				i += w - 1
 				continue
 			}
+			if i+1 < len(runes) && runes[i+1] == '<' {
+				// A heredoc: what feeds the command arrives after the line, so
+				// neither this walker nor a caller can read it here.
+				heredoc = true
+			}
 			buf = trimShellFDNumber(buf)
 			atWordStart = true
 		case '$', '`':
 			// Command and parameter substitution: the command that runs, and
 			// the paths it touches, are decided while it runs. Both remain
 			// active inside double quotes.
-			floor = worseShellMutation(floor, ShellMutationUnproven)
+			doubtful()
 			write(ch)
 		case '(', ')', '{', '}':
 			// Subshell, brace group and brace expansion all move the command
 			// out of the shape this scanner can read.
-			floor = worseShellMutation(floor, ShellMutationUnproven)
+			doubtful()
 			write(ch)
 		case '~':
 			if atWordStart {
 				// A bare "~" expands to a home directory outside every
 				// allowed root.
-				floor = worseShellMutation(floor, ShellMutationUnproven)
+				doubtful()
 			}
 			write(ch)
 		default:
@@ -1851,10 +1898,10 @@ func splitShellClassifyClauses(cmd string) ([]string, ShellMutation) {
 	if escaped || inSingle || inDouble {
 		// An unterminated quote or escape hides part of the line from this
 		// scanner.
-		return nil, worseShellMutation(floor, ShellMutationUnproven)
+		return nil, worseShellMutation(floor, ShellMutationUnproven), true
 	}
 	flush()
-	return clauses, floor
+	return clauses, floor, doubt
 }
 
 // shellFDDupWidth reports the rune width of the file-descriptor duplication
@@ -2157,7 +2204,22 @@ func classifyGoCommand(args []string, allowedRoots []string, cwd string) ShellMu
 		}
 		// tidy, download, edit, init and vendor all rewrite go.mod/go.sum.
 		return ShellMutationWrites
-	case "build", "test", "install", "generate", "run", "vet", "fix", "clean", "work", "tool", "fmt", "get":
+	// `go test`, `go vet` and `go run` write the build cache and temp files and
+	// then execute whatever the packages contain - code this classifier cannot
+	// read, which is the tier `python3 script.py` already holds. A question for
+	// the operator, not a proven write plan mode refuses outright. The forms
+	// that write to a path chosen on the command line keep the proof.
+	case "test":
+		for _, arg := range rest {
+			a := strings.TrimSpace(arg)
+			if a == "-c" || a == "-o" || strings.HasPrefix(a, "-o=") || (strings.HasPrefix(a, "-o") && len(a) > 2) {
+				return ShellMutationWrites
+			}
+		}
+		return ShellMutationUnproven
+	case "vet", "run":
+		return ShellMutationUnproven
+	case "build", "install", "generate", "fix", "clean", "work", "tool", "fmt", "get":
 		return ShellMutationWrites
 	}
 	return ShellMutationUnproven

@@ -119,10 +119,8 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 				return "", err
 			}
 			cfg := sessionConfig(ctx, st, rt)
-			profile, profileElevation := shellSandboxProfile(ctx)
-			if profile == safety.ProfileWorkspaceWrite && !profileElevation && cfg != nil {
-				profile = safety.ProfileForConfig(cfg)
-			}
+			profile := callSandboxProfile(ctx, cfg)
+			_, profileElevation := shellSandboxProfile(ctx)
 			if sandboxBypassApproved {
 				in.SandboxPermissions = safety.SandboxPermissionsRequireEscalated
 			}
@@ -182,7 +180,7 @@ func NewShellTool(st *State, rt *AgentToolRuntime) (*llm.Tool, error) {
 			assessment := safety.AssessShellCommand(cmd)
 			mutation := safety.ClassifyShellCommand(cmd, shellAllowedRoots(ctx, st, rt), wdAbs)
 			readOnlyCommand := mutation == safety.ShellMutationReadOnly
-			planGate := planModeShellGate(ctx, cfg != nil && cfg.DangerFullAccessEnabled(), mutation)
+			planGate := planModeShellGate(ctx, cfg != nil && cfg.DangerFullAccessEnabled(), mutation, cmd, wdAbs)
 			if planGate == PlanModeShellRefuse {
 				err := fmt.Errorf("plan mode: %q modifies files; call exit_plan_mode first", strings.TrimSpace(cmd))
 				CaptureToolError(ctx, err)
@@ -355,19 +353,11 @@ func runSandboxedShellCommand(ctx context.Context, st *State, rt *AgentToolRunti
 	writablePaths := runtimeCfg.Filesystem.AllowWrite
 	var reviewRoots []string
 	if req.profile == safety.ProfileReadOnly {
-		writablePaths = nil
-		for _, grant := range snap.FileSystemGrants {
-			if grant.Entry.Access == safety.FileSystemAccessWrite {
-				if path, ok := grant.Entry.Path.Resolve(req.cwd); ok {
-					writablePaths = append(writablePaths, path)
-				}
-			}
-		}
-		// A coding plan review keeps the project read-only and may write only
-		// its scratch and worktree directories and the worktrees registry
-		// `git worktree add` needs.
+		// The review roots are resolved here as well as inside the helper: this
+		// caller also merges them into the readable set and points TMPDIR at
+		// their scratch directory, and neither of those is a write.
 		reviewRoots = ReviewWriteScopeFromContext(ctx).shellWritableRoots()
-		writablePaths = append(writablePaths, reviewRoots...)
+		writablePaths = readOnlyExtraWriteRoots(ctx, st, snap, req.cwd)
 	}
 	for _, r := range writablePaths {
 		ra, raErr := filepath.Abs(strings.TrimSpace(r))
@@ -1779,6 +1769,86 @@ func shellSandboxProfile(ctx context.Context) (safety.Profile, bool) {
 	return safety.ProfileReadOnly, false
 }
 
+// planModeScratchWrites is the OS temp scratch a read-only profile request may
+// still write while the session is planning, and nothing in any other mode: the
+// read-only profile's write list is otherwise empty by design.
+//
+// A region that holds one of the state's own roots is dropped. The OS grant is
+// per directory, so unlike the shell proof - which judges each written path - it
+// cannot admit "<region>/draft.md" while refusing "<region>/<workspace>/x": a
+// checkout under $TMPDIR would otherwise hand the project to the sandbox as
+// writable, the one case the proof and GuardWrite both already exclude.
+func planModeScratchWrites(ctx context.Context, st *State) []string {
+	if !strings.EqualFold(strings.TrimSpace(ModeFromContext(ctx)), string(state.ModePlan)) {
+		return nil
+	}
+	return scratchRootsOutsideState(st, safety.ShellScratchRoots())
+}
+
+// readOnlyExtraWriteRoots is the write set a read-only call may still use: the
+// structured write grants, a coding plan review's scratch and worktree
+// directories, and - in plan mode - OS temp scratch. The caller turns them into
+// extraBinds and promoteReadOnlyWriteScope makes them the whole policy, so none
+// of them may name the project.
+//
+// The review roots are also resolved by the shell caller on its own, for the
+// readable-path merge and the TMPDIR override that are not part of the write
+// set; this helper is the write set both tools read.
+func readOnlyExtraWriteRoots(ctx context.Context, st *State, snap safety.Snapshot, cwd string) []string {
+	paths := make([]string, 0, len(snap.FileSystemGrants)+2)
+	for _, grant := range snap.FileSystemGrants {
+		if grant.Entry.Access != safety.FileSystemAccessWrite {
+			continue
+		}
+		if path, ok := grant.Entry.Path.Resolve(cwd); ok {
+			paths = append(paths, path)
+		}
+	}
+	paths = append(paths, ReviewWriteScopeFromContext(ctx).shellWritableRoots()...)
+	paths = append(paths, planModeScratchWrites(ctx, st)...)
+	return paths
+}
+
+// scratchRootsOutsideState drops every scratch root that equals or contains one
+// of the state's roots, in the same symlink-resolving terms GuardWrite judges a
+// target with.
+func scratchRootsOutsideState(st *State, roots []string) []string {
+	if st == nil {
+		return roots
+	}
+	allowed := st.AllowedRoots()
+	kept := make([]string, 0, len(roots))
+	for _, root := range roots {
+		blocked := false
+		for _, allowedRoot := range allowed {
+			if PathWithinRoot(allowedRoot, root) {
+				blocked = true
+				break
+			}
+		}
+		if !blocked {
+			kept = append(kept, root)
+		}
+	}
+	return kept
+}
+
+// callSandboxProfile is the profile one tool call runs under: the plan-mode and
+// read-only-worker downgrade first, then the configuration's own profile when
+// nothing downgraded it.
+//
+// It is extracted from the shell tool because `process` is a second way to run a
+// command, and reading ProfileForConfig directly there meant a plan-mode session
+// could write the project through a background start (plan 388). One seam, so a
+// future profile rule changes in one place.
+func callSandboxProfile(ctx context.Context, cfg *appcfg.Root) safety.Profile {
+	profile, profileElevation := shellSandboxProfile(ctx)
+	if profile == safety.ProfileWorkspaceWrite && !profileElevation && cfg != nil {
+		profile = safety.ProfileForConfig(cfg)
+	}
+	return profile
+}
+
 // promoteReadOnlyWriteScope turns a read-only request that resolved write
 // exceptions into an explicit managed request, and returns the readable paths
 // that promotion has to re-state.
@@ -1844,7 +1914,14 @@ const (
 // deliberately allowing one command is a decision the runtime should honor. That
 // is also why PlanModeShellAsk exists - it is the tier whose answer can only
 // come from them.
-func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safety.ShellMutation) PlanModeShellGateDecision {
+//
+// A write the classifier proves is still not a refusal when it lands in OS temp
+// scratch: downloading, unpacking and inspecting an archive is investigation,
+// not implementation, and plan mode was charging the agent a refusal for it
+// (owner ruling 2026-11-26). cmd and cwd are what the scratch proof reads; it
+// runs before the refused tier, because a command that only touches the
+// disposable regions is not a project write at all.
+func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safety.ShellMutation, cmd, cwd string) PlanModeShellGateDecision {
 	if mutation == safety.ShellMutationReadOnly {
 		return PlanModeShellAllow
 	}
@@ -1855,6 +1932,9 @@ func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safe
 		return PlanModeShellAllow
 	}
 	if ApprovedActionIDFromContext(ctx) != "" {
+		return PlanModeShellAllow
+	}
+	if safety.ShellWritesConfinedToRoots(cmd, safety.ShellScratchRoots(), cwd) {
 		return PlanModeShellAllow
 	}
 	if mutation == safety.ShellMutationWrites {
@@ -1874,8 +1954,15 @@ func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safe
 // the plan-mode authority, so it has to answer first. The allowed roots do not
 // matter here - they can only turn a read-only verdict into doubt, and both the
 // other verdicts take the same path.
+//
+// The scratch proof runs here with no working directory, because this caller has
+// none: a command that names its scratch target outright (or cd's into it)
+// answers Allow, while one that would write relatively has no cwd to resolve
+// against and falls through to today's answer - the boundary then defers to the
+// shell tool, which does know the directory. That is a missing shortcut, never a
+// prompt the tool would not have raised itself.
 func PlanModeShellGateForCommand(ctx context.Context, dangerFullAccess bool, cmd string) PlanModeShellGateDecision {
-	return planModeShellGate(ctx, dangerFullAccess, safety.ClassifyShellCommand(cmd, nil, ""))
+	return planModeShellGate(ctx, dangerFullAccess, safety.ClassifyShellCommand(cmd, nil, ""), cmd, "")
 }
 
 // sandboxAdditionalDirs is what the sandbox may write besides its cwd, its
@@ -1898,6 +1985,11 @@ func shellAllowedRoots(ctx context.Context, st *State, rt *AgentToolRuntime) []s
 	}
 	roots := MergeAllowedRootPaths(st.AllowedRoots(), st.LoadedSkillRoots())
 	roots = MergeAllowedRootPaths(roots, st.PermissionRoots(safety.FileSystemAccessRead))
+	// Plan mode reads and cd's into OS temp scratch as freely as it writes
+	// there (plan 387): without this, `cd /tmp && ls` is unproven and asks.
+	if strings.EqualFold(strings.TrimSpace(ModeFromContext(ctx)), string(state.ModePlan)) {
+		roots = MergeAllowedRootPaths(roots, safety.ShellScratchRoots())
+	}
 	if len(roots) == 0 && rt != nil && strings.TrimSpace(rt.WorkspaceRoot) != "" {
 		roots = MergeAllowedRootPaths(roots, []string{rt.WorkspaceRoot})
 	}

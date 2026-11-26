@@ -2171,6 +2171,46 @@ You are returning to plan mode after having previously exited it. A plan file ex
 	}
 }
 
+// Plan mode walls off the project, not the disk (plan 387): every reminder
+// family has to say where a write may still land, and none may claim the plan
+// directory is the only writable place, or the model plans around a rule the
+// runtime no longer keeps.
+func TestPlanModeRemindersNameBothWritableRegions(t *testing.T) {
+	planDir := filepath.Join("plans", "p", "s")
+	planFile := filepath.Join(planDir, "add-s3-sync.md")
+	texts := map[string]string{
+		"coding full":            buildPlanModeReminder(planDir, planFile, true, "full", false, false),
+		"coding sparse":          buildPlanModeReminder(planDir, planFile, true, "sparse", false, false),
+		"coding subagent full":   buildPlanModeReminder(planDir, planFile, true, "full", false, true),
+		"coding subagent sparse": buildPlanModeReminder(planDir, planFile, true, "sparse", false, true),
+		"office full":            buildOfficePlanModeReminder(planDir, planFile, true, "full", false, false),
+		"office sparse":          buildOfficePlanModeReminder(planDir, planFile, true, "sparse", false, false),
+		"office subagent full":   buildOfficePlanModeReminder(planDir, planFile, true, "full", false, true),
+		"office subagent sparse": buildOfficePlanModeReminder(planDir, planFile, true, "sparse", false, true),
+	}
+	blanket := []string{
+		"all other writes blocked",
+		"every other write is blocked",
+		"no other path is writable",
+		"all other paths blocked",
+		// The header sentence, which said "any file" while the tool list below
+		// it already said OS temp scratch is writable: the reminder contradicted
+		// itself, and the model plans around whichever half it read last.
+		"create or change any file",
+	}
+	for name, text := range texts {
+		lower := strings.ToLower(text)
+		if !strings.Contains(lower, "os temp scratch") {
+			t.Fatalf("%s reminder does not name the OS temp scratch region: %q", name, text)
+		}
+		for _, claim := range blanket {
+			if strings.Contains(lower, claim) {
+				t.Fatalf("%s reminder still claims the plan directory is the only writable place (%q): %q", name, claim, text)
+			}
+		}
+	}
+}
+
 func TestCodingPlanReminderUnchanged(t *testing.T) {
 	got := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, "full", false, false)
 	if !strings.Contains(got, "Phase 1 - Initial Understanding: explore the codebase") {
@@ -2202,6 +2242,12 @@ func TestCodingPlanReminderUnchanged(t *testing.T) {
 	}
 	if !strings.Contains(got, "- subagent_run subtype=plan: independent read-only critique") {
 		t.Fatal("coding plan reminder must name the plan subagent in tool guidance")
+	}
+	// `process start` runs a command too, and it obeys the same rules (plan 388):
+	// a reminder that named only shell would leave the model a second way to
+	// start a server or write a file while it believes the project is sealed.
+	if !strings.Contains(got, "- process start: the same plan-mode rules as shell") {
+		t.Fatal("coding plan reminder must say process start obeys the same rules as shell")
 	}
 	sparse := buildPlanModeReminder(filepath.Join("plans", "p", "s"), filepath.Join("plans", "p", "s", "plan.md"), true, "sparse", false, false)
 	if strings.Contains(sparse, agent.SinglePlanModePrompt) {

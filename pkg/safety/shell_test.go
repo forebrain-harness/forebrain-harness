@@ -826,7 +826,7 @@ func TestClassifyShellCommand(t *testing.T) {
 
 		// Go writes.
 		{name: "go build", cmd: "go build ./...", want: ShellMutationWrites},
-		{name: "go test", cmd: "go test ./...", want: ShellMutationWrites},
+		{name: "go test", cmd: "go test ./...", want: ShellMutationUnproven},
 		{name: "go mod tidy", cmd: "go mod tidy", want: ShellMutationWrites},
 		{name: "go env -w", cmd: "go env -w GOFLAGS=-mod=mod", want: ShellMutationWrites},
 		{name: "go fmt", cmd: "go fmt ./...", want: ShellMutationWrites},
@@ -1012,6 +1012,78 @@ func TestClassifyShellCommandSupportsGitCOptions(t *testing.T) {
 				t.Fatalf("ClassifyShellCommand(%q) = %s, want %s", tt.cmd, got, tt.want)
 			}
 		})
+	}
+}
+
+// The go toolchain runs code the classifier cannot see: `go test`, `go vet` and
+// `go run` write build caches and temp files and then execute whatever the
+// packages contain. That is the tier `python3 script.py` already holds - a
+// question for the operator, not a proven write that plan mode refuses outright.
+// The forms that write to a path chosen on the command line keep the proof.
+func TestClassifyGoCommandSeparatesCodeExecutionFromProvenWrites(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		cmd  string
+		want ShellMutation
+	}{
+		{"go test ./pkg/tool", ShellMutationUnproven},
+		{"go test -run TestX ./pkg/tool -count=1", ShellMutationUnproven},
+		{"go vet ./...", ShellMutationUnproven},
+		{"go run .", ShellMutationUnproven},
+		{"go test -c -o /tmp/t ./pkg/tool", ShellMutationWrites},
+		{"go test -c ./pkg/tool", ShellMutationWrites},
+		{"go build ./...", ShellMutationWrites},
+		{"go install ./...", ShellMutationWrites},
+		{"go generate ./...", ShellMutationWrites},
+		{"go mod tidy", ShellMutationWrites},
+		{"go fmt ./...", ShellMutationWrites},
+	}
+	for _, tt := range tests {
+		if got := ClassifyShellCommand(tt.cmd, []string{root}, root); got != tt.want {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want %s", tt.cmd, got, tt.want)
+		}
+	}
+}
+
+// The walker now carries each clause's redirection targets and heredoc flag, and
+// the tier every existing caller reads must not have moved with them: the clause
+// texts stay exactly what they were, so classifyShellClause sees the same words.
+func TestSplitShellClassifyClausesRecordsRedirectsWithoutMovingTiers(t *testing.T) {
+	clauses, floor, doubt := splitShellClassifyClauses(`echo hi > /tmp/x.txt 2>&1 && cat go.mod | head -2`)
+	if floor != ShellMutationWrites || doubt {
+		t.Fatalf("floor = %s doubt=%v, want writes/false", floor, doubt)
+	}
+	want := []shellClause{
+		{Text: "echo hi  /tmp/x.txt", Redirects: []string{"/tmp/x.txt"}},
+		{Text: "cat go.mod"},
+		{Text: "head -2"},
+	}
+	if len(clauses) != len(want) {
+		t.Fatalf("clauses = %#v, want %#v", clauses, want)
+	}
+	for i, clause := range clauses {
+		if clause.Text != want[i].Text || clause.Heredoc {
+			t.Fatalf("clause %d = %#v, want %#v", i, clause, want[i])
+		}
+		if strings.Join(clause.Redirects, "|") != strings.Join(want[i].Redirects, "|") {
+			t.Fatalf("clause %d redirects = %v, want %v", i, clause.Redirects, want[i].Redirects)
+		}
+	}
+
+	// A heredoc is flagged, and doubt survives a redirection's higher floor:
+	// that combination is what the scratch proof refuses on.
+	heredocClauses, _, heredocDoubt := splitShellClassifyClauses("cat <<EOF > /tmp/x\nmkdir /tmp/y\nEOF")
+	if len(heredocClauses) == 0 || !heredocClauses[0].Heredoc {
+		t.Fatalf("heredoc flag missing: %#v", heredocClauses)
+	}
+	if heredocDoubt {
+		t.Fatal("a heredoc is not an expansion")
+	}
+	if _, _, expansionDoubt := splitShellClassifyClauses("echo $(date) > /tmp/x"); !expansionDoubt {
+		t.Fatal("an expansion under a redirection must still be doubt")
+	}
+	if got := ClassifyShellCommand("echo $(date) > /tmp/x", nil, ""); got != ShellMutationWrites {
+		t.Fatalf("expansion under a redirection = %s, want writes", got)
 	}
 }
 

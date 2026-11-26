@@ -104,16 +104,29 @@ func (r *Runner) newToolPermissionMiddleware() llm.ToolMiddleware {
 			if toolOwnsApprovalProtocol(name) {
 				return next(ctx, arguments)
 			}
-			// Plan mode owns the answer for a shell command it has judged. In
-			// the one configuration where no sandbox contains the command, this
-			// boundary asks about every unmatched one - which arrives ahead of
-			// the gate, and would offer the user a command plan mode provably
-			// refuses as something they may allow. The shell tool raises the
-			// ask for the tier that needs one, with the sentence that explains
-			// it; the refusal and the read-only pass-through come from there
-			// too.
-			if strings.EqualFold(name, "shell") &&
-				tool.PlanModeShellGateForCommand(ctx, r.sessionConfig(ctx).DangerFullAccessEnabled(), permissionInput(name, payload)) != tool.PlanModeShellAllow {
+			// Plan mode owns the answer for a command it has judged. In the one
+			// configuration where no sandbox contains the command, this boundary
+			// asks about every unmatched one - which arrives ahead of the gate,
+			// and would offer the user a command plan mode provably refuses as
+			// something they may allow. The shell tool raises the ask for the
+			// tier that needs one, with the sentence that explains it; the
+			// refusal and the read-only pass-through come from there too.
+			//
+			// `process start` runs a command of the same kind, so it is judged by
+			// the same gate and its tool owns the answer (plan 388). The other
+			// process actions run nothing, so they keep this boundary's ordinary
+			// flow rather than deferring for a command they do not have.
+			judgedCommand, judged := "", false
+			switch {
+			case strings.EqualFold(name, "shell"):
+				judgedCommand, judged = permissionInput(name, payload), true
+			case strings.EqualFold(name, "process"):
+				if command, ok := payload["command"].(string); ok && strings.TrimSpace(command) != "" {
+					judgedCommand, judged = strings.TrimSpace(command), true
+				}
+			}
+			if judged &&
+				tool.PlanModeShellGateForCommand(ctx, r.sessionConfig(ctx).DangerFullAccessEnabled(), judgedCommand) != tool.PlanModeShellAllow {
 				return next(ctx, arguments)
 			}
 
