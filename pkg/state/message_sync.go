@@ -101,6 +101,11 @@ func (s *SessionStore) AppendNewMessages(ctx context.Context, sessionID, runID s
 // append and the in-place completion of a row cannot disagree about it. The
 // parts JSON built from the same text is repaired by MessagePartsJSON.
 func storedContent(msg llm.Message) string {
+	if strings.TrimSpace(msg.Role) == llm.RoleUser {
+		if display := strings.TrimSpace(msg.DisplayText); display != "" {
+			return dbx.ValidText(display)
+		}
+	}
 	return dbx.ValidText(strings.TrimSpace(llm.TextContent(storedParts(msg)...)))
 }
 

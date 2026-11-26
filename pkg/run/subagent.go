@@ -1025,7 +1025,15 @@ func (ch *subagentChannel) publishInputDelivered(fac Factory, ex *subagentExecut
 		if entry.Mode != TurnInputModeSteer {
 			continue
 		}
-		text := strings.TrimSpace(llm.TextWithoutImageSourceNotes(entry.Parts))
+		// The person's message is drawn as they wrote it — the line with its
+		// skill command and image chips — which is what the queue kept in
+		// Display; the parts carry what the model reads, which for a skill
+		// command is only its request. A peer letter travels as its envelope
+		// either way.
+		text := strings.TrimSpace(entry.Display)
+		if text == "" {
+			text = strings.TrimSpace(llm.TextWithoutImageSourceNotes(entry.Parts))
+		}
 		if text == "" {
 			continue
 		}
@@ -1156,7 +1164,7 @@ func steerEntries(steers []Input) []TurnInputEntry {
 	for _, in := range steers {
 		parts := steerParts(in)
 		out = append(out, TurnInputEntry{
-			Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
+			Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq, Display: strings.TrimSpace(in.Display),
 			SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
 			Origin: strings.TrimSpace(in.Origin),
 		})

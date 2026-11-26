@@ -25,6 +25,11 @@ type TurnInputEntry struct {
 	// Seq is the queue's shared enqueue clock, carried into the runtime so the
 	// queue can reconcile its own lanes when the runtime reports a delivery.
 	Seq int
+	// Display is the message as its sender wrote it, for the surface to draw
+	// when the entry is delivered. Parts are what the model reads, which for a
+	// skill command is only the request it expanded into; empty when the
+	// sender keeps no line of its own (the parts' text then stands in).
+	Display string
 	// SkillName and SkillPath carry the trusted explicit skill selection of a
 	// steer typed as a skill command in a subagent's view: delivering the
 	// steer activates that skill. Empty for every other entry.
@@ -80,7 +85,7 @@ func (r *TurnInputRuntime) enqueueEntry(entry TurnInputEntry) {
 	}
 	cloned := append([]llm.ContentPart(nil), entry.Parts...)
 	r.mu.Lock()
-	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq, SkillName: entry.SkillName, SkillPath: entry.SkillPath, Origin: entry.Origin})
+	r.pending = append(r.pending, TurnInputEntry{Mode: entry.Mode, Parts: cloned, Seq: entry.Seq, Display: entry.Display, SkillName: entry.SkillName, SkillPath: entry.SkillPath, Origin: entry.Origin})
 	r.mu.Unlock()
 }
 
@@ -116,6 +121,7 @@ func (r *TurnInputRuntime) takeSteersLocked(ctx context.Context) []TurnInputEntr
 				Mode:      entry.Mode,
 				Parts:     append([]llm.ContentPart(nil), entry.Parts...),
 				Seq:       entry.Seq,
+				Display:   entry.Display,
 				SkillName: entry.SkillName,
 				SkillPath: entry.SkillPath,
 				Origin:    entry.Origin,
@@ -172,11 +178,34 @@ type SteerDelivery struct {
 	settled   bool
 	retracted bool   // the user took a steer back out before the call settled
 	abort     func() // abandons the model call carrying the delivery
+	// onCommit runs once the entries are reported delivered (see Commit), on
+	// the goroutine that committed, before the call's output reaches the
+	// surface: the Skill card of a skill-carrying steer goes here, so the
+	// person's message is drawn ahead of the activation it caused. A delivery
+	// that rolls back never runs it.
+	//
+	// Every way a delivery commits runs it — the call's first output, a
+	// non-streaming success, an incomplete response that is nevertheless the
+	// answer, the retry layer's completed part, and Esc's CommitNow — because
+	// they all settle through Commit.
+	onCommit func()
 	// sendNow carries the user's Esc "send it now" intent into this handoff
 	// (see TurnInputRuntime.InterruptToSend): those entries are reported as
 	// delivered where the turn takes them, not at the next call's first
 	// output.
 	sendNow bool
+}
+
+// OnCommit registers what to publish once this delivery commits. Set before the
+// call carrying the entries begins, so it is in place under the runtime's lock
+// by the time Commit reads it.
+func (d *SteerDelivery) OnCommit(fn func()) {
+	if d == nil || fn == nil {
+		return
+	}
+	d.rt.mu.Lock()
+	d.onCommit = fn
+	d.rt.mu.Unlock()
 }
 
 // BeginSteerDelivery takes the queued steers for a model call that is about to
@@ -238,8 +267,12 @@ func (d *SteerDelivery) Commit() bool {
 	d.settled = true
 	r.forgetDeliveryLocked(d)
 	entries := d.entries
+	fn := d.onCommit
 	r.mu.Unlock()
 	r.notifyDelivered(entries)
+	if fn != nil {
+		fn()
+	}
 	return true
 }
 
@@ -508,6 +541,7 @@ func (r *TurnInputRuntime) DrainAll() []TurnInputEntry {
 			Mode:      entry.Mode,
 			Parts:     append([]llm.ContentPart(nil), entry.Parts...),
 			Seq:       entry.Seq,
+			Display:   entry.Display,
 			SkillName: entry.SkillName,
 			SkillPath: entry.SkillPath,
 			Origin:    entry.Origin,
@@ -562,6 +596,7 @@ func (r *TurnInputRuntime) Snapshot() []TurnInputEntry {
 			Mode:      entry.Mode,
 			Parts:     append([]llm.ContentPart(nil), entry.Parts...),
 			Seq:       entry.Seq,
+			Display:   entry.Display,
 			SkillName: entry.SkillName,
 			SkillPath: entry.SkillPath,
 			Origin:    entry.Origin,
@@ -859,7 +894,7 @@ func (q *InputQueue) steer(in Input, respectClosed bool) bool {
 	parts := steerParts(in)
 	q.steers = append(q.steers, in)
 	q.rt.enqueueEntry(TurnInputEntry{
-		Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq,
+		Mode: TurnInputModeSteer, Parts: parts, Seq: in.Seq, Display: strings.TrimSpace(in.Display),
 		SkillName: strings.TrimSpace(in.SkillName), SkillPath: strings.TrimSpace(in.SkillPath),
 		Origin: strings.TrimSpace(in.Origin),
 	})

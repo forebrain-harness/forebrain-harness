@@ -45,6 +45,15 @@ type Input struct {
 	// lanes are separate FIFOs, so without it "newest queued" is only a
 	// guess. Meaningless (zero) for a message that never sat in a queue.
 	Seq int
+	// Display is the message as its sender wrote it — the composer's line, its
+	// slash command and image chips included — for a surface to draw when the
+	// message is delivered, and for the user row to keep. Text is only the
+	// queue's preview (whitespace collapsed) and the model's fallback; Parts
+	// are what the model reads. A skill command steers with the command in
+	// Display and only its request in Parts, so a surface drawing Parts would
+	// lose the command. Empty for producers that keep none; the parts' text
+	// then stands in.
+	Display string
 	// Payload is the surface's own record of the message — what it shows and
 	// what it hands back to the composer. The queue never reads it; it
 	// travels with the message so a recalled, released or restored message

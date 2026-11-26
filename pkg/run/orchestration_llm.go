@@ -158,9 +158,9 @@ func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *
 }
 
 // steerMessages turns delivered steers into the messages the model reads. A
-// steer typed as a skill command in a subagent's view first loads that skill,
-// with its own Skill card, and the skill's instructions go in just ahead of
-// the steer — the same activation a turn that starts with the command gets.
+// steer typed as a skill command first loads that skill and the skill's
+// instructions go in just ahead of the steer — the same activation a turn that
+// starts with the command gets, in either view.
 // Every message lands after the delivery's start, so the rollback and the
 // steer count of an abandoned call cover the activation with its steer. A
 // skill that fails to load shows its failure card and the steer is still
@@ -169,14 +169,27 @@ func (w *toolOrchestrationLLM) recordReasoningBlocks(ctx context.Context, sink *
 // The activation is a persisted meta message, not an ephemeral one: the steer
 // that brought it is persisted at that point of the conversation, and a
 // mid-turn compaction counts the delivery's messages by position.
-func (w *toolOrchestrationLLM) steerMessages(ctx context.Context, entries []TurnInputEntry) []llm.Message {
+//
+// What the load publishes is held back rather than emitted here: the Skill card
+// belongs with the delivery, not with the load (see publishSteerOnCommit), so
+// the person's message is drawn first. The held step events come back with the
+// messages for the caller to register on the delivery.
+func (w *toolOrchestrationLLM) steerMessages(ctx context.Context, entries []TurnInputEntry) ([]llm.Message, []tool.StepEvent) {
+	// The Skill card is published with the delivery, not with the load (see
+	// publishSteerOnCommit): the person's message is drawn first and the
+	// activation it caused after it — the order a turn that starts with the
+	// command draws (the user card at submission, the Skill card in preload).
+	// A load the call rolls back showed no card, so the attempt that finally
+	// carries the steer is the one that shows it, once.
+	var held []tool.StepEvent
+	loadCtx := tool.WithStepHook(ctx, func(_ context.Context, evt tool.StepEvent) { held = append(held, evt) })
 	out := make([]llm.Message, 0, len(entries))
 	for i, entry := range entries {
 		name, path := strings.TrimSpace(entry.SkillName), strings.TrimSpace(entry.SkillPath)
 		if name != "" && path != "" {
 			stepID := fmt.Sprintf("skill-steer-%d-%d", i, time.Now().UnixNano())
 			selection := explicitSkillSelection{SkillName: name, SkillPath: path}
-			if activation, err := loadExplicitSkill(ctx, w.state, selection, stepID); err == nil {
+			if activation, err := loadExplicitSkill(loadCtx, w.state, selection, stepID); err == nil {
 				msg := explicitSkillActivationMessage(activation)
 				msg.Ephemeral = false
 				out = append(out, msg)
@@ -184,19 +197,51 @@ func (w *toolOrchestrationLLM) steerMessages(ctx context.Context, entries []Turn
 		}
 		out = append(out, steerMessage(entry))
 	}
-	return out
+	return out, held
+}
+
+// publishSteerOnCommit registers what a skill-carrying delivery publishes once
+// it commits, in this order: the transcript first, so the user's row is on
+// disk before the Skill card's events — a replay anchors the card after the
+// latest user row no later than the event (skillEventAnchorPosition), which is
+// the steer's own row only if that row landed first; then the held step events,
+// so the card is drawn ahead of the call's output. A delivery that rolls back
+// runs neither: nothing of a load the call abandoned is written.
+//
+// The flush runs on the stream goroutine that committed, while the loop is
+// parked inside its model call; AppendMessageSequenceForRun is the same
+// transactional reconcile every block-end flush uses.
+func (w *toolOrchestrationLLM) publishSteerOnCommit(ctx context.Context, delivery *SteerDelivery, transcript *transcriptProgress, session *[]llm.Message, model string, held []tool.StepEvent) {
+	if len(held) == 0 {
+		return
+	}
+	step := tool.StepHookFromContext(ctx, w.state)
+	delivery.OnCommit(func() {
+		transcript.flush(context.WithoutCancel(ctx), *session, model, nil)
+		if step == nil {
+			return
+		}
+		for _, evt := range held {
+			step(ctx, evt)
+		}
+	})
 }
 
 // steerMessage is the steer itself, as the model reads it. A steer written on
 // the person's behalf — another local session's peer message — is marked meta
 // and keeps its origin: the model reads it as context, and the surface that
 // replays the run can say where it came from.
+//
+// The line the person typed rides along as DisplayText, persistence metadata
+// only: a skill command steers with just the request in its parts, and a replay
+// must draw the command.
 func steerMessage(entry TurnInputEntry) llm.Message {
 	msg := llm.UserMessage(entry.Parts...)
 	if origin := strings.TrimSpace(entry.Origin); origin != "" {
 		msg.IsMeta = true
 		msg.Origin = origin
 	}
+	msg.DisplayText = strings.TrimSpace(entry.Display)
 	return msg
 }
 
@@ -674,9 +719,11 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 			transcript.flush(context.WithoutCancel(ctx), session, modelForTranscript(), nil)
 			if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
 				sessionBeforeSteers = len(session)
-				session = append(session, w.steerMessages(ctx, delivery.Entries())...)
+				msgs, held := w.steerMessages(ctx, delivery.Entries())
+				session = append(session, msgs...)
 				inFlightSteers = delivery
 				partialCapture.Set(session)
+				w.publishSteerOnCommit(ctx, delivery, transcript, &session, modelForTranscript(), held)
 				delivery.CommitNow()
 			}
 			continue
@@ -753,7 +800,9 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 				if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
 					inFlightSteers = delivery
 					sessionBeforeSteers = len(session)
-					session = append(session, w.steerMessages(ctx, delivery.Entries())...)
+					msgs, held := w.steerMessages(ctx, delivery.Entries())
+					session = append(session, msgs...)
+					w.publishSteerOnCommit(ctx, delivery, transcript, &session, modelForTranscript(), held)
 					delivery.CommitNow()
 					continue
 				}
@@ -908,9 +957,11 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 					noteResponseCompleted()
 					heldAnswer = res
 					sessionBeforeSteers = len(session)
-					session = append(session, w.steerMessages(ctx, delivery.Entries())...)
+					msgs, held := w.steerMessages(ctx, delivery.Entries())
+					session = append(session, msgs...)
 					inFlightSteers = delivery
 					partialCapture.Set(session)
+					w.publishSteerOnCommit(ctx, delivery, transcript, &session, modelForTranscript(), held)
 					delivery.CommitNow()
 					continue
 				}
@@ -1023,8 +1074,10 @@ func (w *toolOrchestrationLLM) Execute(ctx context.Context, messages []llm.Messa
 		if delivery := TurnInputRuntimeFromContext(ctx).BeginSteerDelivery(ctx); delivery != nil {
 			inFlightSteers = delivery
 			sessionBeforeSteers = len(session)
-			session = append(session, w.steerMessages(ctx, delivery.Entries())...)
+			msgs, held := w.steerMessages(ctx, delivery.Entries())
+			session = append(session, msgs...)
 			partialCapture.Set(session)
+			w.publishSteerOnCommit(ctx, delivery, transcript, &session, modelForTranscript(), held)
 			delivery.CommitNow()
 		}
 	}

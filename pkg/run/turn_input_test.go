@@ -874,7 +874,7 @@ func TestInputQueuePeerOriginReachesTheModel(t *testing.T) {
 		t.Fatalf("entry origin = %q, want %q", entries[0].Origin, state.MessageOriginPeer)
 	}
 	var w toolOrchestrationLLM
-	msgs := w.steerMessages(context.Background(), entries)
+	msgs, _ := w.steerMessages(context.Background(), entries)
 	if len(msgs) != 1 {
 		t.Fatalf("steerMessages produced %d messages, want 1", len(msgs))
 	}
@@ -892,9 +892,29 @@ func TestInputQueuePeerOriginReachesTheModel(t *testing.T) {
 	if !q.Steer(Input{Text: "typed here"}) {
 		t.Fatal("the typed message did not steer")
 	}
-	plain := w.steerMessages(context.Background(), rt.DrainSteers())
+	plain, _ := w.steerMessages(context.Background(), rt.DrainSteers())
 	if len(plain) != 1 || plain[0].IsMeta || plain[0].Origin != "" {
 		t.Fatalf("typed steer = %+v, want a plain user message", plain)
+	}
+}
+
+// A steer keeps the line its sender wrote: the queue holds it while the message
+// waits and the model call's delivery carries it, so a surface draws the message
+// as typed rather than as the parts the model reads.
+func TestSteerCarriesItsDisplayTextToTheModelCall(t *testing.T) {
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	if !q.Steer(Input{Text: "/probe go", Display: "/probe go", Parts: []llm.ContentPart{llm.Text("go")}}) {
+		t.Fatal("the skill command did not steer")
+	}
+	snapshot := rt.Snapshot()
+	if len(snapshot) != 1 || snapshot[0].Display != "/probe go" {
+		t.Fatalf("snapshot = %+v, want the line as typed", snapshot)
+	}
+	entries := rt.BeginSteerDelivery(context.Background()).Entries()
+	if len(entries) != 1 || entries[0].Display != "/probe go" {
+		t.Fatalf("delivery entries = %+v, want the line as typed", entries)
 	}
 }
 

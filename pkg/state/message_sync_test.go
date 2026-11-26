@@ -35,6 +35,42 @@ func TestAppendMessageSequenceAppendsOnlyNewSuffix(t *testing.T) {
 	}
 }
 
+// A steer typed as a skill command keeps the line the person typed as its
+// stored user row, while the parts stay what the model reads: a replay draws
+// the command, and the model context stays the request.
+func TestAppendMessageSequenceKeepsTheTypedLineAsUserRowContent(t *testing.T) {
+	ctx := context.Background()
+	s := NewSessionStore(openSessionDB(t), "main")
+	steer := llm.UserMessage(llm.Text("tighten it"))
+	steer.DisplayText = "/probe-skill tighten it"
+	canonical := []llm.Message{
+		llm.UserMessage(llm.Text("go")),
+		llm.AssistantMessage([]llm.ContentPart{llm.Text("answer")}),
+		steer,
+	}
+	if err := s.AppendMessageSequence(ctx, "s", canonical, "model", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendMessageSequence(ctx, "s", canonical, "model", ""); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	if err := s.DB().QueryRow(dbx.Rebind(dbx.DialectOf(s.DB()),
+		`SELECT content FROM fb_messages WHERE session_id=? AND role='user' ORDER BY id DESC LIMIT 1`), "s").Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if content != "/probe-skill tighten it" {
+		t.Fatalf("stored user row = %q, want the line as typed", content)
+	}
+	got, err := s.ListTranscriptMessages(ctx, "s", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 || got[2].TextContent() != "tighten it" {
+		t.Fatalf("messages=%+v want three ending with the steer's own words", got)
+	}
+}
+
 func TestAppendMessageSequenceUnderstandsOpaqueCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	s := NewSessionStore(openSessionDB(t), "main")

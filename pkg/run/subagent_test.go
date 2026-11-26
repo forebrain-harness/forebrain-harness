@@ -5571,6 +5571,10 @@ type steerableSubagentExecutor struct {
 	st        *toolpkg.State
 	readTool  *llm.Tool
 	steerText string
+	// steerWithSkill, when set, queues the steer the way a view does for a line
+	// typed as a skill command: the skill rides on the input and the parts carry
+	// only the request the command expanded into.
+	steerWithSkill string
 
 	mu       sync.Mutex
 	requests [][]llm.Message
@@ -5578,7 +5582,17 @@ type steerableSubagentExecutor struct {
 
 func (e *steerableSubagentExecutor) RunSubagentExec(ctx context.Context, req SubagentExecRequest) (string, error) {
 	if q := e.ctrl.SessionQueue(req.WorkerSessionID); q != nil {
-		q.Steer(Input{Text: e.steerText})
+		in := Input{Text: e.steerText}
+		if e.steerWithSkill != "" {
+			in = Input{
+				Text:      "/probe-skill " + e.steerText,
+				Display:   "/probe-skill " + e.steerText,
+				Parts:     []llm.ContentPart{llm.Text(e.steerText)},
+				SkillName: "probe-skill",
+				SkillPath: e.steerWithSkill,
+			}
+		}
+		q.Steer(in)
 	}
 	inner := &steeringScriptLLM{}
 	if _, err := wrapToolOrchestrationLLM(inner, e.st).Execute(ctx,
@@ -5964,6 +5978,100 @@ func TestSubagentReceivesASteerAtItsNextToolBoundary(t *testing.T) {
 	}
 	if !primaryRt.HasSteers() {
 		t.Fatal("the primary agent's steer must stay queued; the subagent drained it")
+	}
+}
+
+// orderedStepLog collects, under one lock, the step events a turn publishes and
+// the events its surfaces receive, so a test can assert their order.
+type orderedStepLog struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (l *orderedStepLog) add(entry string) {
+	l.mu.Lock()
+	l.order = append(l.order, entry)
+	l.mu.Unlock()
+}
+
+func (l *orderedStepLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.order...)
+}
+
+// orderedChannelProbe is a channelEventProbe that also records every published
+// event into the shared order log.
+type orderedChannelProbe struct {
+	*channelEventProbe
+	log *orderedStepLog
+}
+
+func (p *orderedChannelProbe) Publish(ctx context.Context, evt event.RunEvent) error {
+	p.log.add("event:" + evt.Type)
+	return p.channelEventProbe.Publish(ctx, evt)
+}
+
+// A skill-carrying steer in a subagent's view draws the person's message before
+// the Skill card it caused, and the message reads as they typed it.
+func TestSubagentSkillSteerReadsAsTypedBeforeItsSkillCard(t *testing.T) {
+	fix := newPersistenceFixture(t, "worker system")
+	owner := fix.fac.Owner
+	owner.Control = NewController()
+	probe := &orderedChannelProbe{channelEventProbe: &channelEventProbe{}, log: &orderedStepLog{}}
+	owner.Events = probe
+	fix.ensureConversation(t, "conv-skill-steer")
+
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	type readInput struct {
+		FilePath string `json:"file_path"`
+	}
+	readTool, err := llm.NewTool("read_file", "read", func(_ context.Context, in *readInput) (string, error) {
+		return in.FilePath, nil
+	})
+	if err != nil {
+		t.Fatalf("read_file tool: %v", err)
+	}
+	ex := &steerableSubagentExecutor{ctrl: owner.Control, st: st, readTool: readTool,
+		steerText: "adjust approach", steerWithSkill: writeProbeSkill(t)}
+	owner.SubagentExecutor = ex
+
+	primaryRt := NewTurnInputRuntime()
+	ctx := toolpkg.WithStepHook(
+		WithTurnInputRuntime(
+			toolpkg.WithRunID(llm.WithAgentSessionID(context.Background(), "conv-skill-steer"), "parent-1"),
+			primaryRt,
+		),
+		func(_ context.Context, evt toolpkg.StepEvent) {
+			probe.log.add("step:" + evt.ToolName + ":" + string(evt.Kind))
+		})
+	if _, err := execGeneralSubagent(ctx, fix.fac, "task-skill-steer", "short title", "go", "explore", ""); err != nil {
+		t.Fatalf("execGeneralSubagent: %v", err)
+	}
+
+	delivered := probe.inputDelivered()
+	if len(delivered) != 1 || delivered[0].Text != "/probe-skill adjust approach" {
+		t.Fatalf("subagent_input_delivered = %+v, want the line as typed", delivered)
+	}
+	deliveredAt, cardAt := -1, -1
+	for i, entry := range probe.log.snapshot() {
+		switch entry {
+		case "event:" + event.RunEventSubagentInputDelivered:
+			if deliveredAt < 0 {
+				deliveredAt = i
+			}
+		case "step:skill:" + event.RunEventToolStarted:
+			if cardAt < 0 {
+				cardAt = i
+			}
+		}
+	}
+	if deliveredAt < 0 || cardAt < 0 {
+		t.Fatalf("order = %v, want both the delivered message and the Skill card", probe.log.snapshot())
+	}
+	if deliveredAt > cardAt {
+		t.Fatalf("order = %v, want the person's message before the Skill card", probe.log.snapshot())
 	}
 }
 
@@ -10386,8 +10494,9 @@ func TestSubagentDeliveredPayloadLeavesTheUsersOwnMessageUnmarked(t *testing.T) 
 	// What a subagent's own view sends: the person's words in the parts, the
 	// preview line the queue keeps in the text.
 	if _, err := SendToSubagent(context.Background(), owner, SubagentSurface{}, conv, "task-origin-user", Input{
-		Text:  "go on take your time",
-		Parts: []llm.ContentPart{llm.Text("go on\ntake your time")},
+		Text:    "go on take your time",
+		Display: "go on\ntake your time",
+		Parts:   []llm.ContentPart{llm.Text("go on\ntake your time")},
 	}); err != nil {
 		t.Fatalf("message to the paused subagent: %v", err)
 	}

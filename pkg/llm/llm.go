@@ -336,6 +336,13 @@ type Message struct {
 	// serialize it into a request. The model is sent exactly what the same text
 	// typed by hand would send.
 	Origin string `json:"origin,omitempty"`
+	// DisplayText is what the person typed, when it differs from the text the
+	// model reads — a skill command's line against the request it expanded
+	// into. It is persistence metadata only, like Origin: the user row's
+	// content column carries it so a replay shows the command the person
+	// entered, while PartsJSON keeps the model's parts. No provider adapter
+	// may read it or serialize it into a request.
+	DisplayText string `json:"display_text,omitempty"`
 	// IsMeta marks a user-role message as a meta/attachment message (e.g.
 	// plan-mode reminders, project-context addenda) rather than genuine user
 	// input. Meta messages are persisted to the transcript and treated as context, but are not

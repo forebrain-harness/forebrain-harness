@@ -6267,6 +6267,80 @@ func TestSteerTypedAsASkillCommandActivatesTheSkill(t *testing.T) {
 	}
 }
 
+// A skill-carrying steer is reported delivered before its Skill card: the
+// person's message is drawn first and the activation it caused after it — the
+// order a turn that starts with the command draws (the user card at
+// submission, the Skill card in preload).
+func TestSkillSteerIsDeliveredBeforeItsSkillCard(t *testing.T) {
+	skillPath := writeProbeSkill(t)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{Text: "/probe-skill tighten it", Display: "/probe-skill tighten it",
+		Parts: []llm.ContentPart{llm.Text("tighten it")}, SkillName: "probe-skill", SkillPath: skillPath})
+
+	var mu sync.Mutex
+	var order []string
+	rt.AddChangeHook(func([]TurnInputEntry) {
+		mu.Lock()
+		order = append(order, "delivered")
+		mu.Unlock()
+	})
+	ctx := toolpkg.WithStepHook(WithTurnInputRuntime(context.Background(), rt),
+		func(_ context.Context, evt toolpkg.StepEvent) {
+			mu.Lock()
+			order = append(order, "step:"+evt.ToolName+":"+string(evt.Kind))
+			mu.Unlock()
+		})
+
+	inner := &toolThenAnswerLLM{}
+	if _, err := wrapToolOrchestrationLLM(inner, st).Execute(ctx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{readFileTestTool(t)}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), order...)
+	mu.Unlock()
+	deliveredAt, startedAt, completed := -1, -1, 0
+	for i, entry := range got {
+		switch entry {
+		case "delivered":
+			if deliveredAt < 0 {
+				deliveredAt = i
+			}
+		case "step:skill:" + event.RunEventToolStarted:
+			if startedAt < 0 {
+				startedAt = i
+			}
+		case "step:skill:" + event.RunEventToolCompleted:
+			completed++
+		}
+	}
+	if deliveredAt < 0 || startedAt < 0 {
+		t.Fatalf("order = %v, want both the delivery and the skill card", got)
+	}
+	if deliveredAt > startedAt {
+		t.Fatalf("order = %v, want the delivery reported before the Skill card", got)
+	}
+	if completed != 1 {
+		t.Fatalf("order = %v, want exactly one skill card completion", got)
+	}
+
+	// The model reads the request the command expanded into, and the row a
+	// replay draws keeps the line as typed.
+	second := inner.calls[1]
+	last := second[len(second)-1]
+	if last.TextContent() != "tighten it" {
+		t.Fatalf("last message = %q, want the request the command expanded into", last.TextContent())
+	}
+	if last.DisplayText != "/probe-skill tighten it" {
+		t.Fatalf("last message display = %q, want the line as typed", last.DisplayText)
+	}
+}
+
 // A steer whose skill fails to load still reaches the model: the failure shows
 // as the skill's own failed card, not as a lost message.
 func TestSteerWhoseSkillFailsToLoadIsStillDelivered(t *testing.T) {
@@ -6307,6 +6381,195 @@ func TestSteerWhoseSkillFailsToLoadIsStillDelivered(t *testing.T) {
 	}
 	if failed == nil || failed.Error == "" {
 		t.Fatalf("the failed load drew no failed skill card: %#v", steps)
+	}
+}
+
+// recordingProgressStore logs each block-end write into the shared order log
+// before handing it to the real store, so a test can place a transcript write
+// against the events around it.
+type recordingProgressStore struct {
+	*state.SessionStore
+	log *orderedStepLog
+}
+
+func (r *recordingProgressStore) AppendMessageSequenceForRun(ctx context.Context, sessionID, runID string, messages []llm.Message, model, usageJSON string) error {
+	roles := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		roles = append(roles, msg.Role)
+	}
+	r.log.add("flush:" + strings.Join(roles, ","))
+	return r.SessionStore.AppendMessageSequenceForRun(ctx, sessionID, runID, messages, model, usageJSON)
+}
+
+// A skill-carrying steer is on disk before its Skill card is published: a
+// replay anchors the card after the latest user row no later than the event,
+// which is the steer's own row only if that row landed first.
+func TestSkillSteerRowIsWrittenBeforeItsSkillCard(t *testing.T) {
+	ctx := context.Background()
+	const sid = "skill-steer-flush"
+	store, runID := newProgressStore(t, sid)
+	skillPath := writeProbeSkill(t)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{
+		Text: "/probe-skill tighten it", Display: "/probe-skill tighten it",
+		Parts:     []llm.ContentPart{llm.Text("tighten it")},
+		SkillName: "probe-skill", SkillPath: skillPath,
+	})
+
+	log := &orderedStepLog{}
+	rt.AddChangeHook(func([]TurnInputEntry) { log.add("delivered") })
+	execCtx := WithTurnInputRuntime(
+		toolpkg.WithStepHook(llm.WithAgentSessionID(toolpkg.WithRunID(ctx, runID), sid),
+			func(_ context.Context, evt toolpkg.StepEvent) {
+				log.add("step:" + evt.ToolName + ":" + string(evt.Kind))
+			}), rt)
+	rec := &recordingProgressStore{SessionStore: store, log: log}
+	w := wrapToolOrchestrationLLMWithProgress(&toolThenAnswerLLM{}, st, "", rec,
+		func(context.Context) string { return "gpt-main" })
+	if _, err := w.Execute(execCtx,
+		[]llm.Message{llm.UserMessage(llm.Text("go"))}, []*llm.Tool{readFileTestTool(t)}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	deliveredAt, flushAt, cardAt := -1, -1, -1
+	for i, entry := range log.snapshot() {
+		switch {
+		case entry == "delivered":
+			if deliveredAt < 0 {
+				deliveredAt = i
+			}
+		case cardAt < 0 && entry == "step:skill:"+event.RunEventToolStarted:
+			cardAt = i
+		}
+	}
+	if deliveredAt < 0 || cardAt < 0 {
+		t.Fatalf("order = %v, want the delivery and the Skill card", log.snapshot())
+	}
+	// The write that puts the steer's own row on disk is the one right before
+	// the card; an earlier block-end write carrying the turn's first user row
+	// is not it.
+	for i, entry := range log.snapshot()[:cardAt] {
+		if strings.HasPrefix(entry, "flush:") && strings.Contains(entry, llm.RoleUser) {
+			flushAt = i
+		}
+	}
+	if flushAt < 0 {
+		t.Fatalf("order = %v, want a user row written before the Skill card", log.snapshot())
+	}
+	if !(deliveredAt < flushAt && flushAt < cardAt) {
+		t.Fatalf("order = %v, want delivered < flush(user) < step:skill:tool_call_started", log.snapshot())
+	}
+
+	// Two rows are the person's own — the turn's opener and the steer. The skill
+	// activation rides as a meta user row, which a replay does not draw as one.
+	rows, err := store.ListAllMessages(ctx, sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	person := 0
+	typed := ""
+	for _, row := range rows {
+		if row.Role == llm.RoleUser && !strings.Contains(row.PartsJSON, `"type":"is_meta"`) {
+			person++
+			typed = row.Content
+		}
+	}
+	if person != 2 {
+		t.Fatalf("user rows = %d, want the opener and the steer (rows: %v)", person, transcriptRoles(t, store, sid))
+	}
+	if typed != "/probe-skill tighten it" {
+		t.Fatalf("steer row content = %q, want the line as typed", typed)
+	}
+}
+
+// A skill-carrying steer whose call rolls back shows no card: the load the
+// abandoned call made is not written, and the attempt that finally carries the
+// steer shows its card once, after the message.
+func TestSkillSteerCardIsShownOnceAfterARolledBackCall(t *testing.T) {
+	const sid = "skill-steer-rollback"
+	store, runID := newProgressStore(t, sid)
+	skillPath := writeProbeSkill(t)
+	st := toolpkg.NewState(t.TempDir())
+	st.RegisterToolMeta(event.ToolMeta{Name: "read_file", ReadOnly: true, ConcurrencySafe: true})
+	q := NewInputQueue()
+	rt := NewTurnInputRuntime()
+	q.Attach(rt)
+	q.Steer(Input{
+		Text: "/probe-skill tighten it", Display: "/probe-skill tighten it",
+		Parts:     []llm.ContentPart{llm.Text("tighten it")},
+		SkillName: "probe-skill", SkillPath: skillPath,
+	})
+
+	log := &orderedStepLog{}
+	rt.AddChangeHook(func([]TurnInputEntry) { log.add("delivered") })
+	execCtx := WithTurnInputRuntime(
+		toolpkg.WithStepHook(llm.WithAgentSessionID(toolpkg.WithRunID(context.Background(), runID), sid),
+			func(_ context.Context, evt toolpkg.StepEvent) {
+				log.add("step:" + evt.ToolName + ":" + string(evt.Kind))
+			}), rt)
+	rec := &recordingProgressStore{SessionStore: store, log: log}
+	w := wrapToolOrchestrationLLMWithProgress(&failAfterToolCallLLM{}, st, "", rec,
+		func(context.Context) string { return "gpt-main" })
+	msgs := []llm.Message{llm.UserMessage(llm.Text("go"))}
+
+	// The failing call never established delivery: no card, and the steer is
+	// back in the queue for whoever carries it next.
+	if _, err := w.Execute(execCtx, msgs, []*llm.Tool{readFileTestTool(t)}); err == nil {
+		t.Fatal("Execute: want the failing call's error")
+	}
+	countSkillSteps := func(kind string) int {
+		n := 0
+		for _, entry := range log.snapshot() {
+			if entry == "step:skill:"+kind {
+				n++
+			}
+		}
+		return n
+	}
+	if started := countSkillSteps(event.RunEventToolStarted); started != 0 {
+		t.Fatalf("a rolled-back call drew %d Skill cards, want none: %v", started, log.snapshot())
+	}
+	if len(q.Preview().Steers) != 1 {
+		t.Fatalf("queue steers = %v, want the rolled-back steer back in the queue", q.Preview().Steers)
+	}
+	rows, err := store.ListAllMessages(context.Background(), sid, 0)
+	if err != nil {
+		t.Fatalf("list rows: %v", err)
+	}
+	for _, row := range rows {
+		if strings.Contains(row.PartsJSON, "tighten it") {
+			t.Fatalf("a rolled-back steer reached the transcript: %+v", row)
+		}
+	}
+
+	// The next attempt carries it: one card, drawn after the person's message.
+	second := &toolThenAnswerLLM{}
+	w2 := wrapToolOrchestrationLLMWithProgress(second, st, "", rec,
+		func(context.Context) string { return "gpt-main" })
+	if _, err := w2.Execute(execCtx, msgs, []*llm.Tool{readFileTestTool(t)}); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if started := countSkillSteps(event.RunEventToolStarted); started != 1 {
+		t.Fatalf("Skill cards = %d, want exactly one: %v", started, log.snapshot())
+	}
+	if completed := countSkillSteps(event.RunEventToolCompleted); completed != 1 {
+		t.Fatalf("completed Skill cards = %d, want exactly one: %v", completed, log.snapshot())
+	}
+	deliveredAt, cardAt := -1, -1
+	for i, entry := range log.snapshot() {
+		switch {
+		case entry == "delivered":
+			deliveredAt = i
+		case cardAt < 0 && entry == "step:skill:"+event.RunEventToolStarted:
+			cardAt = i
+		}
+	}
+	if deliveredAt < 0 || cardAt < 0 || deliveredAt > cardAt {
+		t.Fatalf("order = %v, want the message before the card", log.snapshot())
 	}
 }
 
