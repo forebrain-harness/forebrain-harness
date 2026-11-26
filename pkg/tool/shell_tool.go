@@ -1918,9 +1918,12 @@ const (
 // A write the classifier proves is still not a refusal when it lands in OS temp
 // scratch: downloading, unpacking and inspecting an archive is investigation,
 // not implementation, and plan mode was charging the agent a refusal for it
-// (owner ruling 2026-11-26). cmd and cwd are what the scratch proof reads; it
-// runs before the refused tier, because a command that only touches the
-// disposable regions is not a project write at all.
+// (owner ruling 2026-11-26). cmd and cwd are what the scratch proof reads, and
+// its four states are the gate's three answers: every write placed inside the
+// regions is Allow, nothing proven to write is Ask, and a write proven outside
+// them - or one whose target nothing can read - is Refuse. The verdict answers
+// for the whole line, including the write a redirect places and the reader
+// beside it that only asks.
 func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safety.ShellMutation, cmd, cwd string) PlanModeShellGateDecision {
 	if mutation == safety.ShellMutationReadOnly {
 		return PlanModeShellAllow
@@ -1934,13 +1937,18 @@ func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safe
 	if ApprovedActionIDFromContext(ctx) != "" {
 		return PlanModeShellAllow
 	}
-	if safety.ShellWritesConfinedToRoots(cmd, safety.ShellScratchRoots(), cwd) {
+	// The scratch proof answers for the whole line, one state per behaviour.
+	// Its answer is the gate's: a line whose writes it placed is not a project
+	// write at all, whatever the tier's floor says about the structure around
+	// them.
+	switch safety.ShellScratchWriteVerdict(cmd, safety.ShellScratchRoots(), cwd) {
+	case safety.ShellScratchWritesClean:
 		return PlanModeShellAllow
-	}
-	if mutation == safety.ShellMutationWrites {
+	case safety.ShellScratchWritesUnread:
+		return PlanModeShellAsk
+	default: // Outside, Unplaceable
 		return PlanModeShellRefuse
 	}
-	return PlanModeShellAsk
 }
 
 // PlanModeShellGateForCommand is planModeShellGate for callers that hold only
@@ -1957,10 +1965,10 @@ func planModeShellGate(ctx context.Context, dangerFullAccess bool, mutation safe
 //
 // The scratch proof runs here with no working directory, because this caller has
 // none: a command that names its scratch target outright (or cd's into it)
-// answers Allow, while one that would write relatively has no cwd to resolve
-// against and falls through to today's answer - the boundary then defers to the
-// shell tool, which does know the directory. That is a missing shortcut, never a
-// prompt the tool would not have raised itself.
+// answers Clean, while one that would write relatively cannot place its target
+// and answers outside the regions. Both answers agree with the tool's own: it
+// defers to the shell tool for anything that is not Allow, and the shell tool
+// knows the directory.
 func PlanModeShellGateForCommand(ctx context.Context, dangerFullAccess bool, cmd string) PlanModeShellGateDecision {
 	return planModeShellGate(ctx, dangerFullAccess, safety.ClassifyShellCommand(cmd, nil, ""), cmd, "")
 }

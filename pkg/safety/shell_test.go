@@ -514,6 +514,7 @@ func TestDangerousCommandUnwrapsWrappers(t *testing.T) {
 		"trap 'rm -rf /tmp/x' EXIT",
 		"trap -- 'rm -rf /tmp/x' EXIT",
 		"sh -c 'rm -rf /tmp/x'",
+		"sh -lc 'rm -rf /tmp/x'",
 		"bash -c \"rm -rf /tmp/x\"",
 		"/bin/sh -c 'rm -rf /tmp/x'",
 		"sudo sh -c 'rm -rf /tmp/x'",
@@ -1070,11 +1071,12 @@ func TestSplitShellClassifyClausesRecordsRedirectsWithoutMovingTiers(t *testing.
 		}
 	}
 
-	// A heredoc is flagged, and doubt survives a redirection's higher floor:
-	// that combination is what the scratch proof refuses on.
+	// A heredoc whose body only feeds a reader is data: the body is skipped, so
+	// the line is one clause and nothing about it is flagged. doubt survives a
+	// redirection's higher floor, which is what a tier reader has to see.
 	heredocClauses, _, heredocDoubt := splitShellClassifyClauses("cat <<EOF > /tmp/x\nmkdir /tmp/y\nEOF")
-	if len(heredocClauses) == 0 || !heredocClauses[0].Heredoc {
-		t.Fatalf("heredoc flag missing: %#v", heredocClauses)
+	if len(heredocClauses) != 1 || heredocClauses[0].Heredoc {
+		t.Fatalf("a data body must be skipped, not flagged: %#v", heredocClauses)
 	}
 	if heredocDoubt {
 		t.Fatal("a heredoc is not an expansion")
@@ -1084,6 +1086,341 @@ func TestSplitShellClassifyClausesRecordsRedirectsWithoutMovingTiers(t *testing.
 	}
 	if got := ClassifyShellCommand("echo $(date) > /tmp/x", nil, ""); got != ShellMutationWrites {
 		t.Fatalf("expansion under a redirection = %s, want writes", got)
+	}
+}
+
+// The go tool's flag that decides where a build operation writes is compared by
+// its exact name. A prefix test reads "-overlay" as "-o" and refuses a test run
+// that writes nothing; the profile flags and -modfile really do write, and are
+// refused.
+func TestClassifyGoCommandFlagTiers(t *testing.T) {
+	writes := []string{
+		"go test -c ./pkg/tool",
+		"go test -o /tmp/t ./pkg/tool",
+		"go test -o=/tmp/t ./pkg/tool",
+		"go test -outputdir ./out ./...",
+		"go test -outputdir=./out ./...",
+		"go test -coverprofile pkg/tool/c.out ./pkg/tool",
+		"go test -cpuprofile pkg/tool/cpu.out ./pkg/tool",
+		"go test -memprofile pkg/tool/mem.out ./pkg/tool",
+		"go test -mutexprofile pkg/tool/mutex.out ./pkg/tool",
+		"go test -blockprofile pkg/tool/block.out ./pkg/tool",
+		"go test -trace pkg/tool/trace.out ./pkg/tool",
+		"go test -modfile /tmp/go.mod ./pkg/tool",
+	}
+	for _, cmd := range writes {
+		if got := ClassifyShellCommand(cmd, nil, ""); got != ShellMutationWrites {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want writes", cmd, got)
+		}
+	}
+	// -overlay names a JSON config that build operations read; it writes nothing
+	// to the path it names.
+	unproven := []string{
+		"go test -overlay=/tmp/x/overlay.json ./pkg/tui -count=1",
+		"go test -overlay /tmp/x/overlay.json ./pkg/tui",
+		"go test -tags fts5 -overlay=/tmp/x/overlay.json ./pkg/tui -count=1",
+		"go test ./pkg/tool",
+	}
+	for _, cmd := range unproven {
+		if got := ClassifyShellCommand(cmd, nil, ""); got != ShellMutationUnproven {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want unproven", cmd, got)
+		}
+	}
+}
+
+// `sh -c <script>` hides the command that runs in an operand, so the tier has to
+// be the script's tier - including the flags-before-`-c` and clustered forms,
+// because `-lc` is the same shell form as `-c`. Past the nesting cap the script
+// is a write: the proof stopped reading it.
+func TestClassifyShellCommandUnwrapsDashCScripts(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		cmd  string
+		want ShellMutation
+	}{
+		{"sh -c 'ls -la'", ShellMutationReadOnly},
+		{"sh -c 'rm -rf /tmp/x'", ShellMutationWrites},
+		{"sh -c 'rm -rf pkg/tool'", ShellMutationWrites},
+		{"bash -lc 'rm -rf pkg/tool'", ShellMutationWrites},
+		{"bash -lc 'go test ./pkg'", ShellMutationUnproven},
+		{"sh -ec 'rm -rf pkg'", ShellMutationWrites},
+		{`sh -c "sh -c 'rm -rf pkg'"`, ShellMutationWrites},
+		{"sh script.sh", ShellMutationUnproven},
+		{"sh -c 'true'", ShellMutationReadOnly},
+	}
+	for _, tt := range cases {
+		if got := ClassifyShellCommand(tt.cmd, []string{root}, root); got != tt.want {
+			t.Fatalf("ClassifyShellCommand(%q) = %s, want %s", tt.cmd, got, tt.want)
+		}
+	}
+	// Past the cap the proof stopped reading the script, so the answer is
+	// writes rather than a guess about what the layers below it do.
+	if got := shellScriptMutation("rm -rf pkg", []string{root}, root, shellScriptDepthCap+1); got != ShellMutationWrites {
+		t.Fatalf("a script past the depth cap = %s, want writes", got)
+	}
+	// One layer under the cap is still read, which is what makes the cap a bound
+	// rather than a refusal.
+	if got := shellScriptMutation("ls -la", []string{root}, root, shellScriptDepthCap); got != ShellMutationReadOnly {
+		t.Fatalf("a script at the depth cap = %s, want read-only", got)
+	}
+}
+
+// The clause facts are what the scratch proof reads instead of the flattened
+// text: the command word comes from the words the operators did not take, the
+// arguments follow it, every substitution source is recorded, and a grouping
+// token is flagged.
+func TestSplitShellClassifyClausesCommandFacts(t *testing.T) {
+	type fact struct {
+		text     string
+		command  string
+		args     string
+		subs     string
+		grouping bool
+	}
+	cases := []struct {
+		name string
+		cmd  string
+		want []fact
+	}{
+		{
+			// A redirection's target is not the command word, even when it
+			// looks like one, and the operator's own words do not become
+			// arguments.
+			name: "a redirect before the command",
+			cmd:  "> /tmp/cat sh -c 'rm -rf pkg/tool'",
+			want: []fact{{text: "/tmp/cat sh -c 'rm -rf pkg/tool'", command: "sh", args: "-c|rm -rf pkg/tool"}},
+		},
+		{
+			name: "a redirect target equal to a later word",
+			cmd:  "cmp /tmp/x /etc > /tmp/x",
+			want: []fact{{text: "cmp /tmp/x /etc  /tmp/x", command: "cmp", args: "/tmp/x|/etc"}},
+		},
+		{
+			name: "an env assignment is not the command",
+			cmd:  "CGO_ENABLED=1 go test ./pkg",
+			want: []fact{{text: "CGO_ENABLED=1 go test ./pkg", command: "go", args: "test|./pkg"}},
+		},
+		{
+			name: "a negation is not the command",
+			cmd:  "! sed -i '' s/a/b/ main.go",
+			want: []fact{{text: "! sed -i '' s/a/b/ main.go", command: "sed", args: "-i|s/a/b/|main.go"}},
+		},
+		{
+			name: "exec is not the command",
+			cmd:  "exec go test -c ./pkg/tool",
+			want: []fact{{text: "exec go test -c ./pkg/tool", command: "go", args: "test|-c|./pkg/tool"}},
+		},
+		{
+			name: "a reserved word is not the command",
+			cmd:  "if true; then rm -rf pkg/tool; fi",
+			want: []fact{
+				{text: "if true", command: "true"},
+				{text: "then rm -rf pkg/tool", command: "rm", args: "-rf|pkg/tool"},
+				{text: "fi"},
+			},
+		},
+		{
+			name: "a subshell puts its command out of reach",
+			cmd:  "(rm -rf pkg/tool)",
+			want: []fact{{text: "(rm -rf pkg/tool)", command: "rm", args: "-rf|pkg/tool", grouping: true}},
+		},
+		{
+			// The closing token belongs to a group that simply ends here, so it
+			// cannot move where this clause's write lands.
+			name: "a closing group token at the end of a clause",
+			cmd:  "(cd /tmp && echo hi > x)",
+			want: []fact{
+				{text: "(cd /tmp", command: "cd", args: "/tmp", grouping: true},
+				{text: "echo hi  x)", command: "echo", args: "hi"},
+			},
+		},
+		{
+			name: "a word-start tilde",
+			cmd:  "ls ~/.forebrain",
+			want: []fact{{text: "ls ~/.forebrain", command: "ls", args: "~/.forebrain", grouping: true}},
+		},
+		{
+			name: "a command word is a basename, lowercased",
+			cmd:  "/Bin/RM -rf /tmp/x",
+			want: []fact{{text: "/Bin/RM -rf /tmp/x", command: "rm", args: "-rf|/tmp/x"}},
+		},
+		{
+			name: "a substitution source is recorded",
+			cmd:  "echo $(rm -rf pkg) > /tmp/x",
+			want: []fact{{text: "echo $(rm -rf pkg)  /tmp/x", command: "echo", args: "$(rm -rf pkg)", subs: "rm -rf pkg"}},
+		},
+		{
+			name: "a nested substitution inside a parameter expansion",
+			cmd:  `echo "${x:-$(rm -rf pkg)}" > /tmp/y`,
+			want: []fact{{text: `echo "${x:-$(rm -rf pkg)}"  /tmp/y`, command: "echo", args: "${x:-$(rm -rf pkg)}", subs: "rm -rf pkg"}},
+		},
+		{
+			// ${ … } is a value, and what it contains is the substitution.
+			name: "a parameter expansion is not a substitution",
+			cmd:  `printf '%s' "$PWD" > /tmp/x`,
+			want: []fact{{text: `printf '%s' "$PWD"  /tmp/x`, command: "printf", args: "%s|$PWD"}},
+		},
+		{
+			name: "arithmetic keeps its own brackets out of grouping",
+			cmd:  "echo $((1+2)) > /tmp/x",
+			want: []fact{{text: "echo $((1+2))  /tmp/x", command: "echo", args: "$((1+2))", subs: "(1+2)"}},
+		},
+		{
+			name: "a trap action is shell source",
+			cmd:  "trap 'rm -rf pkg/tool' EXIT",
+			want: []fact{{text: "trap 'rm -rf pkg/tool' EXIT", command: "trap", args: "rm -rf pkg/tool|EXIT", subs: "rm -rf pkg/tool"}},
+		},
+		{
+			name: "a quoted substitution keeps its place in the word",
+			cmd:  "mkdir /tmp/x-$(date +%s)",
+			want: []fact{{text: "mkdir /tmp/x-$(date +%s)", command: "mkdir", args: "/tmp/x-$(date +%s)", subs: "date +%s"}},
+		},
+		{
+			name: "a CDPATH assignment is recorded",
+			cmd:  "CDPATH=/x cd tool",
+			want: []fact{{text: "CDPATH=/x cd tool", command: "cd", args: "tool"}},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			clauses, _, _ := splitShellClassifyClauses(tt.cmd)
+			if len(clauses) != len(tt.want) {
+				t.Fatalf("clauses = %#v, want %d", clauses, len(tt.want))
+			}
+			for i, want := range tt.want {
+				clause := clauses[i]
+				if clause.Text != want.text {
+					t.Fatalf("clause %d text = %q, want %q", i, clause.Text, want.text)
+				}
+				if clause.Command != want.command {
+					t.Fatalf("clause %d command = %q, want %q", i, clause.Command, want.command)
+				}
+				if got := strings.Join(clause.Args, "|"); got != want.args {
+					t.Fatalf("clause %d args = %q, want %q", i, got, want.args)
+				}
+				if got := strings.Join(clause.Substitutions, "|"); got != want.subs {
+					t.Fatalf("clause %d substitutions = %q, want %q", i, got, want.subs)
+				}
+				if clause.Grouping != want.grouping {
+					t.Fatalf("clause %d grouping = %v, want %v", i, clause.Grouping, want.grouping)
+				}
+			}
+		})
+	}
+
+	// The CDPATH fact is what stops a relative cd from being followed, so it has
+	// to reach the clause.
+	clauses, _, _ := splitShellClassifyClauses("CDPATH=/x/pkg cd tool")
+	if len(clauses) != 1 || !clauses[0].CDPATH {
+		t.Fatalf("CDPATH assignment was not recorded: %#v", clauses)
+	}
+}
+
+// A heredoc body is data when the whole line only feeds it to a reader, and
+// commands when it does not. Which of the two happened is what the flag on the
+// clause reports, and the body must never be skipped when anything about the
+// line could run it.
+func TestSplitShellClassifyClausesHeredocFacts(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  string
+		// clauses is the number of clauses the walker produced: a skipped body
+		// produces none.
+		clauses int
+		heredoc bool
+	}{
+		{
+			name:    "a quoted body feeding a scratch write",
+			cmd:     "cat > /tmp/x <<'EOF'\nrm -rf pkg/tool\nEOF",
+			clauses: 1,
+		},
+		{
+			name:    "an unquoted body holding no expansion",
+			cmd:     "cat <<EOF > /tmp/x\nmkdir /tmp/y\nEOF",
+			clauses: 1,
+		},
+		{
+			name:    "a body after a cd",
+			cmd:     "cd /tmp && cat <<'EOF'\nbody\nEOF",
+			clauses: 2,
+		},
+		{
+			name:    "a body piped to a reader",
+			cmd:     "cat <<'EOF' | head -1\nrm -rf pkg/tool\nEOF",
+			clauses: 2,
+		},
+		{
+			// The shell expands an unquoted body before cat sees it, so the
+			// body is commands.
+			name:    "an unquoted body that expands",
+			cmd:     "cat >> /tmp/x <<EOF\n$(rm -rf pkg/tool)\nEOF",
+			clauses: 3,
+			heredoc: true,
+		},
+		{
+			name:    "a body piped to a shell",
+			cmd:     "cat <<'EOF' | sh\nrm -rf pkg/tool\nEOF",
+			clauses: 4,
+			heredoc: true,
+		},
+		{
+			name:    "a shell reading a heredoc",
+			cmd:     "sh <<'EOF'\nrm -rf \"$d\"/pkg/tool\nEOF",
+			clauses: 3,
+			heredoc: true,
+		},
+		{
+			name:    "an interpreter reading a heredoc",
+			cmd:     "python3 - <<'EOF'\nprint(1)\nEOF",
+			clauses: 3,
+			heredoc: true,
+		},
+		{
+			// "<-" only strips tabs, so the delimiter is recognised with the
+			// tab removed.
+			name:    "tab stripping",
+			cmd:     "cat <<-EOF\n\tbody\n\tEOF",
+			clauses: 1,
+		},
+		{
+			// No terminator: the rest of the command is the body.
+			name:    "an unterminated body",
+			cmd:     "cat <<EOF\nbody\n",
+			clauses: 1,
+		},
+		{
+			// A delimiter with an expansion is not a word this walker can
+			// recognise in the body.
+			name:    "an expanded delimiter",
+			cmd:     "cat <<$D\nbody\nEOF",
+			clauses: 3,
+			heredoc: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			clauses, _, _ := splitShellClassifyClauses(tt.cmd)
+			if len(clauses) != tt.clauses {
+				t.Fatalf("%q produced %d clauses, want %d: %#v", tt.cmd, len(clauses), tt.clauses, clauses)
+			}
+			flagged := false
+			for _, clause := range clauses {
+				flagged = flagged || clause.Heredoc
+			}
+			if flagged != tt.heredoc {
+				t.Fatalf("%q heredoc flag = %v, want %v: %#v", tt.cmd, flagged, tt.heredoc, clauses)
+			}
+		})
+	}
+
+	// A herestring is not a heredoc: nothing follows the line, so no body is
+	// skipped and nothing is flagged.
+	clauses, _, _ := splitShellClassifyClauses("cat <<< hi > /tmp/x")
+	if len(clauses) != 1 || clauses[0].Heredoc {
+		t.Fatalf("a herestring must not be flagged as a heredoc: %#v", clauses)
+	}
+	if got := strings.Join(clauses[0].Args, "|"); got != "" {
+		t.Fatalf("a herestring operand is data, not an argument: %q", got)
 	}
 }
 

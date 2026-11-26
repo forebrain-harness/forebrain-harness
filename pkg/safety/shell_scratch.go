@@ -17,15 +17,14 @@ import (
 // nothing, execution efficiency and result quality first).
 //
 // Two files own the policy: this one defines the disposable regions and proves
-// that a command's writes land inside them; the seams that enforce it (the shell
-// gate, the read-only sandbox profile's write exceptions, GuardWrite) consult
-// them instead of describing them again.
+// where a command's writes land; the seams that enforce it (the shell gate, the
+// read-only sandbox profile's write exceptions, GuardWrite) consult them instead
+// of describing them again.
 //
 // This proof is deliberately not a tier of ClassifyShellCommand. That function
 // answers "does this line write at all", a three-state answer about structure;
 // this one answers "does everything it writes land in the scratch regions", a
-// question about named targets, and it has only two answers: confined, or not
-// read.
+// question about named targets, and it answers it one clause at a time.
 
 // ShellScratchRoots returns the OS regions a planning session may write: its own
 // temp directory and, on the platforms that have one, /tmp. The workspace-write
@@ -55,187 +54,361 @@ func ShellScratchRoots() []string {
 	return out
 }
 
-// ShellWritesConfinedToRoots reports whether every file this command line writes
+// ShellScratchWriteState is what the scratch proof proved about one command
+// line.
+//
+// The proof answers "does everything this line writes land in the scratch
+// regions", and it answers it with the four states such a question really has -
+// not with a boolean, which forced every unreadable clause to look like a proven
+// project write. The line's answer is its worst clause's, and the gate turns one
+// state into one behaviour, so nothing else has to guess what "not confined"
+// meant.
+type ShellScratchWriteState int
+
+const (
+	// ShellScratchWritesClean means every clause was read and everything it
+	// writes stays inside the regions.
+	ShellScratchWritesClean ShellScratchWriteState = iota
+	// ShellScratchWritesUnread means nothing is proven to write, but at least
+	// one clause is a command the classifier cannot read: a question for the
+	// operator, never a refusal.
+	ShellScratchWritesUnread
+	// ShellScratchWritesOutside means a write is proven to land outside every
+	// region.
+	ShellScratchWritesOutside
+	// ShellScratchWritesUnplaceable means a write exists whose target this
+	// proof cannot read: a grouping token, a heredoc body it could not skip, an
+	// unknown directory, a non-literal path, a substitution that writes.
+	ShellScratchWritesUnplaceable
+)
+
+// String names the state for a failure message.
+func (s ShellScratchWriteState) String() string {
+	switch s {
+	case ShellScratchWritesClean:
+		return "clean"
+	case ShellScratchWritesUnread:
+		return "unread"
+	case ShellScratchWritesOutside:
+		return "outside"
+	}
+	return "unplaceable"
+}
+
+// worseShellScratchWrite is the line's answer from two clauses' answers.
+func worseShellScratchWrite(a, b ShellScratchWriteState) ShellScratchWriteState {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ShellScratchWriteVerdict reports whether every file this command line writes
 // lands strictly inside one of roots.
 //
-// The answer is false whenever the proof cannot read a write, which is most of
-// the time: expansions, subshells, heredocs, an unknown command, an unknown flag
-// or an operand the whitelist below does not describe all end it. That is the
-// point - "cannot prove" must not become "may write".
+// The answer is Unread whenever nothing is proven to write but a clause cannot be
+// read, and Unplaceable whenever a write exists whose target the proof cannot
+// name: expansions, an unknown command with a redirect, an unknown flag, a
+// substitution that writes, a grouping token, a heredoc body it could not skip,
+// or a directory it stopped following. That is the point - "cannot prove" must
+// not become "may write", and it must not be reported as a proven project write
+// either.
+func ShellScratchWriteVerdict(cmd string, roots []string, cwd string) ShellScratchWriteState {
+	return shellScratchWriteVerdictDepth(cmd, roots, cwd, 0)
+}
 
-func ShellWritesConfinedToRoots(cmd string, roots []string, cwd string) bool {
+// shellScratchWriteVerdictDepth is ShellScratchWriteVerdict for a line read out
+// of a `sh -c` script, one layer down. Only the outermost line narrows the
+// regions against its cwd: a script runs in the directory the clause tracked,
+// which is usually inside the regions it may write.
+func shellScratchWriteVerdictDepth(cmd string, roots []string, cwd string, depth int) ShellScratchWriteState {
+	if depth > shellScriptDepthCap {
+		// The proof stopped reading the script, so it proves nothing about it.
+		return ShellScratchWritesUnplaceable
+	}
 	cmd = stripDevNullRedirects(cmd)
 	if strings.TrimSpace(cmd) == "" {
-		return false
+		// An empty line runs nothing, so it writes nothing.
+		return ShellScratchWritesClean
 	}
-	roots = cleanShellAllowedRoots(roots)
-	if len(roots) == 0 {
-		return false
+	if depth == 0 {
+		// A region that contains the directory the command starts in cannot be
+		// scratch for it: the project outranks the region. A checkout under
+		// $TMPDIR - a test fixture, a throwaway clone - is still the project,
+		// and plan mode's wall is around the project rather than around a
+		// directory name.
+		roots = shellScratchRootsOutside(cwd, cleanShellAllowedRoots(roots))
 	}
-	// A region that contains the directory the command starts in cannot be
-	// scratch for it: the project outranks the region. A checkout under $TMPDIR -
-	// a test fixture, a throwaway clone - is still the project, and plan mode's
-	// wall is around the project rather than around a directory name.
-	roots = shellScratchRootsOutside(cwd, roots)
-	if len(roots) == 0 {
-		return false
+	clauses, _, _ := splitShellClassifyClauses(cmd)
+	if len(clauses) == 0 {
+		// The walker could not read the line at all - an unterminated quote or
+		// escape - which is not proof of anything.
+		return ShellScratchWritesUnread
 	}
-	clauses, _, doubt := splitShellClassifyClauses(cmd)
-	if len(clauses) == 0 || doubt {
-		// A redirection floors at Writes and is bounded through its recorded
-		// target below. The structural doubt - an expansion, a subshell, a
-		// brace, a word-start ~, an unterminated quote - is what the floor
-		// cannot carry once a redirect outranks it, and every one of those can
-		// hide a write this walker never saw.
-		return false
-	}
-	dir := strings.TrimSpace(cwd)
+	// CDPATH decides where a relative cd lands, so it is read once for the line
+	// rather than per clause: an assignment anywhere on the line moves every
+	// relative lookup the shell makes.
+	cdpath := strings.TrimSpace(os.Getenv("CDPATH")) != ""
 	for _, clause := range clauses {
-		if clause.Heredoc {
-			// A heredoc body reads as ordinary clauses to this walker, so the
-			// proof cannot tell what fed the command from what the command is.
-			return false
+		cdpath = cdpath || clause.CDPATH
+	}
+	dir, known := shellScratchStartDir(cwd)
+	state := ShellScratchWritesClean
+	for _, clause := range clauses {
+		next, nextKnown, clauseState := shellScratchClauseWrite(clause, dir, known, cdpath, roots, depth)
+		dir, known = next, nextKnown
+		state = worseShellScratchWrite(state, clauseState)
+	}
+	return state
+}
+
+// shellScratchClauseWrite decides one clause and reports the directory the next
+// clause starts in. The rules run in the order this proof needs them, and the
+// first one that answers does.
+func shellScratchClauseWrite(clause shellClause, dir string, known, cdpath bool, roots []string, depth int) (nextDir string, nextKnown bool, state ShellScratchWriteState) {
+	base := dir
+	if !known {
+		base = ""
+	}
+	if clause.Unread {
+		return dir, known, ShellScratchWritesUnplaceable
+	}
+	// The source of every substitution runs before this clause does, so it is
+	// judged with no allowed roots at all: a write it proves is a write this
+	// clause performs somewhere this proof never sees. Read-only and unproven
+	// sources are fine - they are not proof of a write.
+	for _, source := range clause.Substitutions {
+		if classifyShellCommandDepth(source, nil, "", 0) == ShellMutationWrites {
+			return dir, known, ShellScratchWritesUnplaceable
 		}
-		if !shellScratchRedirectsConfined(clause, dir, roots) {
-			return false
+	}
+	// cd writes nothing: it decides where the next clause's relative target
+	// lands, so the proof follows it there. pushd and popd write nothing either
+	// and leave a directory this walk cannot follow, which is why they are not
+	// followed. Both answer Clean, because neither writes.
+	switch clause.Command {
+	case "cd":
+		target, followed := shellScratchFollowCD(clause.Args, base, known, cdpath)
+		return target, followed, ShellScratchWritesClean
+	case "pushd", "popd":
+		return dir, false, ShellScratchWritesClean
+	}
+	// What this clause writes is its own command, read from the words the
+	// operators did not take - never from the flattened text, whose first word
+	// in "> f cmd" is the target - plus its redirects.
+	tier := classifyCommandDepth(clause.Command, clause.Args, roots, base, 0)
+	writes := len(clause.Redirects) > 0 || shellScratchWritesByName(clause.Command) || tier == ShellMutationWrites
+	script, hasScript := shellScriptFromClause(clause.Command, clause.Args)
+	if !writes && !hasScript {
+		// Nothing this clause names is written, so what is left to decide is
+		// whether it was read at all.
+		if clause.Command == "" || shellScratchReadOnlyCommand(clause.Command) {
+			// A bare assignment writes nothing; the read-only table is the
+			// classifier's own, not a copy.
+			return dir, known, ShellScratchWritesClean
 		}
-		// A redirection's target word is still in the clause text, because that
-		// text is what the classifier reads. The operand rules that pick a
-		// destination out of position therefore run their stricter form when the
-		// clause has one: which word the operator took is not recoverable from
-		// the flattened text, and a guess there is exactly the kind of guess this
-		// file must not make.
-		name, args, ok := shellScratchCommandWords(SplitShellWords(clause.Text))
+		return dir, known, ShellScratchWritesUnread
+	}
+	state = ShellScratchWritesClean
+	if writes {
+		state = shellScratchWrittenTargets(clause, base, known, roots)
+	}
+	if hasScript {
+		// The clause's own redirect is placed above, before the script gets a
+		// say: "> pkg/tool/x sh -c 'true'" writes the project whatever the
+		// script does, while "sh -c 'echo hi > /tmp/x'" writes only scratch.
+		return dir, known, worseShellScratchWrite(state, shellScratchWriteVerdictDepth(script, roots, base, depth+1))
+	}
+	if state != ShellScratchWritesClean {
+		return dir, known, state
+	}
+	if strings.ContainsAny(clause.Command, "$`") {
+		// The name itself is decided while the line runs.
+		return dir, known, ShellScratchWritesUnplaceable
+	}
+	if clause.Command == "git" {
+		// The one git form whose writes the command line names is clone; every
+		// other subcommand writes into a repository this proof cannot see.
+		if shellScratchGitCloneConfined(clause.Args, base, roots) {
+			return dir, known, ShellScratchWritesClean
+		}
+		return dir, known, ShellScratchWritesOutside
+	}
+	if table, ok := shellScratchCommands[clause.Command]; ok {
+		parsed, ok := scratchParseArgs(clause.Args, table)
 		if !ok {
-			return false
+			return dir, known, ShellScratchWritesUnplaceable
 		}
-		if name == "cd" {
-			// cd writes nothing: it only decides where the next clause's
-			// relative target lands, so the proof follows it there.
-			next, ok := shellScratchCDTarget(args, dir)
-			if !ok {
-				return false
-			}
-			dir = next
-			continue
-		}
-		if !shellScratchClauseConfined(name, args, dir, roots, len(clause.Redirects) > 0) {
-			return false
-		}
+		return dir, known, shellScratchOperandState(clause.Command, parsed, base, roots, len(clause.Redirects) > 0)
 	}
-	return true
+	if shellScratchReadOnlyCommand(clause.Command) {
+		return dir, known, ShellScratchWritesClean
+	}
+	switch tier {
+	case ShellMutationReadOnly:
+		return dir, known, ShellScratchWritesClean
+	case ShellMutationWrites:
+		return dir, known, ShellScratchWritesUnplaceable
+	}
+	if len(clause.Redirects) > 0 {
+		// A command the proof cannot read, writing a file it did name: the
+		// target is bounded above, the command is not.
+		return dir, known, ShellScratchWritesUnplaceable
+	}
+	return dir, known, ShellScratchWritesUnread
 }
 
-// shellScratchRedirectsConfined bounds the files a clause's redirections name:
-// each one strictly inside the scratch regions. A target the walker could not
-// read is recorded empty and fails here.
-func shellScratchRedirectsConfined(clause shellClause, dir string, roots []string) bool {
+// shellScratchWritesByName reports whether the command's own name proves a write
+// whatever its arguments. It is the scratch table rather than the classifier's
+// mutating table because forms such as curl, unzip and tar write only through
+// the operands this proof reads next.
+func shellScratchWritesByName(name string) bool {
+	_, ok := shellScratchCommands[name]
+	return ok
+}
+
+// shellScratchWrittenTargets bounds where a clause's own operators make it
+// write: the grouping it sits in, a heredoc body the proof could not skip, and
+// the directory it resolves against must all be readable, and every redirect
+// target must be a literal path inside the regions. A target the walker could
+// not read is recorded empty and fails here, which is the whole point: the line
+// that named no file must not read as one that writes nothing.
+func shellScratchWrittenTargets(clause shellClause, dir string, known bool, roots []string) ShellScratchWriteState {
+	if clause.Grouping || clause.Heredoc || !known {
+		// Where this clause writes is decided by something the proof cannot
+		// read: a grouping token whose cd it cannot scope, a body it did not
+		// skip, or a directory it stopped following.
+		return ShellScratchWritesUnplaceable
+	}
+	state := ShellScratchWritesClean
 	for _, raw := range clause.Redirects {
-		words := SplitShellWords(raw)
-		if len(words) != 1 {
-			return false
-		}
-		abs, ok := shellScratchAbsPath(words[0], dir)
-		if !ok || !shellScratchFileConfined(abs, roots) {
-			return false
-		}
+		state = worseShellScratchWrite(state, shellScratchTargetState(raw, dir, roots))
 	}
-	return true
+	return state
 }
 
-// shellScratchCommandWords returns the command name and its arguments, skipping
-// the environment assignments a clause may carry in front of it.
-func shellScratchCommandWords(words []string) (string, []string, bool) {
-	i := 0
-	for i < len(words) && shellEnvAssignment(words[i]) {
-		i++
+// shellScratchTargetState places one written target: a literal word, resolved
+// through the walk, strictly inside a region.
+func shellScratchTargetState(raw, dir string, roots []string) ShellScratchWriteState {
+	words := SplitShellWords(raw)
+	if len(words) != 1 {
+		return ShellScratchWritesUnplaceable
 	}
-	if i >= len(words) {
-		return "", nil, false
+	if !shellScratchLiteralTarget(words[0]) {
+		// An expansion decides the path while the line runs.
+		return ShellScratchWritesUnplaceable
 	}
-	name := strings.ToLower(strings.TrimSpace(words[i]))
-	if idx := strings.LastIndexAny(name, `/\`); idx >= 0 {
-		name = name[idx+1:]
+	abs, ok := shellScratchAbsPath(words[0], dir)
+	if !ok {
+		return ShellScratchWritesUnplaceable
 	}
-	if name == "" {
-		return "", nil, false
+	if !shellScratchFileConfined(abs, roots) {
+		return ShellScratchWritesOutside
 	}
-	return name, words[i+1:], true
+	return ShellScratchWritesClean
 }
 
-// shellScratchCDTarget follows a cd clause: one plain path operand, and none of
-// the forms whose destination is not in the text (no operand at all, "-", a
-// flag, a home expansion).
-func shellScratchCDTarget(args []string, dir string) (string, bool) {
-	if len(args) != 1 {
+// shellScratchLiteralTarget reports whether a written path is the path in the
+// text. "~", a glob, a parameter and a substitution all give the shell a name
+// this proof cannot resolve, so none of them may reach a comparison against a
+// region.
+func shellScratchLiteralTarget(path string) bool {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return false
+	}
+	return !strings.ContainsAny(path, "$`~*?[{")
+}
+
+// shellScratchStartDir is the directory the walk begins in, and whether it is
+// known at all: a caller with no cwd (the approval boundary) knows none.
+func shellScratchStartDir(cwd string) (string, bool) {
+	cwd = strings.TrimSpace(cwd)
+	if cwd == "" || !filepath.IsAbs(cwd) {
 		return "", false
+	}
+	return cwd, true
+}
+
+// shellScratchFollowCD follows a cd clause: one plain path operand, and none of
+// the forms whose destination is not in the text (no operand at all, "-", a
+// flag, an expansion, pushd/popd).
+//
+// A relative operand is resolved from the tracked directory - unless CDPATH is
+// in play, in which case bash searches it first and the directory the shell lands
+// in is not the one this walk followed.
+func shellScratchFollowCD(args []string, dir string, known, cdpath bool) (string, bool) {
+	if len(args) != 1 {
+		return dir, false
 	}
 	target := strings.TrimSpace(args[0])
-	if target == "" || target == "-" || strings.HasPrefix(target, "-") || strings.HasPrefix(target, "~") {
-		return "", false
+	if target == "" || target == "-" || strings.HasPrefix(target, "-") || !shellScratchLiteralTarget(target) {
+		return dir, false
 	}
-	return shellScratchAbsPath(target, dir)
+	base := dir
+	if !known {
+		base = ""
+	}
+	if !filepath.IsAbs(target) && (cdpath || base == "") {
+		return dir, false
+	}
+	next, ok := shellScratchAbsPath(target, base)
+	if !ok {
+		return dir, false
+	}
+	return next, true
 }
 
-// shellScratchClauseConfined decides one clause: a command the classifier proves
-// read-only passes whatever its operands (reads are not what this proof bounds),
-// a command in the table below passes only if its own operand rules say every
-// write lands in scratch, and anything else fails.
-func shellScratchClauseConfined(name string, args []string, dir string, roots []string, redirected bool) bool {
-	if name == "git" {
-		return shellScratchGitCloneConfined(args, dir, roots)
-	}
-	if table, ok := shellScratchCommands[name]; ok {
-		parsed, ok := scratchParseArgs(args, table)
-		if !ok {
-			return false
-		}
-		return shellScratchOperandsConfined(name, parsed, dir, roots, redirected)
-	}
-	// The read-only table is the classifier's own, not a copy: these commands
-	// write nothing whatever their operands. The invariant test beside this file
-	// pins that none of them is a name the classifier dispatches by argument.
-	if shellScratchReadOnlyCommand(name) {
-		return true
-	}
-	return false
-}
-
-// shellScratchOperandsConfined applies one table entry's operand rules.
+// shellScratchOperandsState applies one table entry's operand rules.
 // redirected reports that the clause also wrote a file through a redirection,
 // which makes the destination-picking rules below read every operand instead.
-func shellScratchOperandsConfined(name string, parsed scratchArgs, dir string, roots []string, redirected bool) bool {
+func shellScratchOperandState(name string, parsed scratchArgs, dir string, roots []string, redirected bool) ShellScratchWriteState {
+	// A flag's value can name a file the rules below do not look at, so an
+	// expanded one leaves the write unplaceable: "curl -o $X" is the same write
+	// as "-o /tmp/x" only when X is known.
+	for _, values := range parsed.values {
+		for _, value := range values {
+			if value == "" {
+				// A boolean flag's value is empty by construction.
+				continue
+			}
+			if !shellScratchLiteralTarget(value) {
+				return ShellScratchWritesUnplaceable
+			}
+		}
+	}
 	switch name {
-	case "rm", "rmdir", "mkdir", "touch", "unlink", "shred", "truncate", "ln", "tee":
-		return shellScratchPathsConfined(parsed.operands, dir, roots)
-	case "mv":
-		// Every operand is written: the source loses the entry, the target
-		// gains it.
-		return shellScratchPathsConfined(append(parsed.value("-t", "--target-directory"), parsed.operands...), dir, roots)
+	case "rm", "rmdir", "mkdir", "touch", "unlink", "shred", "truncate", "tee":
+		return shellScratchPathsState(parsed.operands, dir, roots)
+	case "ln", "mv":
+		// Every operand is written, and so is the directory -t names: an
+		// operand-picking rule that ignored -t admitted `ln -t pkg/tool /tmp/x`
+		// while mv and cp honoured theirs.
+		return shellScratchPathsState(append(parsed.value("-t", "--target-directory"), parsed.operands...), dir, roots)
 	case "chmod", "chown", "chgrp":
 		// The first operand is the mode or the owner, the rest are targets.
 		if len(parsed.operands) < 2 {
-			return false
+			return ShellScratchWritesUnplaceable
 		}
-		return shellScratchPathsConfined(parsed.operands[1:], dir, roots)
+		return shellScratchPathsState(parsed.operands[1:], dir, roots)
 	case "cp", "install":
 		// Sources are reads; only where the copy lands is bounded. The
 		// destination is the last operand - unless a redirection also named a
 		// file, because then the last operand may be that file rather than the
 		// destination, and every operand has to be inside the regions instead.
 		if targets := parsed.value("-t", "--target-directory"); len(targets) > 0 {
-			if redirected && !shellScratchPathsConfined(parsed.operands, dir, roots) {
-				return false
+			if redirected {
+				return shellScratchPathsState(append(targets, parsed.operands...), dir, roots)
 			}
-			return shellScratchPathsConfined(targets, dir, roots)
+			return shellScratchPathsState(targets, dir, roots)
 		}
 		if len(parsed.operands) < 2 {
-			return false
+			return ShellScratchWritesUnplaceable
 		}
 		if redirected {
-			return shellScratchPathsConfined(parsed.operands, dir, roots)
+			return shellScratchPathsState(parsed.operands, dir, roots)
 		}
-		return shellScratchPathsConfined(parsed.operands[len(parsed.operands)-1:], dir, roots)
+		return shellScratchPathsState(parsed.operands[len(parsed.operands)-1:], dir, roots)
 	case "dd":
 		targets := make([]string, 0, 1)
 		for _, arg := range parsed.operands {
@@ -247,72 +420,72 @@ func shellScratchOperandsConfined(name string, parsed scratchArgs, dir string, r
 			case strings.Contains(arg, "="):
 			default:
 				// A bare operand is a form this proof cannot place.
-				return false
+				return ShellScratchWritesUnplaceable
 			}
 		}
 		if len(targets) == 0 {
 			// No of=: dd copies to stdout.
-			return true
+			return ShellScratchWritesClean
 		}
-		return shellScratchPathsConfined(targets, dir, roots)
+		return shellScratchPathsState(targets, dir, roots)
 	case "curl":
 		// -o/--output names the file; every other option that writes a file is
 		// absent from the table (--output-dir, -c/--cookie-jar,
 		// -D/--dump-header, --etag-save, --hsts, --alt-svc, --stderr,
 		// --trace, --trace-ascii, -K/--config, --libcurl), so an unknown flag
 		// fails this clause instead of being waved through.
-		outputs := parsed.value("-o", "--output")
-		if len(outputs) > 0 && !shellScratchPathsConfined(outputs, dir, roots) {
-			return false
+		state := ShellScratchWritesClean
+		if outputs := parsed.value("-o", "--output"); len(outputs) > 0 {
+			state = worseShellScratchWrite(state, shellScratchPathsState(outputs, dir, roots))
 		}
-		if parsed.any("-O", "--remote-name") && !shellScratchCWDConfined(dir, roots) {
+		if parsed.any("-O", "--remote-name") {
 			// -O names the saved file after the URL, in the working directory.
-			return false
+			state = worseShellScratchWrite(state, shellScratchCWDState(dir, roots))
 		}
-		return true
+		return state
 	case "wget":
 		documents := parsed.value("-O", "--output-document")
-		if len(documents) > 0 && !shellScratchPathsConfined(documents, dir, roots) {
-			return false
+		state := ShellScratchWritesClean
+		if len(documents) > 0 {
+			state = worseShellScratchWrite(state, shellScratchPathsState(documents, dir, roots))
 		}
-		if prefixes := parsed.value("-P", "--directory-prefix"); len(prefixes) > 0 && !shellScratchDirsConfined(prefixes, dir, roots) {
-			return false
+		if prefixes := parsed.value("-P", "--directory-prefix"); len(prefixes) > 0 {
+			state = worseShellScratchWrite(state, shellScratchDirsState(prefixes, dir, roots))
 		}
-		if logs := parsed.value("-o", "--output-file"); len(logs) > 0 && !shellScratchPathsConfined(logs, dir, roots) {
-			return false
+		if logs := parsed.value("-o", "--output-file"); len(logs) > 0 {
+			state = worseShellScratchWrite(state, shellScratchPathsState(logs, dir, roots))
 		}
-		if len(documents) == 0 && !shellScratchCWDConfined(dir, roots) {
+		if len(documents) == 0 {
 			// Without -O wget saves into the working directory.
-			return false
+			state = worseShellScratchWrite(state, shellScratchCWDState(dir, roots))
 		}
-		return true
+		return state
 	case "unzip":
 		if dirs := parsed.value("-d"); len(dirs) > 0 {
-			return shellScratchDirsConfined(dirs, dir, roots)
+			return shellScratchDirsState(dirs, dir, roots)
 		}
 		// Without -d, members land in the working directory.
-		return shellScratchCWDConfined(dir, roots)
+		return shellScratchCWDState(dir, roots)
 	case "tar":
 		creates := parsed.any("-c", "--create", "-r", "--append", "-u", "--update")
 		reads := parsed.any("-x", "--extract", "-t", "--list")
 		if creates == reads {
 			// No mode, or two of them: the archive's role is not read.
-			return false
+			return ShellScratchWritesUnplaceable
 		}
+		state := ShellScratchWritesClean
 		if dirs := parsed.value("-C", "--directory"); len(dirs) > 0 {
-			if !shellScratchDirsConfined(dirs, dir, roots) {
-				return false
-			}
-		} else if !shellScratchCWDConfined(dir, roots) {
-			return false
+			state = worseShellScratchWrite(state, shellScratchDirsState(dirs, dir, roots))
+		} else {
+			state = worseShellScratchWrite(state, shellScratchCWDState(dir, roots))
 		}
 		if creates {
 			// Writing an archive is a write; reading one only reads it.
-			return shellScratchPathsConfined(parsed.value("-f", "--file"), dir, roots)
+			state = worseShellScratchWrite(state, shellScratchPathsState(parsed.value("-f", "--file"), dir, roots))
 		}
-		return true
+		return state
 	}
-	return false
+	return ShellScratchWritesUnplaceable
 }
 
 // shellScratchGitCloneConfined reads the one git form whose writes the command
@@ -343,49 +516,60 @@ func shellScratchReadOnlyCommand(name string) bool {
 	return ok
 }
 
-// shellScratchPathsConfined bounds a list of written files: each one strictly
+// shellScratchPathsState places a list of written files: each one strictly
 // inside a scratch root, never the root itself.
-func shellScratchPathsConfined(paths []string, dir string, roots []string) bool {
+func shellScratchPathsState(paths []string, dir string, roots []string) ShellScratchWriteState {
 	if len(paths) == 0 {
-		return false
+		return ShellScratchWritesUnplaceable
 	}
+	state := ShellScratchWritesClean
 	for _, path := range paths {
-		abs, ok := shellScratchAbsPath(path, dir)
-		if !ok || !shellScratchFileConfined(abs, roots) {
-			return false
-		}
+		state = worseShellScratchWrite(state, shellScratchTargetState(path, dir, roots))
 	}
-	return true
+	return state
 }
 
-// shellScratchDirsConfined bounds a list of written directories: a root itself is
+// shellScratchDirsState places a list of written directories: a root itself is
 // inside the region, because writing "into" a directory writes its members.
-func shellScratchDirsConfined(paths []string, dir string, roots []string) bool {
+func shellScratchDirsState(paths []string, dir string, roots []string) ShellScratchWriteState {
 	if len(paths) == 0 {
-		return false
+		return ShellScratchWritesUnplaceable
 	}
+	state := ShellScratchWritesClean
 	for _, path := range paths {
+		if !shellScratchLiteralTarget(path) {
+			state = worseShellScratchWrite(state, ShellScratchWritesUnplaceable)
+			continue
+		}
 		abs, ok := shellScratchAbsPath(path, dir)
-		if !ok || !shellScratchDirConfined(abs, roots) {
-			return false
+		if !ok {
+			state = worseShellScratchWrite(state, ShellScratchWritesUnplaceable)
+			continue
+		}
+		if !shellScratchDirConfined(abs, roots) {
+			state = worseShellScratchWrite(state, ShellScratchWritesOutside)
 		}
 	}
-	return true
+	return state
 }
 
-// shellScratchCWDConfined bounds a command that names no target and writes into
-// the directory it runs in. The directory goes through the same walk as a
-// written path: a tracked cwd reached through a link is the link's target.
+// shellScratchCWDState places a command that names no target and writes into the
+// directory it runs in. The directory goes through the same walk as a written
+// path: a tracked cwd reached through a link is the link's target.
+func shellScratchCWDState(dir string, roots []string) ShellScratchWriteState {
+	return shellScratchDirsState([]string{dir}, "", roots)
+}
+
+// shellScratchPathsConfined reports whether every written file stays inside the
+// regions.
+func shellScratchPathsConfined(paths []string, dir string, roots []string) bool {
+	return shellScratchPathsState(paths, dir, roots) == ShellScratchWritesClean
+}
+
+// shellScratchCWDConfined reports whether the directory a command runs in is
+// inside the regions.
 func shellScratchCWDConfined(dir string, roots []string) bool {
-	dir = strings.TrimSpace(dir)
-	if dir == "" || !filepath.IsAbs(dir) {
-		return false
-	}
-	resolved, ok := shellScratchWalkPath(dir, "")
-	if !ok {
-		return false
-	}
-	return shellScratchDirConfined(resolved, roots)
+	return shellScratchCWDState(dir, roots) == ShellScratchWritesClean
 }
 
 // shellScratchRootsOutside drops the roots that hold dir, so nothing dir
@@ -489,7 +673,7 @@ func shellScratchDirConfined(path string, roots []string) bool {
 // lists each one's resolved form.
 //
 // Every caller reaches this through shellScratchWalkPath (a written path) or
-// shellScratchCWDConfined (a directory), so the input carries no ".." left to
+// shellScratchCWDState (a directory), so the input carries no ".." left to
 // collapse: nothing here cleans a path before resolving it.
 func shellScratchContainment(path string, roots []string) (under, at bool) {
 	form := resolveShellPath(filepath.Clean(path))

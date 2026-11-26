@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 )
 
 // Separator tokens recognized between top-level segments.
@@ -578,18 +579,67 @@ func dangerousCommandFromWords(command []string, depth int) *DangerousCommandMat
 }
 
 // shellDashCScript returns the script operand of a `-c` shell invocation.
+//
+// `-c` may sit inside a short-option cluster - `-lc`, `-ec`, `-xc` - because
+// bash and sh read the script from the next word in that form too, and `-lc
+// 'rm -rf pkg'` would otherwise be a name no table describes. Flags before the
+// cluster are allowed; the first operand ends the search.
 func shellDashCScript(command []string) (string, bool) {
 	for i := 1; i < len(command); i++ {
 		arg := command[i]
-		if arg == "-c" {
+		switch {
+		case arg == "" || arg == "--":
+			// "--" ends the options: whatever follows is a file or a string
+			// operand, not a flag of this kind.
+			return "", false
+		case !strings.HasPrefix(arg, "-"):
+			return "", false
+		case strings.HasPrefix(arg, "--"):
+			// A long option names nothing this form reads.
+		case strings.Contains(arg[1:], "c"):
 			if i+1 < len(command) {
 				return command[i+1], true
 			}
 			return "", false
 		}
-		if !strings.HasPrefix(arg, "-") {
+	}
+	return "", false
+}
+
+// shellDashCScriptAt reads the `-c` form out of a command name and its
+// arguments.
+func shellDashCScriptAt(name string, args []string) (string, bool) {
+	command := make([]string, 0, len(args)+1)
+	command = append(command, name)
+	command = append(command, args...)
+	return shellDashCScript(command)
+}
+
+// shellScriptFromClause returns the script a clause runs through a shell's `-c`,
+// looking through the wrapper commands the classifier already unwraps, so a
+// scratch verdict and the tier cannot disagree about what a clause runs.
+func shellScriptFromClause(name string, args []string) (string, bool) {
+	if name == "" {
+		return "", false
+	}
+	line := make([]string, 0, len(args)+1)
+	line = append(line, name)
+	line = append(line, args...)
+	for hop := 0; hop <= len(shellWrapperCommands)+1; hop++ {
+		if script, ok := shellDashCScript(line); ok {
+			return script, true
+		}
+		if line[0] == "sh" || line[0] == "bash" || line[0] == "zsh" || line[0] == "dash" || line[0] == "ksh" {
 			return "", false
 		}
+		if _, ok := shellWrapperCommands[line[0]]; !ok {
+			return "", false
+		}
+		rest := stripWrapperArgs(line[0], line[1:])
+		if len(rest) == 0 {
+			return "", false
+		}
+		line = rest
 	}
 	return "", false
 }
@@ -1695,6 +1745,13 @@ func worseShellMutation(a, b ShellMutation) ShellMutation {
 // may run unattended, so reading somewhere the operator did not open is not
 // something to approve on the command's own recognisance.
 func ClassifyShellCommand(cmd string, allowedRoots []string, cwd string) ShellMutation {
+	return classifyShellCommandDepth(cmd, allowedRoots, cwd, 0)
+}
+
+// classifyShellCommandDepth is ClassifyShellCommand with the shell-script depth
+// this line sits at: a line read out of a `sh -c` script is one layer deeper
+// than the line that ran it.
+func classifyShellCommandDepth(cmd string, allowedRoots []string, cwd string, depth int) ShellMutation {
 	cmd = stripDevNullRedirects(cmd)
 	if strings.TrimSpace(cmd) == "" {
 		return ShellMutationUnproven
@@ -1705,20 +1762,53 @@ func ClassifyShellCommand(cmd string, allowedRoots []string, cwd string) ShellMu
 		return worseShellMutation(worst, ShellMutationUnproven)
 	}
 	for _, clause := range clauses {
-		worst = worseShellMutation(worst, classifyShellClause(clause.Text, allowedRoots, cwd))
+		worst = worseShellMutation(worst, classifyCommandWordsDepth(SplitShellWords(clause.Text), allowedRoots, cwd, depth))
 	}
 	return worst
 }
 
 // shellClause is one simple command of a classified line, with the parts its text
-// cannot carry once the operators are gone: the file each redirection named, and
-// whether a heredoc fed the clause. The text itself is byte-for-byte what the
-// walker produced before these fields existed, so the tiers this package reports
-// cannot move with them.
+// cannot carry once the operators are gone: the file each redirection named,
+// whether a heredoc fed the clause, the command word with the arguments left
+// after the operators took theirs, the source of every substitution, and whether
+// a grouping token put the clause outside the shape this package follows. The
+// text itself is byte-for-byte what the walker produced before these fields
+// existed, so the tiers this package reports cannot move with them.
 type shellClause struct {
-	Text      string
-	Redirects []string
-	Heredoc   bool
+	Text          string
+	Redirects     []string
+	Heredoc       bool
+	Command       string
+	Args          []string
+	Substitutions []string
+	Grouping      bool
+	// CDPATH records that this clause assigns CDPATH. bash searches it before
+	// the working directory, so a later relative cd lands somewhere this
+	// walker's tracked directory is not.
+	CDPATH bool
+	// Unread records that the walker stopped reading inside this clause - a
+	// substitution nested past the recursion cap - so nothing about it can be
+	// placed.
+	Unread bool
+}
+
+// shellSpan is a rune range of a clause buffer.
+type shellSpan struct{ start, end int }
+
+// shellHeredoc is one "<<" of the line being scanned: the delimiter word, and
+// what the shell does with it.
+type shellHeredoc struct {
+	// delimiter is the unquoted delimiter word the body must repeat.
+	delimiter string
+	// quoted reports that the delimiter was quoted (<<'EOF', <<"EOF",
+	// <<\EOF), which makes the body literal for the shell.
+	quoted bool
+	// dashTabs reports "<<"-"": leading tabs are stripped before the
+	// delimiter comparison.
+	dashTabs bool
+	// plain reports a delimiter with no expansion and no glob, so the word is
+	// a delimiter this walker can recognise in the body.
+	plain bool
 }
 
 // splitShellClassifyClauses splits a command line into its simple clauses and
@@ -1731,28 +1821,39 @@ type shellClause struct {
 // the rest of the line is still classified clause by clause.
 //
 // A redirection's target is recorded on its clause as well as floored, and a
-// heredoc is flagged: the write a line performs is decided by those words, and a
-// caller proving where the writes land cannot read them out of the text. doubt
-// reports the structural doubt on its own, because the floor cannot: a
-// redirection floors at Writes, which outranks the Unproven an expansion would
-// otherwise contribute.
+// heredoc that fed the clause is flagged: the write a line performs is decided by
+// those words, and a caller proving where the writes land cannot read them out of
+// the text. A heredoc body is data rather than commands when the whole line only
+// feeds it to a reader, and is skipped then. doubt reports the structural doubt
+// on its own, because the floor cannot: a redirection floors at Writes, which
+// outranks the Unproven an expansion would otherwise contribute.
 func splitShellClassifyClauses(cmd string) (clauses []shellClause, floor ShellMutation, doubt bool) {
 	runes := []rune(cmd)
 	buf := make([]rune, 0, len(runes))
 	clauses = make([]shellClause, 0, 4)
 	redirects := make([]string, 0, 2)
-	heredoc := false
+	// skip holds the words an operator consumed: a redirection's target, a
+	// heredoc's delimiter, a herestring's operand. They stay in the clause text
+	// because that text is what the tier classifier reads, and the fact pass
+	// takes them back out by their rune range - which word an operator took is
+	// not recoverable from the flattened text.
+	skip := make([]shellSpan, 0, 2)
+	heredocs := make([]shellHeredoc, 0, 1)
+	heredocAt := make([]int, 0, 1)
+	lineStart := 0
 	doubt = false
 	floor = ShellMutationReadOnly
 	inSingle, inDouble, escaped := false, false, false
 	atWordStart := true
 	flush := func() {
 		if clause := strings.TrimSpace(string(buf)); clause != "" {
-			clauses = append(clauses, shellClause{Text: clause, Redirects: redirects, Heredoc: heredoc})
+			recorded := shellClause{Text: clause, Redirects: redirects}
+			recorded.recordFacts(buf, skip)
+			clauses = append(clauses, recorded)
 		}
 		buf = buf[:0]
 		redirects = nil
-		heredoc = false
+		skip = nil
 	}
 	// doubtful records structural doubt: the floor for a caller reading tiers,
 	// and the flag for a caller proving where the writes land, since a
@@ -1761,11 +1862,28 @@ func splitShellClassifyClauses(cmd string) (clauses []shellClause, floor ShellMu
 		doubt = true
 		floor = worseShellMutation(floor, ShellMutationUnproven)
 	}
+	// operatorWord marks the word the operator starting at runes[from] consumes,
+	// so the clause's facts can leave it out, and returns it.
+	operatorWord := func(from int) (string, bool) {
+		if from < 0 || from > len(runes) {
+			return "", false
+		}
+		head := string(runes[from:])
+		word, start, end, ok := consumeShellWord(head, 0)
+		if !ok {
+			return "", false
+		}
+		skip = append(skip, shellSpan{
+			start: len(buf) + utf8.RuneCountInString(head[:start]),
+			end:   len(buf) + utf8.RuneCountInString(head[:end]),
+		})
+		return word, true
+	}
 	// redirectTarget records the word a redirection just opened, so a caller can
 	// bound where the write lands. An empty target is recorded as such: the line
 	// names no file, and a caller must not read that as "writes nothing".
 	redirectTarget := func(from int) {
-		word, _, _, ok := consumeShellWord(string(runes[from:]), 0)
+		word, ok := operatorWord(from)
 		if !ok {
 			word = ""
 		}
@@ -1819,7 +1937,28 @@ func splitShellClassifyClauses(cmd string) (clauses []shellClause, floor ShellMu
 		case ' ', '\t':
 			buf = append(buf, ch)
 			atWordStart = true
-		case '\n', '\r', ';':
+		case '\n', '\r':
+			// A physical newline outside quotes and not escaped ends the
+			// logical command line, which is where a heredoc body begins.
+			separate()
+			if len(heredocs) > 0 {
+				if next, ok := shellSkipHeredocBodies(runes, i+1, clauses[lineStart:], heredocs); ok {
+					i = next - 1
+				} else {
+					// The body could be commands, so it is read as clauses -
+					// which is what the walker did before it knew heredoc
+					// syntax - and the clause that opened it says so.
+					for _, at := range heredocAt {
+						if at < len(clauses) {
+							clauses[at].Heredoc = true
+						}
+					}
+				}
+				heredocs = nil
+				heredocAt = nil
+			}
+			lineStart = len(clauses)
+		case ';':
 			separate()
 		case '|':
 			// "|" and "||" both separate two commands.
@@ -1863,13 +2002,34 @@ func splitShellClassifyClauses(cmd string) (clauses []shellClause, floor ShellMu
 				i += w - 1
 				continue
 			}
-			if i+1 < len(runes) && runes[i+1] == '<' {
-				// A heredoc: what feeds the command arrives after the line, so
-				// neither this walker nor a caller can read it here.
-				heredoc = true
-			}
 			buf = trimShellFDNumber(buf)
 			atWordStart = true
+			if i+2 < len(runes) && runes[i+1] == '<' && runes[i+2] == '<' {
+				// A herestring: its operand is data rather than a command word,
+				// and nothing follows the line.
+				i += 2
+				operatorWord(i + 1)
+				continue
+			}
+			if i+1 < len(runes) && runes[i+1] == '<' {
+				// A heredoc: the delimiter is a data word too, and whether the
+				// body is data as well is decided at the newline that closes
+				// this line.
+				i++
+				dash := false
+				if i+1 < len(runes) && runes[i+1] == '-' {
+					// "-" counts only directly after "<<", where the shell
+					// reads it as this heredoc's tab stripping.
+					dash = true
+					i++
+				}
+				heredoc := shellHeredocDelimiter(runes, i+1)
+				heredoc.dashTabs = dash
+				heredocs = append(heredocs, heredoc)
+				heredocAt = append(heredocAt, len(clauses))
+				operatorWord(i + 1)
+				continue
+			}
 		case '$', '`':
 			// Command and parameter substitution: the command that runs, and
 			// the paths it touches, are decided while it runs. Both remain
@@ -1902,6 +2062,433 @@ func splitShellClassifyClauses(cmd string) (clauses []shellClause, floor ShellMu
 	}
 	flush()
 	return clauses, floor, doubt
+}
+
+// recordFacts fills in what a clause text alone cannot say: the command word and
+// the arguments left after the operators took theirs, the source of every
+// substitution, and the grouping tokens that put the clause outside the shape
+// this proof follows. text is the clause's rune buffer and skip the words an
+// operator consumed, both in the same rune offsets.
+func (c *shellClause) recordFacts(text []rune, skip []shellSpan) {
+	facts := shellClauseFactsOf(text, skip)
+	c.Command = facts.command
+	c.Args = facts.args
+	c.Substitutions = facts.substitutions
+	c.Grouping = facts.grouping
+	c.CDPATH = facts.cdpath
+	c.Unread = facts.unread
+}
+
+// shellClauseFacts is one clause as the scratch proof needs to read it.
+type shellClauseFacts struct {
+	command       string
+	args          []string
+	substitutions []string
+	grouping      bool
+	cdpath        bool
+	unread        bool
+}
+
+// shellSubstitutionDepthCap bounds how deep a substitution source is opened
+// before the proof stops reading it and says so.
+const shellSubstitutionDepthCap = 8
+
+// shellClauseFactsOf reads one clause buffer. It is a second look at the same
+// text, not a second parser: the operators are already gone, so all it decides
+// is which words name the command, what the substitutions contain, and whether
+// a grouping token or an unterminated quote keeps the clause out of reach.
+func shellClauseFactsOf(text []rune, skip []shellSpan) shellClauseFacts {
+	var out shellClauseFacts
+	words := make([]shellSpan, 0, 8)
+	inSingle, inDouble, escaped := false, false, false
+	start := -1
+	closeWord := func(i int) {
+		if start >= 0 {
+			words = append(words, shellSpan{start, i})
+			start = -1
+		}
+	}
+	beginWord := func(i int) {
+		if start < 0 {
+			start = i
+		}
+	}
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		switch {
+		case escaped:
+			escaped = false
+			beginWord(i)
+		case ch == '\\' && !inSingle:
+			escaped = true
+			beginWord(i)
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+			beginWord(i)
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+			beginWord(i)
+		case inSingle:
+			// Single quotes suppress every expansion and every operator.
+			beginWord(i)
+		case ch == '$' || ch == '`':
+			sources, stop, unread, ok := shellSubstitutionsAt(text, i, 0)
+			if !ok {
+				beginWord(i)
+				continue
+			}
+			// The substitution keeps its place in the word it sits in: its
+			// source is read on its own, and a word built around one
+			// ("/tmp/x-$(date +%s)") must not come back as the literal path the
+			// text spells.
+			beginWord(i)
+			out.substitutions = append(out.substitutions, sources...)
+			out.unread = out.unread || unread
+			i = stop - 1
+		case inDouble:
+			beginWord(i)
+		case ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r':
+			closeWord(i)
+		case ch == '(' || ch == ')' || ch == '{' || ch == '}':
+			closeWord(i)
+			if ch == '(' || ch == '{' || !shellOnlyClosersFollow(text, i) {
+				// An opening token can host a cd whose effect this walker
+				// cannot scope, and a closing one only matters when something
+				// still follows it: a group that just ends cannot decide where
+				// a write in this clause lands.
+				out.grouping = true
+			}
+		case ch == '~':
+			if start < 0 {
+				// A word-start "~" is a home directory outside every region.
+				out.grouping = true
+			}
+			beginWord(i)
+		default:
+			beginWord(i)
+		}
+	}
+	if escaped || inSingle || inDouble {
+		out.grouping = true
+	}
+	closeWord(len(text))
+
+	// The command word is the first completed word that is not one an operator
+	// or the shell consumed: a redirection's target, a heredoc's delimiter, an
+	// environment assignment, a negation or exec token, or a reserved word.
+	consumed := func(span shellSpan) bool {
+		for _, taken := range skip {
+			if taken.start == span.start {
+				return true
+			}
+		}
+		return false
+	}
+	for _, span := range words {
+		if consumed(span) {
+			continue
+		}
+		// One word stays one word: unquoteWord drops the quoting and the
+		// escapes and nothing else, so a substitution inside a word keeps its
+		// place there and a written path is still the literal the text names -
+		// or visibly is not one.
+		word := strings.TrimSpace(unquoteWord(string(text[span.start:span.end])))
+		if word == "" {
+			continue
+		}
+		if out.command == "" {
+			if shellEnvAssignment(word) {
+				if strings.HasPrefix(word, "CDPATH=") {
+					out.cdpath = true
+				}
+				continue
+			}
+			if shellClauseSubjectWord(word) {
+				continue
+			}
+			out.command = strings.ToLower(filepath.Base(word))
+			continue
+		}
+		out.args = append(out.args, word)
+	}
+	// trap's first operand is shell source, not a path: the action runs when the
+	// signal fires, exactly as a substitution's source does.
+	if out.command == "trap" {
+		for _, arg := range out.args {
+			if strings.HasPrefix(arg, "-") {
+				continue
+			}
+			out.substitutions = append(out.substitutions, arg)
+			break
+		}
+	}
+	return out
+}
+
+// shellClauseSubjectWord reports whether a word opens a compound command rather
+// than naming one. The command that follows it is what the line runs, so the
+// facts skip these and read the writer behind them - which is how
+// "! sed -i …", "exec go test -c …" and "if true; then rm …; fi" stay writers.
+func shellClauseSubjectWord(word string) bool {
+	switch word {
+	case "!", "exec":
+		return true
+	}
+	return containsShellControlKeyword([]string{word})
+}
+
+// shellOnlyClosersFollow reports whether nothing but closing grouping tokens and
+// spaces follows i.
+func shellOnlyClosersFollow(text []rune, i int) bool {
+	for _, ch := range text[i+1:] {
+		switch ch {
+		case ' ', '\t', '\n', '\r', ')', '}':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// shellSubstitutionsAt reads the substitution starting at i and reports its
+// source, the rune offset just past it, and - once the nesting cap is passed -
+// that the proof stopped reading. A parameter expansion ($NAME) is a value
+// rather than a command, so it reports nothing; ${ … } is read only for what it
+// contains.
+func shellSubstitutionsAt(text []rune, i int, depth int) (sources []string, stop int, unread bool, ok bool) {
+	if i >= len(text) {
+		return nil, i, false, false
+	}
+	if depth > shellSubstitutionDepthCap {
+		return nil, i, true, false
+	}
+	switch text[i] {
+	case '`':
+		close := -1
+		for j := i + 1; j < len(text); j++ {
+			if text[j] == '\\' {
+				j++
+				continue
+			}
+			if text[j] == '`' {
+				close = j
+				break
+			}
+		}
+		if close < 0 {
+			return nil, i, false, false
+		}
+		inner := text[i+1 : close]
+		nested, nestedUnread := shellSubstitutionsIn(inner, depth+1)
+		return append([]string{string(inner)}, nested...), close + 1, nestedUnread, true
+	case '$':
+		if i+1 >= len(text) {
+			return nil, i, false, false
+		}
+		switch text[i+1] {
+		case '(':
+			close, matched := shellMatchingRune(text, i+1, '(', ')')
+			if !matched {
+				return nil, i, false, false
+			}
+			inner := text[i+2 : close]
+			nested, nestedUnread := shellSubstitutionsIn(inner, depth+1)
+			return append([]string{string(inner)}, nested...), close + 1, nestedUnread, true
+		case '{':
+			close, matched := shellMatchingRune(text, i+1, '{', '}')
+			if !matched {
+				return nil, i, false, false
+			}
+			inner := text[i+2 : close]
+			nested, nestedUnread := shellSubstitutionsIn(inner, depth+1)
+			return nested, close + 1, nestedUnread, true
+		}
+	}
+	return nil, i, false, false
+}
+
+// shellSubstitutionsIn collects the substitutions inside a region that is
+// already being read as data: a $( … ) source can run another one, and
+// ${ … } can hold both.
+func shellSubstitutionsIn(text []rune, depth int) ([]string, bool) {
+	out := make([]string, 0, 2)
+	unread := false
+	inSingle, inDouble, escaped := false, false, false
+	for i := 0; i < len(text); i++ {
+		ch := text[i]
+		switch {
+		case escaped:
+			escaped = false
+			continue
+		case ch == '\\' && !inSingle:
+			escaped = true
+			continue
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+			continue
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+			continue
+		case inSingle:
+			continue
+		}
+		if ch != '$' && ch != '`' {
+			continue
+		}
+		sources, stop, nestedUnread, ok := shellSubstitutionsAt(text, i, depth)
+		unread = unread || nestedUnread
+		if !ok {
+			continue
+		}
+		out = append(out, sources...)
+		i = stop - 1
+	}
+	return out, unread
+}
+
+// shellMatchingRune returns the offset of the rune that closes the bracket at
+// from, counting only brackets outside quotes and escapes.
+func shellMatchingRune(text []rune, from int, open, close rune) (int, bool) {
+	depth := 0
+	inSingle, inDouble, escaped := false, false, false
+	for j := from; j < len(text); j++ {
+		ch := text[j]
+		switch {
+		case escaped:
+			escaped = false
+			continue
+		case ch == '\\' && !inSingle:
+			escaped = true
+			continue
+		case ch == '\'' && !inDouble:
+			inSingle = !inSingle
+			continue
+		case ch == '"' && !inSingle:
+			inDouble = !inDouble
+			continue
+		case inSingle, inDouble:
+			continue
+		}
+		switch ch {
+		case open:
+			depth++
+		case close:
+			depth--
+			if depth == 0 {
+				return j, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// shellHeredocDelimiter reads the word after "<<" as the delimiter it is. plain
+// reports a delimiter the shell takes literally - one word, with no expansion
+// and no glob - which is the only kind whose body this walker can recognise.
+// Anything else leaves the body to be read as clauses, as before.
+func shellHeredocDelimiter(runes []rune, from int) shellHeredoc {
+	var out shellHeredoc
+	if from < 0 || from > len(runes) {
+		return out
+	}
+	word, _, _, ok := consumeShellWord(string(runes[from:]), 0)
+	if !ok {
+		return out
+	}
+	words := SplitShellWords(word)
+	if len(words) != 1 {
+		return out
+	}
+	delimiter := words[0]
+	if delimiter == "" || strings.ContainsAny(word, "$`*?[") || strings.ContainsAny(delimiter, "$`*?[") {
+		return out
+	}
+	out.delimiter = delimiter
+	// bash treats the delimiter as quoted when any part of it was quoted, and
+	// then expands nothing in the body.
+	out.quoted = strings.ContainsAny(word, "'\"\\")
+	out.plain = true
+	return out
+}
+
+// shellSkipHeredocBodies consumes the heredoc bodies that follow the newline at
+// from and reports where the scan resumes.
+//
+// A body is data - not commands - only when the whole line feeds it to a
+// reader: every delimiter is a plain word, every clause of the line is a data
+// reader, and an unquoted body holds no expansion of its own (the shell expands
+// an unquoted body before the reader sees it, so `cat <<EOF` over a line holding
+// $(rm -rf pkg) runs that rm). Anything else falls back to reading the body as
+// ordinary clauses, and the clause that opened it is flagged.
+func shellSkipHeredocBodies(runes []rune, from int, lineClauses []shellClause, heredocs []shellHeredoc) (int, bool) {
+	for _, heredoc := range heredocs {
+		if !heredoc.plain {
+			return 0, false
+		}
+	}
+	for _, clause := range lineClauses {
+		if !clause.shellDataOnly() {
+			return 0, false
+		}
+	}
+	if from > len(runes) {
+		from = len(runes)
+	}
+	pos := from
+	for _, heredoc := range heredocs {
+		bodyStart := pos
+		bodyEnd := -1
+		for pos <= len(runes) {
+			lineStart := pos
+			lineEnd := lineStart
+			for lineEnd < len(runes) && runes[lineEnd] != '\n' {
+				lineEnd++
+			}
+			line := runes[lineStart:lineEnd]
+			if heredoc.dashTabs {
+				for len(line) > 0 && line[0] == '\t' {
+					line = line[1:]
+				}
+			}
+			if string(line) == heredoc.delimiter {
+				bodyEnd = lineStart
+				if lineEnd < len(runes) {
+					lineEnd++
+				}
+				pos = lineEnd
+				break
+			}
+			if lineEnd >= len(runes) {
+				// No terminator: the rest of the command is the body, which is
+				// what the shell does with an unterminated heredoc.
+				pos = len(runes)
+				break
+			}
+			pos = lineEnd + 1
+		}
+		if bodyEnd < 0 {
+			bodyEnd = len(runes)
+		}
+		if !heredoc.quoted && strings.ContainsAny(string(runes[bodyStart:bodyEnd]), "$`") {
+			return 0, false
+		}
+	}
+	return pos, true
+}
+
+// shellDataOnly reports whether a clause only reads: a command from the
+// classifier's read-only table or the scratch table, a cd, or a bare environment
+// assignment. Such a clause consumes a heredoc body without running any of it.
+func (c shellClause) shellDataOnly() bool {
+	switch c.Command {
+	case "", "cd":
+		return true
+	}
+	if shellScratchReadOnlyCommand(c.Command) {
+		return true
+	}
+	_, ok := shellScratchCommands[c.Command]
+	return ok
 }
 
 // shellFDDupWidth reports the rune width of the file-descriptor duplication
@@ -1954,15 +2541,16 @@ func trimShellFDNumber(buf []rune) []rune {
 	return buf[:j]
 }
 
-// classifyShellClause classifies one clause of a command line.
-func classifyShellClause(clause string, allowedRoots []string, cwd string) ShellMutation {
-	return classifyCommandWords(SplitShellWords(clause), allowedRoots, cwd)
-}
-
 // classifyCommandWords classifies one already-tokenized simple command: it
 // skips leading environment assignments, takes the command name from the first
 // remaining word, and consults the tables.
 func classifyCommandWords(words []string, allowedRoots []string, cwd string) ShellMutation {
+	return classifyCommandWordsDepth(words, allowedRoots, cwd, 0)
+}
+
+// classifyCommandWordsDepth is classifyCommandWords carrying the shell-script
+// depth of the line these words came from.
+func classifyCommandWordsDepth(words []string, allowedRoots []string, cwd string, depth int) ShellMutation {
 	i := 0
 	for i < len(words) && shellEnvAssignment(words[i]) {
 		i++
@@ -1977,7 +2565,7 @@ func classifyCommandWords(words []string, allowedRoots []string, cwd string) She
 	if name == "" {
 		return ShellMutationUnproven
 	}
-	return classifyCommand(name, words[i+1:], allowedRoots, cwd)
+	return classifyCommandDepth(name, words[i+1:], allowedRoots, cwd, depth)
 }
 
 // shellReadOnlyCommands are the commands proven to write nothing, whatever
@@ -2032,8 +2620,32 @@ var shellMutatingCommands = map[string]struct{}{
 
 // classifyCommand dispatches one command name with its arguments.
 func classifyCommand(name string, args []string, allowedRoots []string, cwd string) ShellMutation {
+	return classifyCommandDepth(name, args, allowedRoots, cwd, 0)
+}
+
+// shellScriptDepthCap bounds how deep a `-c` script is read before the proof
+// gives up. Past the cap the script is a write: the proof stopped reading it,
+// and "cannot prove" must not become "may write".
+const shellScriptDepthCap = 4
+
+// shellScriptMutation classifies the script operand of `sh -c <script>` as the
+// line it is: the tier a line gets is the tier its script gets, one layer
+// deeper.
+func shellScriptMutation(script string, allowedRoots []string, cwd string, depth int) ShellMutation {
+	if depth > shellScriptDepthCap {
+		return ShellMutationWrites
+	}
+	return classifyShellCommandDepth(script, allowedRoots, cwd, depth)
+}
+
+// classifyCommandDepth is classifyCommand carrying the shell-script depth this
+// command sits at, so a `-c` script nested inside another one is still read.
+func classifyCommandDepth(name string, args []string, allowedRoots []string, cwd string, depth int) ShellMutation {
 	if _, ok := shellMutatingCommands[name]; ok {
 		return ShellMutationWrites
+	}
+	if _, ok := shellWrapperCommands[name]; ok {
+		return classifyWrappedCommand(name, args, allowedRoots, cwd, depth)
 	}
 	switch name {
 	case "git":
@@ -2060,8 +2672,15 @@ func classifyCommand(name string, args []string, allowedRoots []string, cwd stri
 		return classifyFDCommand(args, allowedRoots, cwd)
 	case "cd":
 		return classifyCDCommand(args, allowedRoots, cwd)
-	case "env", "xargs", "nice", "time", "timeout", "sudo", "nohup", "watch", "command", "setsid", "stdbuf":
-		return classifyWrappedCommand(name, args, allowedRoots, cwd)
+	case "sh", "bash", "zsh", "dash", "ksh":
+		// The command that runs is the script in -c, not this shell: without
+		// unwrapping it, `sh -c 'rm -rf pkg'` would hide behind a name no table
+		// describes. `sh script.sh` stays Unproven - that file is not in the
+		// text.
+		if script, ok := shellDashCScriptAt(name, args); ok {
+			return shellScriptMutation(script, allowedRoots, cwd, depth+1)
+		}
+		return ShellMutationUnproven
 	}
 	if _, ok := shellNumfmtAndTacCommands[name]; ok {
 		if runtime.GOOS != "linux" {
@@ -2212,7 +2831,15 @@ func classifyGoCommand(args []string, allowedRoots []string, cwd string) ShellMu
 	case "test":
 		for _, arg := range rest {
 			a := strings.TrimSpace(arg)
-			if a == "-c" || a == "-o" || strings.HasPrefix(a, "-o=") || (strings.HasPrefix(a, "-o") && len(a) > 2) {
+			flag, _, _ := strings.Cut(a, "=")
+			switch flag {
+			case "-c", "-o", "-outputdir", "-coverprofile", "-cpuprofile", "-memprofile",
+				"-mutexprofile", "-blockprofile", "-trace", "-modfile":
+				// Each of these names a file the test run writes: the binary,
+				// the output directory, a profile, the trace, or a modified copy
+				// of go.mod. The names are compared exactly - a prefix test
+				// matches "-overlay", which only reads a JSON config and writes
+				// nothing.
 				return ShellMutationWrites
 			}
 		}
@@ -2315,10 +2942,34 @@ var shellWrapperValueFlags = map[string]map[string]struct{}{
 	"stdbuf":  {"-i": {}, "-o": {}, "-e": {}, "--input": {}, "--output": {}, "--error": {}},
 }
 
+// shellWrapperCommands are the commands that run another command named in their
+// own arguments. One table, because the classifier and the scratch proof both
+// have to look through them.
+var shellWrapperCommands = map[string]struct{}{
+	"env": {}, "xargs": {}, "nice": {}, "time": {}, "timeout": {}, "sudo": {},
+	"nohup": {}, "watch": {}, "command": {}, "setsid": {}, "stdbuf": {},
+}
+
 // classifyWrappedCommand strips a wrapper's own options and classifies the
 // command it runs. Options it cannot account for end the strip, leaving the
 // wrapper's own name as the command - which is Unproven, never ReadOnly.
-func classifyWrappedCommand(name string, args []string, allowedRoots []string, cwd string) ShellMutation {
+func classifyWrappedCommand(name string, args []string, allowedRoots []string, cwd string, depth int) ShellMutation {
+	rest := stripWrapperArgs(name, args)
+	if len(rest) == 0 {
+		switch name {
+		case "env", "xargs":
+			// `env` prints the environment; `xargs` with no utility runs echo.
+			return ShellMutationReadOnly
+		}
+		return ShellMutationUnproven
+	}
+	return classifyCommandWordsDepth(rest, allowedRoots, cwd, depth)
+}
+
+// stripWrapperArgs removes a wrapper's own options and the value some of them
+// take, and the operand that belongs to the wrapper rather than to the command
+// (timeout's duration), leaving the command it runs.
+func stripWrapperArgs(name string, args []string) []string {
 	values := shellWrapperValueFlags[name]
 	i := 0
 	for i < len(args) {
@@ -2344,22 +2995,14 @@ stripped:
 		i = len(args)
 	}
 	rest := args[i:]
-	if len(rest) == 0 {
-		switch name {
-		case "env", "xargs":
-			// `env` prints the environment; `xargs` with no utility runs echo.
-			return ShellMutationReadOnly
-		}
-		return ShellMutationUnproven
-	}
 	if name == "timeout" {
 		// The duration precedes the command; without one there is nothing run.
 		if len(rest) < 2 {
-			return ShellMutationUnproven
+			return nil
 		}
 		rest = rest[1:]
 	}
-	return classifyCommandWords(rest, allowedRoots, cwd)
+	return rest
 }
 
 // classifyGitCommand handles git. Global options that change which repository

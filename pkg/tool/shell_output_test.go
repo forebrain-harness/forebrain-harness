@@ -591,6 +591,216 @@ func TestShellToolPlanModeGateStaysOutOfSandboxedRuns(t *testing.T) {
 	}
 }
 
+// The gate's answer is the scratch proof's answer, one state per behaviour, for
+// the shapes plan mode actually meets: scratch research runs, an unreadable
+// command is a question, and anything that writes the project - including the
+// writes hidden behind a substitution, a grouping token, a heredoc body or a
+// shell's -c - is refused.
+func TestPlanModeShellGateScratchVerdictMatrix(t *testing.T) {
+	t.Setenv("CDPATH", "")
+	project := t.TempDir()
+	ctx := WithProjectRoot(planModeShellCtx(), project)
+	allowedRoots := []string{project}
+	gate := func(cmd string) PlanModeShellGateDecision {
+		return planModeShellGate(ctx, true, safety.ClassifyShellCommand(cmd, allowedRoots, project), cmd, project)
+	}
+	const vsix = "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.0/vspackage"
+
+	allow := []string{
+		// Two real reports, both refused before plan 390.
+		"cat > /tmp/fb390-matrix/zz_probe2_test.go <<'EOF'\npackage t\n\nfunc TestX(t *testing.T) { g(1, 2) }\nEOF",
+
+		// plans/387's flagship research shapes.
+		`cd /tmp && curl -s --max-time 60 -o claude-code.vsix '` + vsix + `' && ls -la && rm -rf claude-x && mkdir claude-x && cd claude-x && unzip -q ../claude-code.vsix && ls -la`,
+		`cd /tmp && curl -s -o x.zip 'https://example.com/x.zip' && unzip -q x.zip`,
+		"cd /tmp && mkdir x",
+		"mkdir /tmp/x",
+		`curl -o /tmp/x.zip 'https://example.com/x.zip'`,
+		"cat <<'EOF'\nbody\nEOF",
+		// A quoted body is data even when it reads like a project write.
+		"cat <<'EOF' | head -1\nrm -rf pkg/tool\nEOF",
+		"git clone /tmp/a /tmp/b",
+		// Templates and expansions the proof can now read.
+		`printf '%s' "$PWD" > /tmp/x`,
+		"echo $(date) > /tmp/x",
+		"echo $((1+2)) > /tmp/x",
+		"cat <<< hi > /tmp/x",
+		"sh -c 'ls -la'",
+		"sh -c 'echo hi > /tmp/x'",
+		"env X=1 sh -c 'echo hi > /tmp/x'",
+		"timeout 5 sh -c 'tar -xzf /tmp/a.tgz -C /tmp/x'",
+		// Read-only shapes the owner ruled keep running.
+		"{ ls; }",
+		"ls ~/.forebrain",
+		// The owner ruled this shape keeps running; either answer does, because
+		// nothing writes.
+		"cd $HOME && ls",
+	}
+	for _, cmd := range allow {
+		if got := gate(cmd); got != PlanModeShellAllow {
+			t.Fatalf("%q = %d, want allow: this shape runs under plan mode", cmd, got)
+		}
+	}
+
+	ask := []string{
+		// Nothing proven to write, but a clause nothing can read. The second
+		// reported transcript is this shape: the export expands and go test
+		// names no target, so the answer is a question that runs.
+		`export PKG_CONFIG_PATH="$PWD/x"; CGO_ENABLED=1 go test -tags fts5 -overlay=/tmp/fb390-matrix/overlay.json ./pkg/tui | grep -c ok | tail -20`,
+		"mkdir -p /tmp/x && go test ./pkg/tool",
+		"(cd pkg && go test ./...)",
+		"python3 /tmp/x.py",
+		"go test -overlay /tmp/x/overlay.json ./pkg/tui",
+		"go test -tags fts5 -overlay=/tmp/x/overlay.json ./pkg/tui -count=1",
+	}
+	for _, cmd := range ask {
+		if got := gate(cmd); got != PlanModeShellAsk {
+			t.Fatalf("%q = %d, want ask", cmd, got)
+		}
+	}
+
+	refuse := []string{
+		"echo hi > pkg/tool/x.txt",
+		"rm -rf pkg/tool",
+		"/bin/rm -rf pkg/tool",
+		"RM -rf pkg/tool",
+		"sed -i '' s/a/b/ main.go",
+		"mkdir /tmp/$X",
+		"mkdir /tmp/x-$(date +%s)",
+		"echo hi > $OUT",
+		"echo $(rm -rf pkg/tool) > /tmp/x",
+		"trap 'rm -rf pkg/tool' EXIT",
+		"cd $(rm -rf pkg/tool)",
+		"ln -t pkg/tool /tmp/x",
+		"cat <<'EOF' | sh\nrm -rf pkg/tool\nEOF",
+		"cat >> /tmp/x <<EOF\n$(rm -rf pkg/tool)\nEOF",
+		"sh <<'EOF'\nrm -rf \"$d\"/pkg/tool\nEOF",
+		"> /tmp/cat sh -c 'rm -rf pkg/tool'",
+		"> /tmp/x sh -c 'rm -rf pkg/tool'",
+		"> pkg/tool/x.txt sh -c 'true'",
+		"sh -c 'true' > $OUT",
+		"sh -c 'rm -rf pkg/tool'",
+		"bash -lc 'rm -rf pkg/tool'",
+		"(cd pkg && echo hi > state.go)",
+		"cd /tmp && pushd /etc && echo hi > x",
+		"cd /tmp && cd - && echo hi > state.go",
+		"cd /tmp && CDPATH=" + project + "/pkg cd tool && echo pwned > x.go",
+		"(rm -rf pkg/tool)",
+		"{ rm -rf pkg/tool; }",
+		"! sed -i '' s/a/b/ main.go",
+		"exec go test -c ./pkg/tool",
+		"(find . -delete)",
+		"if true; then rm -rf pkg/tool; fi",
+		"go test -coverprofile pkg/tool/c.out ./pkg/tool",
+	}
+	for _, cmd := range refuse {
+		if got := gate(cmd); got != PlanModeShellRefuse {
+			t.Fatalf("%q = %d, want refuse", cmd, got)
+		}
+	}
+}
+
+// The acceptance is the gate's answer through the real tool under
+// danger-full-access: the two reported transcripts run, and the shapes that hide
+// a project write behind a redirect, a script or a group are refused with the
+// sentence that names exit_plan_mode - and the file really is not there
+// afterwards.
+//
+// The context carries an explicit project root, because planModeWriteCtx sets
+// none and WorkingDir would then fall back to os.Getwd(): under `go test` that is
+// this repository, and a case that ever stopped being refused would write into
+// it.
+func TestShellToolPlanModeDangerFullAccessScratchResearch(t *testing.T) {
+	t.Setenv("CDPATH", "")
+	home := t.TempDir()
+	projectDir := t.TempDir()
+	scratch, err := os.MkdirTemp("/tmp", "fb390-acc-")
+	if err != nil {
+		t.Fatalf("scratch: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(scratch) })
+	probeDir := "/tmp/fb390-probe"
+	os.RemoveAll(probeDir)
+	t.Cleanup(func() { os.RemoveAll(probeDir) })
+
+	st := NewState(t.TempDir())
+	asked := 0
+	st.SetActionHook(func(context.Context, string, any) (string, bool, error) {
+		asked++
+		return "", false, nil
+	})
+	shellTool, err := NewShellTool(st, &AgentToolRuntime{
+		Home: home,
+		Cfg:  &appcfg.Root{SandboxMode: appcfg.SandboxModeDangerFullAccess},
+	})
+	if err != nil {
+		t.Fatalf("NewShellTool: %v", err)
+	}
+	run := func(sid, cmd string) error {
+		_, handleErr := shellTool.Handle(
+			WithProjectRoot(planModeWriteCtx(home, sid), projectDir),
+			`{"command":`+mustJSON(t, cmd)+`}`,
+		)
+		return handleErr
+	}
+	refused := func(t *testing.T, cmd, absent string) {
+		t.Helper()
+		err := run("sid-"+filepath.Base(absent), cmd)
+		if err == nil || !strings.Contains(err.Error(), "exit_plan_mode") {
+			t.Fatalf("%q = %v, want a refusal naming exit_plan_mode", cmd, err)
+		}
+		if _, statErr := os.Stat(absent); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("%q wrote %s: err=%v", cmd, absent, statErr)
+		}
+	}
+
+	// 1. The first reported transcript: a heredoc test file and an overlay,
+	// both into the scratch directory.
+	target := filepath.Join(scratch, "zz_probe2_test.go")
+	heredoc := "cat > " + target + " <<'EOF'\npackage safety\n\nfunc TestZZ(t *testing.T) { g(1, 2) }\nEOF"
+	if err := run("sid-report-1", heredoc); err != nil {
+		t.Fatalf("the reported heredoc write must run: %v", err)
+	}
+	if _, statErr := os.Stat(target); statErr != nil {
+		t.Fatalf("the heredoc write did not land: %v", statErr)
+	}
+
+	// 2. The second reported transcript: an export with an expansion, then a
+	// test run through an overlay file. The trailing write is the evidence that
+	// the line ran rather than being held at an approval.
+	done := filepath.Join(scratch, "ran.txt")
+	report2 := `export PKG_CONFIG_PATH="$PWD/third_party/pdfium/$(go env GOOS)_$(go env GOARCH)"; CGO_ENABLED=1 go test -tags fts5 -overlay=` +
+		filepath.Join(scratch, "overlay.json") + ` ./pkg/tui -count=1 | grep -c ok | tail -20; printf done > ` + done
+	if err := run("sid-report-2", report2); err != nil {
+		t.Fatalf("the reported overlay run must run: %v", err)
+	}
+	if _, statErr := os.Stat(done); statErr != nil {
+		t.Fatalf("the reported overlay run did not execute: %v", statErr)
+	}
+
+	// 3. A proven scratch write beside an unreadable command: a question, and
+	// under danger-full-access a question runs.
+	if err := run("sid-mkdir-run", "mkdir -p "+probeDir+" && go test ./pkg/tool -count=1"); err != nil {
+		t.Fatalf("a scratch mkdir beside go test must run: %v", err)
+	}
+	if info, statErr := os.Stat(probeDir); statErr != nil || !info.IsDir() {
+		t.Fatalf("the scratch mkdir did not run: err=%v", statErr)
+	}
+	// Cases 2 and 3 are the asked tier: the card is raised, this hook answers
+	// "nothing pending", and the command runs - which is what danger-full-access
+	// does with a question. The filesystem evidence above is what proves it ran.
+	if asked != 2 {
+		t.Fatalf("the asked tier must raise one approval per asked case: asked %d times", asked)
+	}
+
+	// 4-7. The wall: a redirect, a script behind a redirect, a script, and a
+	// group.
+	refused(t, "echo probe > pkg/tool/plan-mode-probe.txt", filepath.Join(projectDir, "pkg", "tool", "plan-mode-probe.txt"))
+	refused(t, "> /tmp/cat sh -c 'echo pwned > pkg/tool/pwned.txt'", filepath.Join(projectDir, "pkg", "tool", "pwned.txt"))
+	refused(t, "sh -c 'echo pwned > pkg/tool/pwned2.txt'", filepath.Join(projectDir, "pkg", "tool", "pwned2.txt"))
+	refused(t, "(echo pwned > pkg/tool/pwned3.txt)", filepath.Join(projectDir, "pkg", "tool", "pwned3.txt"))
+}
+
 // An approval is an answer for one command: on replay both the refused and the
 // asked tier run, which is what makes the gate's error message actionable.
 func TestShellToolPlanModeGateRunsAnApprovedWrite(t *testing.T) {
