@@ -6913,7 +6913,9 @@ func TestDeliverablesFoldCountsFilesNotRows(t *testing.T) {
 // TestDeliverableRowsAreClickable pins the hover highlight: every row of the
 // group is a click target, the first one included, because the group has no
 // header. A group too short to fold is clickable the same way — its rows open
-// files, they do not need a fold to be worth clicking.
+// files, they do not need a fold to be worth clicking. How far along the row
+// each target reaches is textOnlyTarget's answer: see
+// TestDeliverableRowsAreTargetsOnlyOnTheirText.
 func TestDeliverableRowsAreClickable(t *testing.T) {
 	vm := viewModel{}
 	vm.append(Frame{Kind: FrameDeliverables, Deliverables: manyDeliverables(5), Final: true})
@@ -7678,4 +7680,176 @@ line two
 			}
 		})
 	}
+}
+
+// rowTextEnd is the printed width of a painted row's text: its cells up to
+// and including the last non-blank one.
+func rowTextEnd(line string) int {
+	return displayLineWidth(strings.TrimRight(stripANSI(line), " "))
+}
+
+// clickCell drives one fresh single click — the multi-click clock reset, then
+// clickAt's press/release pair — so two calls in a row never read as a
+// double-click (clickRow does the same for column 0).
+func clickCell(r *Renderer, col, row int) {
+	r.lastClickTime = time.Time{}
+	clickAt(r, col, row)
+}
+
+// textTargetScreen paints frame into a renderer with a real terminal size and
+// returns it with the opener stub's record. The rows a click resolves against
+// are the painted ones: a hand-made vpLastRender is re-laid-out by the first
+// paint at the live width, so a text end measured on it is wrong for the
+// click (a wrapped continuation row ends two columns earlier there).
+func textTargetScreen(t *testing.T, cwd string, frame Frame) (*Renderer, *[]string) {
+	t.Helper()
+	opened := stubImageOpener(t)
+	r, _ := newPlanDrawerScreenWithOut(t, 80, 20)
+	r.WithWorkingDir(cwd)
+	r.RenderFrame(frame)
+	return r, opened
+}
+
+// paintedRowOf returns the 0-based screen row whose painted text carries needle.
+func paintedRowOf(t *testing.T, r *Renderer, needle string) int {
+	t.Helper()
+	for i, painted := range r.vpPainted {
+		if strings.Contains(stripANSI(painted), needle) {
+			return i
+		}
+	}
+	t.Fatalf("no painted row carries %q", needle)
+	return -1
+}
+
+// TestDeliverableRowsAreTargetsOnlyOnTheirText is the owner's report of
+// 2026-11-26: every row of the group was a click target across the whole
+// terminal row, so a click meant for the transcript beside a short path
+// opened a file. A file row, its wrapped continuation and the fold hint now
+// act only from the cells their text is painted on — the diff counts
+// included — and the hover highlights exactly those cells.
+func TestDeliverableRowsAreTargetsOnlyOnTheirText(t *testing.T) {
+	cwd := t.TempDir()
+	countsFrame := Frame{Kind: FrameDeliverables, Final: true,
+		Deliverables: []tool.Deliverable{{ID: "a", Name: "a.go", Kind: "text", RelPath: "pkg/a.go"}},
+		TurnDiffs:    []event.TurnDiffFile{{Path: filepath.Join(cwd, "pkg", "a.go"), Added: 3}},
+	}
+
+	t.Run("a file row: the last text cell opens, the first blank cell and the far right do not", func(t *testing.T) {
+		r, opened := textTargetScreen(t, cwd, countsFrame)
+		row := paintedRowOf(t, r, "pkg/a.go")
+		plain := stripANSI(r.vpPainted[row])
+		// Both counts are always painted (render.go:6315-6319), so the row's
+		// last text cells are the pair.
+		if !strings.HasSuffix(plain, "+3 -0") {
+			t.Fatalf("the fixture must paint the counts as part of the text, got %q", plain)
+		}
+		end := rowTextEnd(r.vpPainted[row])
+		want := filepath.Join(cwd, "pkg", "a.go")
+		clickCell(r, end-1, row)
+		if len(*opened) != 1 || (*opened)[0] != want {
+			t.Fatalf("the last text cell opened %v, want [%s]", *opened, want)
+		}
+		clickCell(r, end, row)
+		clickCell(r, 79, row)
+		if len(*opened) != 1 {
+			t.Fatalf("a click right of the text opened %v", *opened)
+		}
+		if changed := r.ViewportClickToggle(79, row); changed || len(*opened) != 1 {
+			t.Fatalf("the single-click event path opened %v (changed=%v) right of the text", *opened, changed)
+		}
+	})
+
+	t.Run("a wrapped continuation is a target on its own text", func(t *testing.T) {
+		r, opened := textTargetScreen(t, cwd, Frame{Kind: FrameDeliverables, Deliverables: manyDeliverables(2), Final: true})
+		first := paintedRowOf(t, r, "out/f00-")
+		row := first + 1
+		if row >= len(r.vpPainted) || startsDeliverableRow(stripANSI(r.vpPainted[row])) {
+			t.Fatalf("the wrapping fixture painted no continuation row for f00:\n%s", stripANSI(strings.Join(r.vpPainted, "\n")))
+		}
+		end := rowTextEnd(r.vpPainted[row])
+		if end >= 80 {
+			t.Fatalf("the fixture wants a continuation that ends short of the row, got end=%d", end)
+		}
+		clickCell(r, end, row)
+		if len(*opened) != 0 {
+			t.Fatalf("a click right of the continuation's text opened %v", *opened)
+		}
+		clickCell(r, end-1, row)
+		want := filepath.Join(cwd, "out", "f00-很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名很长的文件名.txt")
+		if len(*opened) != 1 || (*opened)[0] != want {
+			t.Fatalf("opened = %v, want [%s]", *opened, want)
+		}
+	})
+
+	t.Run("the fold hint toggles from its text and from nowhere else", func(t *testing.T) {
+		r, opened := textTargetScreen(t, cwd, Frame{Kind: FrameDeliverables, Deliverables: manyDeliverables(5), Final: true})
+		hint := paintedRowOf(t, r, "more deliverable")
+		end := rowTextEnd(r.vpPainted[hint])
+		shown := func() string { return stripANSI(strings.Join(r.vpPainted, "\n")) }
+		clickCell(r, end, hint)
+		if changed := r.ViewportClickToggle(79, hint); changed {
+			t.Fatal("the single-click event path toggled the fold right of the hint's text")
+		}
+		if strings.Contains(shown(), "click to hide") {
+			t.Fatal("a click right of the hint's text folded the group")
+		}
+		clickCell(r, end-1, hint)
+		if !strings.Contains(shown(), "click to hide") {
+			t.Fatal("the last cell of the hint's text did not expand the group")
+		}
+		if len(*opened) != 0 {
+			t.Fatalf("the hint row opened %v", *opened)
+		}
+	})
+
+	t.Run("hover highlights the text alone, and only while the pointer is on it", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			frame  Frame
+			needle string
+		}{
+			// The owner's screenshot: the counts end the text, each closed by
+			// a reset the highlight must survive.
+			{"a file row with diff counts", countsFrame, "pkg/a.go"},
+			{"the fold hint", Frame{Kind: FrameDeliverables, Deliverables: manyDeliverables(5), Final: true}, "more deliverable"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				r, _ := textTargetScreen(t, cwd, tc.frame)
+				row := paintedRowOf(t, r, tc.needle)
+				before := r.vpPainted[row]
+				end := rowTextEnd(before)
+				hoverSeq := "\x1b[48;5;" + hoverBackgroundColor + "m"
+				move := func(col, row int) {
+					r.HandleMouse(inputEvent{kind: inputEventMouseMove, mouseCol: col, mouseRow: row, at: time.Now()})
+				}
+				move(end-1, row)
+				cells := rowCellBackgrounds(r.vpPainted[row])
+				if len(cells) != end {
+					t.Fatalf("the hover painted %d cells, want the row's %d text cells only: %q", len(cells), end, r.vpPainted[row])
+				}
+				for col, bg := range cells {
+					if bg != hoverSeq {
+						t.Fatalf("cell %d carries background %q, want the hover background: %q", col, bg, r.vpPainted[row])
+					}
+				}
+				if stripANSI(r.vpPainted[row]) != stripANSI(before) {
+					t.Fatalf("the hover changed the row's text:\n%s\n%s", before, r.vpPainted[row])
+				}
+				move(end, row)
+				if r.vpHoverRow != -1 || r.vpPainted[row] != before {
+					t.Fatalf("the highlight stayed once the pointer left the text (vpHoverRow=%d):\n%s", r.vpHoverRow, r.vpPainted[row])
+				}
+				move(70, row)
+				if r.vpPainted[row] != before {
+					t.Fatalf("hovering the blank cells right of the text painted a highlight:\n%s", r.vpPainted[row])
+				}
+				move(end-1, row)
+				if r.vpPainted[row] == before {
+					t.Fatal("moving back onto the text did not restore the highlight")
+				}
+			})
+		}
+	})
 }

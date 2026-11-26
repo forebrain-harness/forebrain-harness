@@ -3050,6 +3050,9 @@ func (vr viewportRender) maxScrollOffset() int {
 // files instead, only its fold hint row still toggles — a click on a file row
 // must not fold the group out from under the row being opened, and a small
 // group (nothing to fold) refuses everywhere.
+//
+// The hint's col-wise reach is the caller's call: transcriptClickLocked keeps
+// a click right of the hint's text off it (textOnlyTarget).
 func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 	blockID, isHeader := vr.blockAtRow(screenRow)
 	if blockID < 0 {
@@ -3100,6 +3103,10 @@ func (m *viewModel) toggleAtScreenRow(vr viewportRender, screenRow int) bool {
 // nested card inside a subagent's view is that view's account of a
 // grandchild. So a fanout block answers by the row that was hit first (which
 // grandchild's task it is) and only then by the block's own owner.
+//
+// It resolves row to owner, not the target's reach along the row: that is
+// textOnlyTarget, applied by the caller (transcriptClickLocked), so the blank
+// cells right of a short row open nothing.
 func (m *viewModel) agentAtScreenRow(vr viewportRender, screenRow int) (string, bool) {
 	blockID, _ := vr.blockAtRow(screenRow)
 	if blockID < 0 {
@@ -3124,6 +3131,10 @@ func (m *viewModel) agentAtScreenRow(vr viewportRender, screenRow int) (string, 
 // marker row it is. Only the marker row answers: the card's own header (its
 // title, which also names the file) and the block's separator row stay inert,
 // so a click on the title keeps meaning what it meant before — nothing.
+//
+// Row to marker, not the marker's reach along the row: the caller
+// (transcriptClickLocked) stops a click past the row's text with
+// textOnlyTarget.
 func (m *viewModel) imageMarkerAtScreenRow(vr viewportRender, screenRow int) (path, label string, ok bool) {
 	blockID, _ := vr.blockAtRow(screenRow)
 	if blockID < 0 {
@@ -3184,12 +3195,67 @@ func deliverableHintRow(vr viewportRender, screenRow int) bool {
 	return strings.HasPrefix(plain, "···")
 }
 
+// textOnlyTarget reports whether a painted screen row is a click target that
+// acts only from the cells its text is painted on, and the printed width of
+// that text: a deliverables group's file row or fold hint (its wrapped
+// continuations included), an image step's marker row, or a row that opens a
+// subagent's view — a lifecycle card's row or one task row inside a fanout.
+// Owner ruling 2026-11-26: these rows used to answer a click anywhere across
+// the terminal row, so a click meant for the transcript beside a short path
+// opened a file. The cells at and past end are the transcript's, not the
+// target's. One predicate serves the click, the hover and the highlight, so
+// the three cannot disagree about where the target ends. The width is read
+// the way deliverableHintRow and isImageMarkerRow read the same rows — SGR
+// stripped, trailing blanks dropped — which is exact for the rows named here:
+// they carry SGR only and never an erase-to-end-of-line.
+//
+// view is the view on screen. A view's own rows are not targets: every frame a
+// subagent produced carries its AgentID and answers agentAtScreenRow, yet
+// openAgentViewAtRowLocked refuses the view the user is already in, so those
+// rows keep the row-wide target (and the any-row fold) their long cards have.
+func (vr viewportRender) textOnlyTarget(screenRow int, view string, vm *viewModel) (end int, ok bool) {
+	if screenRow < 0 || screenRow >= len(vr.lines) {
+		return 0, false
+	}
+	blockID, _ := vr.blockAtRow(screenRow)
+	if blockID < 0 {
+		return 0, false
+	}
+	b := vm.blockByID(blockID)
+	if b == nil {
+		return 0, false
+	}
+	switch b.frame.Kind {
+	case FrameDeliverables:
+		// Every row of the group: a file row, a wrapped continuation and the
+		// fold hint alike.
+	case FrameTool:
+		if _, _, marker := vm.imageMarkerAtScreenRow(vr, screenRow); !marker {
+			return 0, false
+		}
+	default:
+		// The rows that open ANOTHER subagent's view — the same rows
+		// openAgentViewAtRowLocked answers; a view's own rows carry its
+		// AgentID but are inert there, so they keep their row-wide targets.
+		agentID, agentRow := vm.agentAtScreenRow(vr, screenRow)
+		if !agentRow || agentID == view {
+			return 0, false
+		}
+	}
+	plain := strings.TrimRight(sgrPattern.ReplaceAllString(vr.lines[screenRow], ""), " ")
+	return displayLineWidth(plain), true
+}
+
 // deliverableAtScreenRow resolves a 0-based screen row to the delivered file
 // whose row was clicked: the label the group paints for that deliverable,
 // relative or absolute exactly as the frame carried it — the caller joins a
 // relative label against the project root before opening. A long label's
 // wrapped continuation rows answer with the same file, and the fold hint row
 // answers nothing: it is the toggle target, not a file row.
+//
+// Row to file, not the row's reach along the line: the caller
+// (transcriptClickLocked) rejects a click past the row's text with
+// textOnlyTarget, so the blank cells beside a short path open nothing.
 //
 // The count runs over the block's full cached lines, not over the painted
 // window: vr.lines only carries the visible slice, so a group whose top had
@@ -3277,6 +3343,10 @@ func (vr viewportRender) spanForBlock(blockID int) (lineSpan, bool) {
 // clickable block, i.e. hovering it should show a highlight. Returns true for
 // any row inside a tool, finalized thinking, or compact block that has a
 // disclosure header (long content).
+//
+// It answers "is this row a target at all"; how far along the row the target
+// reaches is textOnlyTarget's answer, which the paint consults to stop a
+// text-only row's highlight at its text.
 func (vr viewportRender) isClickableRow(screenRow int, vm *viewModel) bool {
 	blockID, isHeader := vr.blockAtRow(screenRow)
 	if blockID < 0 {
@@ -5586,7 +5656,13 @@ func (r *Renderer) paintViewportLocked() {
 			// its last painted cell erased on deferred-wrap terminals.
 			line = applySelectionHighlight(line, selectBgSeq, startCol, endCol) + "\x1b[49m\x1b[0m"
 		} else if r.vpHoverRow == row && vr.isClickableRow(row, activeVM) {
-			line = applyHoverHighlight(line, rowWidth, hoverBgSeq)
+			if end, ok := vr.textOnlyTarget(row, r.activeView, activeVM); ok {
+				// The row's target is its text, so its highlight is too: the
+				// same painter as every other row, stopped at the text's end.
+				line = applyHoverHighlight(line, end, hoverBgSeq)
+			} else {
+				line = applyHoverHighlight(line, rowWidth, hoverBgSeq)
+			}
 		}
 		if token.row >= 0 && r.vpControlHover == hoverTargetProgress &&
 			r.vpHoverProgress.on(r.activeView, absRow) {
@@ -6965,25 +7041,33 @@ func (r *Renderer) viewportClickToggleAt(col, row int, at time.Time) bool {
 		return true
 	}
 	r.selectClearLocked()
-	changed, imagePath, imageLabel := r.transcriptClickLocked(s, row)
+	changed, imagePath, imageLabel := r.transcriptClickLocked(s, col, row)
 	r.mu.Unlock()
 	openImagePreview(r, imagePath, imageLabel)
 	return changed
 }
 
-// transcriptClickLocked does what a plain click on screen row row of s does to
-// the transcript: it opens the subagent view of the card under it, or folds or
-// expands the block, and names the file to open when the row is an image
-// step's marker line or a deliverables group's file row. The file is resolved
-// before the fold toggle, which repaints and can shift every row below the
-// click; the caller starts the viewer once r.mu is released, as starting a
+// transcriptClickLocked does what a plain click on screen cell col of screen row
+// row of s does to the transcript: it opens the subagent view of the card under
+// it, or folds or expands the block, and names the file to open when the row is
+// an image step's marker line or a deliverables group's file row. The file is
+// resolved before the fold toggle, which repaints and can shift every row below
+// the click; the caller starts the viewer once r.mu is released, as starting a
 // process is not a paint. A row outside the transcript, or a screen of a view
-// since left, does nothing. Caller holds r.mu.
-func (r *Renderer) transcriptClickLocked(s shownScreen, row int) (changed bool, imagePath, imageLabel string) {
+// since left, does nothing. A row whose target is its text (textOnlyTarget)
+// only acts from the cells that text is painted on, so col decides as well as
+// row. Caller holds r.mu.
+func (r *Renderer) transcriptClickLocked(s shownScreen, col, row int) (changed bool, imagePath, imageLabel string) {
 	if row < 0 || row >= s.bodyHeight || s.view != r.activeView {
 		return false, "", ""
 	}
 	vm := r.activeVMLocked()
+	// A row whose target is its text (textOnlyTarget) acts only from the
+	// cells that text is painted on: a click to the right of it lands on the
+	// transcript, not on the file, the image, the fold or the subagent view.
+	if end, ok := s.render.textOnlyTarget(row, r.activeView, vm); ok && col >= end {
+		return false, "", ""
+	}
 	// A modal overlay owns the composer area while it is up, so the hint rows
 	// the click would answer on are not painted: the image row and the
 	// deliverable rows stay inert instead of accepting a gesture whose only
@@ -7043,6 +7127,13 @@ func (r *Renderer) viewportHoverAt(col, row int, at time.Time) {
 	if target == hoverTargetNone && !(s.drawerOpen && col >= s.drawerLeft && row < s.bodyHeight) {
 		if row >= 0 && row < r.vpHeight {
 			hoverRow = row
+			// A row whose target is its text highlights only while the pointer
+			// is on that text: the highlight is the clickable area, nowhere else.
+			if s.view == r.activeView {
+				if end, ok := s.render.textOnlyTarget(row, r.activeView, r.activeVMLocked()); ok && col >= end {
+					hoverRow = -1
+				}
+			}
 		}
 	}
 	hoverToken := planDrawerHoverToken{}
@@ -8146,7 +8237,7 @@ func (r *Renderer) viewportRelease(col, row int, at time.Time) viewportClick {
 		caret, placeCaret := s.composerCaret(clickCol, clickRow)
 		placeCaret = placeCaret && !r.composerSuppressed
 		click.overlayLine, click.overlayCol, click.overlay = s.overlayPosition(clickCol, clickRow)
-		_, imagePath, imageLabel := r.transcriptClickLocked(s, clickRow)
+		_, imagePath, imageLabel := r.transcriptClickLocked(s, clickCol, clickRow)
 		r.mu.Unlock()
 		if placeCaret {
 			// The raw input reader owns the buffer, so the caret is requested

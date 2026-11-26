@@ -468,7 +468,10 @@ type Renderer struct {
 	// vpHoverRow is the 0-based screen row under the mouse cursor, set by
 	// ViewportHover on inputEventMouseMove. The next paint applies a subtle
 	// background highlight to clickable rows under the cursor. -1 means no
-	// hover (e.g. cursor left the window or first move not yet received).
+	// hover (e.g. cursor left the window or first move not yet received), and
+	// also what a row whose target is its text (textOnlyTarget) reports while
+	// the pointer is on the blank cells to the right of that text — there the
+	// highlight would advertise a click area the row does not have.
 	vpHoverRow int
 	// vpControlHover names the local control the pointer is over — the
 	// composer's ☑N/M plan-progress token, a run-closing transcript row's own

@@ -943,3 +943,39 @@ func TestBrowserBundleIDFromLSHandlers(t *testing.T) {
 		}
 	}
 }
+
+// TestImageMarkerRowIsATargetOnlyOnItsText extends the owner's 2026-11-26
+// ruling to the image step's marker row: the click that opens the image must
+// land on the marker's text; the blank cells to its right open nothing. A
+// long file name wraps the marker, and each row is a target on its own text.
+func TestImageMarkerRowIsATargetOnlyOnItsText(t *testing.T) {
+	long := strings.Repeat("shot-", 20) + ".png" // wraps the marker line at 80 columns
+	for _, tc := range []struct{ name, path string }{{"one.png", "/tmp/one.png"}, {long, "/tmp/" + long}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, opened := textTargetScreen(t, "", imageStepFrame(tc.path))
+			marker := firstRowWithPrefix(r.vpPainted, "  └ ▤ ")
+			if marker < 0 {
+				t.Fatalf("no marker row painted:\n%s", stripANSI(strings.Join(r.vpPainted, "\n")))
+			}
+			// Every row the marker wraps into is a target on its own text.
+			last := marker
+			for last+1 < len(r.vpPainted) && isImageMarkerRow(r.vpPainted[last+1]) {
+				last++
+			}
+			for row := marker; row <= last; row++ {
+				end := rowTextEnd(r.vpPainted[row])
+				before := len(*opened)
+				if end < 80 {
+					clickCell(r, end, row)
+					if changed := r.ViewportClickToggle(end, row); changed || len(*opened) != before {
+						t.Fatalf("row %d: a click right of the text opened %v (changed=%v)", row, *opened, changed)
+					}
+				}
+				clickCell(r, end-1, row)
+				if len(*opened) != before+1 || (*opened)[before] != tc.path {
+					t.Fatalf("row %d: opened = %v, want %s once more", row, *opened, tc.path)
+				}
+			}
+		})
+	}
+}

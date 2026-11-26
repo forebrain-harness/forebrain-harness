@@ -24551,6 +24551,91 @@ func TestClickingAFanoutTaskRowOpensThatTasksView(t *testing.T) {
 	}
 }
 
+// TestSubagentCardRowsAreTargetsOnlyOnTheirText extends the owner's 2026-11-26
+// ruling to the rows that open a subagent's view — a lifecycle card's row and
+// a fanout task row: the click must land on the row's text; the blank cells to
+// its right open nothing. The frames are painted for real (a hand-made render
+// is re-laid-out by the first paint at another width).
+func TestSubagentCardRowsAreTargetsOnlyOnTheirText(t *testing.T) {
+	paint := func(t *testing.T, frames ...Frame) *Renderer {
+		t.Helper()
+		r, _ := newPlanDrawerScreenWithOut(t, 100, 30)
+		for _, f := range frames {
+			r.retainFrameLocked(f)
+		}
+		r.mu.Lock()
+		r.paintViewportLocked()
+		r.mu.Unlock()
+		return r
+	}
+
+	t.Run("a lifecycle card row", func(t *testing.T) {
+		r := paint(t,
+			Frame{Kind: FrameStatus, Title: "subagent plan-reviewer spawned", Content: "plan-reviewer", AgentID: "subagent-42", SubagentLifecycleCard: true, Final: true},
+			Frame{Kind: FrameAssistant, Content: "Verdict: rework. internal/x.go:12 says otherwise.", AgentID: "subagent-42", Final: true},
+			Frame{Kind: FrameStatus, Title: "subagent plan-reviewer ended", Content: "plan-reviewer ok", AgentID: "subagent-42", SubagentLifecycleCard: true, Final: true},
+		)
+		row := rowOfPrimaryText(t, r, "subagent plan-reviewer ended")
+		end := rowTextEnd(r.vpPainted[row])
+		clickCell(r, end, row)
+		if changed := r.ViewportClickToggle(99, row); changed || r.ActiveView() != "" {
+			t.Fatalf("a click right of the card's text opened view %q (changed=%v)", r.ActiveView(), changed)
+		}
+		clickCell(r, end-1, row)
+		if got := r.ActiveView(); got != "subagent-42" {
+			t.Fatalf("the last text cell opened %q, want subagent-42", got)
+		}
+	})
+
+	t.Run("a fanout task row", func(t *testing.T) {
+		r := paint(t, fanoutFrameForTest())
+		for _, agentID := range []string{"task-a", "task-b"} {
+			r.ensurePerAgentVM(agentID).append(Frame{Kind: FrameAssistant, Content: "transcript of " + agentID, AgentID: agentID, Final: true})
+		}
+		row := rowOfPrimaryText(t, r, "check the sandbox profile")
+		end := rowTextEnd(r.vpPainted[row])
+		clickCell(r, end, row)
+		if changed := r.ViewportClickToggle(99, row); changed || r.ActiveView() != "" {
+			t.Fatalf("a click right of the task row's text opened view %q (changed=%v)", r.ActiveView(), changed)
+		}
+		clickCell(r, end-1, row)
+		if got := r.ActiveView(); got != "task-b" {
+			t.Fatalf("the last text cell opened %q, want task-b", got)
+		}
+	})
+
+	t.Run("the agent's own view keeps row-wide targets", func(t *testing.T) {
+		// The frames a subagent produces carry its AgentID, so every row of its
+		// long cards answers agentAtScreenRow — yet a click there opens nothing:
+		// openAgentViewAtRowLocked refuses the view the user is already in. Such
+		// a row is not a text-only target; it keeps the row-wide target and the
+		// any-row fold a long thinking or compact card has, which is what its
+		// own view showed before the deliverables rows were narrowed.
+		r, _ := newPlanDrawerScreenWithOut(t, 80, 20)
+		body := strings.Repeat("reasoning step\n", 12)
+		r.retainFrameLocked(Frame{Kind: FrameThinking, Title: "thinking", Content: body, AgentID: "subagent-42", Final: true})
+		r.retainFrameLocked(Frame{Kind: FrameMemoryCompact, Title: "compacted", Content: body, AgentID: "subagent-42", Final: true})
+		r.setActiveViewLocked("subagent-42")
+		r.mu.Lock()
+		r.paintViewportLocked()
+		r.mu.Unlock()
+
+		row := rowOfPrimaryText(t, r, "click to expand")
+		if end, ok := r.vpLastRender.textOnlyTarget(row, r.activeView, r.activeVMLocked()); ok {
+			t.Fatalf("row %d of the view's own card reports a text-only target (end=%d); its rows stay row-wide", row, end)
+		}
+		r.HandleMouse(inputEvent{kind: inputEventMouseMove, mouseCol: 70, mouseRow: row, at: time.Now()})
+		if cells := len(rowCellBackgrounds(r.vpPainted[row])); cells != 80 {
+			t.Fatalf("hovering beside the card's text highlighted %d cells, want the whole 80-cell row", cells)
+		}
+		before := stripANSI(strings.Join(r.vpPainted, "\n"))
+		clickCell(r, 70, row)
+		if after := stripANSI(strings.Join(r.vpPainted, "\n")); after == before {
+			t.Fatalf("a click on the card's blank cells did not fold it:\n%s", before)
+		}
+	})
+}
+
 // The roster cursor names the agent whose transcript is on screen, however the
 // user got there. Opening a subagent by clicking its card in the conversation
 // is one of those ways, and the roster used to keep its own selection — written
