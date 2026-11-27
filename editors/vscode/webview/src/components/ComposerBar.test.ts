@@ -4,6 +4,7 @@ import ComposerBar from './ComposerBar.vue'
 import ModeChip from '@/components/chat/ModeChip.vue'
 import ModelChip from '@/components/chat/ModelChip.vue'
 import ProjectPill from '@/components/chat/ProjectPill.vue'
+import ViewModeChip from '@/components/chat/ViewModeChip.vue'
 import { emptyPendingInputPreview, type RuntimeStatus } from '@/composables/useChatStream'
 import type { ProjectRecord, SessionModelResponse } from '@/lib/api'
 import type { ProjectTarget } from '@/lib/projectTarget'
@@ -105,6 +106,14 @@ describe('the webview composer', () => {
     expect(wrapper.emitted('insert-plus')?.[0]).toEqual(['/init '])
     await starters[1].trigger('click')
     expect(wrapper.emitted('select-mode')?.[0]).toEqual(['plan'])
+  })
+
+  it('hands the reading-mode pick to the shell as the model update', async () => {
+    const wrapper = bar()
+    const chip = wrapper.findComponent(ViewModeChip)
+    expect(chip.exists()).toBe(true)
+    await chip.vm.$emit('update:modelValue', 'concise')
+    expect(wrapper.emitted('update:viewMode')?.[0]).toEqual(['concise'])
   })
 
   it('picks a project through the pill and marks it when a send was refused for want of one', async () => {

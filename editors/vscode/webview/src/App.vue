@@ -35,6 +35,7 @@
         :history-error="historyError"
         :scope="workbenchScope"
         :busy-notice="busyNotice"
+        :view-mode="viewMode"
         @choose="pickFromNotice"
         @copy-message="copyMessage"
         @retry-history="retryHistory"
@@ -99,6 +100,7 @@ import ComposerBar from './components/ComposerBar.vue'
 import ThreadView from './components/ThreadView.vue'
 import { TRANSPORT_KEY } from './transport'
 import { useChatStream, type ChatMessage } from '@/composables/useChatStream'
+import { useViewMode } from '@/composables/useViewMode'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { getErrorMessage, forebrainApi, type ProjectRecord, type SessionModelOption, type SessionModelResponse, type WorkspaceScope } from '@/lib/api'
 import { targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
@@ -179,7 +181,10 @@ const availableBots = ref<BotOption[]>([])
 // The @ picker's bot section: the panel lists none until its step owns the
 // roster, and the fetch is done so the picker does not wait on one.
 const botsFetchDone = ref(true)
-const viewMode = ref<'default' | 'concise'>('default')
+// The reading mode is the conversation's own, kept per session exactly as the
+// web's chat page keeps it (useViewMode): the chip writes it, the thread and
+// the composer read it.
+const { viewMode } = useViewMode(() => String(sessionId.value ?? ''))
 
 async function loadProjects() {
   try {

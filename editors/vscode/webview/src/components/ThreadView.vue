@@ -201,6 +201,7 @@ import { blockOnActivityLine, groupActivityRuns } from '@/lib/activityRuns'
 import { blockVisibleIn } from '@/lib/viewMode'
 import { formatProviderError } from '@/lib/providerError'
 import type { WorkspaceScope } from '@/lib/api'
+import type { ViewMode } from '@/composables/useViewMode'
 import { currentLocale, t } from '@/locales'
 
 const props = defineProps<{
@@ -213,6 +214,9 @@ const props = defineProps<{
   scope: WorkspaceScope
   /** The refusal code when the conversation runs somewhere else; '' is none. */
   busyNotice?: string
+  /** The reading mode of this view — the same per-session choice the web
+   *  thread keeps (useViewMode), wired through by the shell. */
+  viewMode: ViewMode
 }>()
 
 const emit = defineEmits<{
@@ -221,12 +225,8 @@ const emit = defineEmits<{
   (e: 'retry-history'): void
 }>()
 
-// The panel reads in one mode; when the reading-mode chip arrives it plugs in
-// here the same way the web's chat view does.
-const viewMode = 'default' as const
-
 const drawnBlocks = (blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> => {
-  return (blocks ?? []).filter((block) => blockVisibleIn(viewMode, block.kind)
+  return (blocks ?? []).filter((block) => blockVisibleIn(props.viewMode, block.kind)
     && !(block.kind === 'tool' && (stepHoldsNoCard(block.step) || stoppedCardSaysNothing(block.step))))
 }
 

@@ -19,6 +19,7 @@ const base = {
   historyLoading: false,
   historyError: null as string | null,
   scope: {},
+  viewMode: 'default' as const,
 }
 
 function threadOf(...messages: ChatMessage[]) {
@@ -54,6 +55,29 @@ describe('the webview thread', () => {
     expect(card.props('step').status).toBe('success')
     await expectSoon(wrapper, '中间回答')
     await expectSoon(wrapper, '最终回答')
+  })
+
+  it('concise steps the run cards out of the way and switching back restores them', async () => {
+    const wrapper = mount(ThreadView, {
+      props: {
+        ...base,
+        viewMode: 'concise' as const,
+        messages: [messageWith([
+          { kind: 'thinking', id: 't1', text: '想一想', open: false, startedAt: 1 },
+          { kind: 'tool', id: 'to1', step: { stepId: 's1', toolName: 'shell', summary: 'ls', header: 'Ran ls', status: 'success', output: 'ok' } },
+          { kind: 'assistant', id: 'as1', text: '中间回答', open: false },
+        ])],
+      },
+    })
+    // Concise keeps the answers and hides the run's own record.
+    expect(wrapper.findComponent(ThinkingCard).exists()).toBe(false)
+    expect(wrapper.findComponent(ToolCallCard).exists()).toBe(false)
+    await expectSoon(wrapper, '中间回答')
+
+    // Back to default: the same turn draws whole again.
+    await wrapper.setProps({ viewMode: 'default' })
+    expect(wrapper.findComponent(ThinkingCard).exists()).toBe(true)
+    expect(wrapper.findComponent(ToolCallCard).exists()).toBe(true)
   })
 
   it('draws a failed call through the same card, whose danger colouring is the card\'s own', () => {
