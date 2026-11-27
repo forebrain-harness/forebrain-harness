@@ -9,25 +9,35 @@
   "l10n": "./l10n",
   "categories": ["Other"],
   "extensionKind": ["ui"],
-  "activationEvents": ["onView:forebrain.chat", "onView:forebrain.checklist"],
+  "activationEvents": ["onStartupFinished", "onView:forebrain.chatSidebar", "onView:forebrain.chatSecondary", "onView:forebrain.sessionsList"],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "%capability.untrustedWorkspaces%"
+    }
+  },
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
-      "secondarySidebar": [{ "id": "forebrain", "title": "%container.forebrain%", "icon": "assets/forebrain.svg" }]
-    },
-    "views": {
-      "forebrain": [
-        { "id": "forebrain.chat", "name": "%view.chat%", "type": "webview", "contextualTitle": "%container.forebrain%" },
-        { "id": "forebrain.checklist", "name": "%view.checklist%", "contextualTitle": "%container.forebrain%" }
+      "activitybar": [
+        { "id": "forebrain-sidebar", "title": "%container.forebrain%", "icon": "assets/forebrain.svg", "when": "forebrain.doesNotSupportSecondarySidebar" },
+        { "id": "forebrain-sessions", "title": "%container.forebrain%", "icon": "assets/forebrain.svg", "when": "forebrain.sessionsListEnabled" }
+      ],
+      "secondarySidebar": [
+        { "id": "forebrain-sidebar-secondary", "title": "%container.forebrain%", "icon": "assets/forebrain.svg", "when": "!forebrain.doesNotSupportSecondarySidebar" }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "forebrain.checklist",
-        "contents": "%view.checklistWelcome%",
-        "when": "forebrain.checklistEmpty"
-      }
-    ],
+    "views": {
+      "forebrain-sidebar": [
+        { "id": "forebrain.chatSidebar", "name": "%view.forebrain%", "type": "webview", "contextualTitle": "%container.forebrain%", "when": "forebrain.doesNotSupportSecondarySidebar" }
+      ],
+      "forebrain-sidebar-secondary": [
+        { "id": "forebrain.chatSecondary", "name": "%view.forebrain%", "type": "webview", "contextualTitle": "%container.forebrain%", "when": "!forebrain.doesNotSupportSecondarySidebar" }
+      ],
+      "forebrain-sessions": [
+        { "id": "forebrain.sessionsList", "name": "%view.sessions%", "type": "webview", "contextualTitle": "%container.forebrain%", "when": "forebrain.sessionsListEnabled" }
+      ]
+    },
     "commands": [
       { "command": "forebrain.openPanel", "title": "%command.openPanel%" },
       { "command": "forebrain.enterGatewayToken", "title": "%command.enterGatewayToken%" },
@@ -35,8 +45,7 @@
       { "command": "forebrain.reconnect", "title": "%command.reconnect%" },
       { "command": "forebrain.askAboutSelection", "title": "%command.askAboutSelection%", "icon": "$(comment-discussion)" },
       { "command": "forebrain.askAboutFile", "title": "%command.askAboutFile%", "icon": "$(comment-discussion)" },
-      { "command": "forebrain.openDeliveredFile", "title": "%command.openDeliveredFile%" },
-      { "command": "forebrain.devOpenWebview", "title": "Forebrain: Open Webview (dev)" }
+      { "command": "forebrain.openDeliveredFile", "title": "%command.openDeliveredFile%" }
     ],
     "keybindings": [
       { "command": "forebrain.askAboutSelection", "key": "ctrl+alt+k", "mac": "ctrl+cmd+k", "when": "editorHasSelection" }
@@ -50,7 +59,7 @@
         { "when": "resourceScheme == file && !explorerResourceIsFolder", "command": "forebrain.askAboutFile", "group": "9_forebrain" }
       ],
       "view/title": [
-        { "when": "view == forebrain.chat", "command": "forebrain.openWebUiInBrowser", "group": "navigation@1" }
+        { "when": "view == forebrain.chatSidebar || view == forebrain.chatSecondary", "command": "forebrain.openWebUiInBrowser", "group": "navigation@1" }
       ]
     },
     "configuration": {
@@ -67,10 +76,6 @@
         "forebrain.autoStartGateway": {
           "type": "boolean", "default": true,
           "description": "%config.autoStartGateway%"
-        },
-        "forebrain.relayLogRequests": {
-          "type": "boolean", "default": false,
-          "description": "%config.relayLogRequests%"
         },
         "forebrain.selectionTarget": {
           "type": "string", "enum": ["current", "always-new"], "default": "current",

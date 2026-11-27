@@ -9,5 +9,6 @@ out/**
 webview/src/**
 webview/node_modules/**
 webview/index.html
+webview/sessions.html
 webview/*.config.*
 webview/tsconfig.json

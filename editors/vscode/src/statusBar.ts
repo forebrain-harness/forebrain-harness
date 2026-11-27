@@ -10,8 +10,11 @@ import { checklistProgress, type SessionState } from './sessionState';
 export class StatusBar {
   private readonly item = vscode.window.createStatusBarItem('forebrain', vscode.StatusBarAlignment.Left, 100);
 
-  constructor(private readonly session: () => string | undefined = () => undefined) {
-    this.item.command = 'forebrain.chat.focus';
+  constructor(
+    private readonly session: () => string | undefined = () => undefined,
+    focusCommand = 'forebrain.chatSecondary.focus',
+  ) {
+    this.item.command = focusCommand;
     this.item.name = 'Forebrain';
   }
 

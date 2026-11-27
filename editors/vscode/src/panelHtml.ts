@@ -1,57 +1,98 @@
 import { randomBytes } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 export type PanelState =
   | { kind: 'connecting' }
-  /** `session` names the conversation the panel must show; absent, the Web UI opens its own last one. */
-  | { kind: 'ready'; relayOrigin: string; boot: string; session?: string }
+  /** The host holds a gateway token; `session` names the conversation to open, if one was asked for. */
+  | { kind: 'ready'; session?: string }
   | { kind: 'unavailable'; reason: 'no-token' | 'gateway-unreachable' | 'error'; detail: string };
 
 /** The commands the webview may ask the host to run. Anything else is ignored. */
 export const PANEL_COMMANDS = new Set(['forebrain.enterGatewayToken', 'forebrain.reconnect', 'forebrain.openWebUiInBrowser']);
 
-const RELAY_ORIGIN = /^http:\/\/fb-[0-9a-f]{32}\.localhost:\d{1,5}$/;
-const SECRET = /^[0-9a-f]{32}$/;   // the relay's boot secret
-const SAFE_ID = /^[0-9a-f]{64}$/;  // the nonce of this page's own script
-const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
-
 /**
- * The URL the panel's iframe loads: the relay origin, the boot secret the relay
- * insists on for a navigation, and (from plan 379 on) the session the Web UI
- * should open. `host=vscode` tells the Web UI it is embedded, so a file:line
- * link posts its range back to this panel instead of opening a drawer tab.
- * Throws on anything that does not match its shape, so no unvalidated text
- * ever reaches an attribute.
+ * What the host pushes when a view announces itself ready: the conversation a
+ * pick asked for while it loaded, or else the one the host last saw bound — so
+ * a chat view that comes back after a rebuild lands on the conversation it had
+ * and re-binds its stream. The Sessions view is told which row to mark. Null
+ * when there is nothing to steer (a fresh chat). Pure, so the rebuild replay is
+ * held to its word without a VS Code instance.
  */
-export function panelUrl(relayOrigin: string, boot: string, session?: string): string {
-  if (!RELAY_ORIGIN.test(relayOrigin)) throw new Error('not a relay origin');
-  if (!SECRET.test(boot)) throw new Error('boot secret must be 32 hex characters');
-  let url = `${relayOrigin}/?boot=${boot}&host=vscode`;
-  if (session !== undefined) {
-    if (!SESSION_ID.test(session)) throw new Error('session id has an unexpected shape');
-    url += `&session=${session}`;
-  }
-  return url;
+export function readyFrameFor(
+  entry: 'index' | 'sessions',
+  pending: { chat?: string; sessions?: string },
+  observed: string | undefined,
+): { type: 'openSession' | 'activeSession'; sessionId: string } | null {
+  const sessionId = entry === 'index' ? (pending.chat ?? observed) : (pending.sessions ?? observed);
+  if (!sessionId) return null;
+  return { type: entry === 'index' ? 'openSession' : 'activeSession', sessionId };
+}
+
+const SAFE_ID = /^[0-9a-f]{64}$/;  // the nonce of this page's own script
+
+/** The slice of a VS Code webview the loader touches. */
+export interface WebviewLike {
+  readonly cspSource: string;
+  asWebviewUri(uri: { readonly fsPath: string }): { toString(): string };
+}
+
+/** The slice of a VS Code Uri the loader touches. */
+export interface UriLike {
+  readonly fsPath: string;
 }
 
 /**
- * The panel's whole document. It takes no token: what varies with the
- * connection is the relay URL, and that URL is the capability — a page that
- * can load it is the panel, and nothing else.
+ * The native app's document: one built entry's index with its asset URLs
+ * rewritten to webview URIs and a CSP that allows nothing but the webview's own
+ * build. `entry` names the built html — `index` (the chat workbench) or
+ * `sessions`. The token never enters this document: the app reaches the gateway
+ * only through the host's RPC proxy.
+ */
+export function renderWebviewHtml(webview: WebviewLike, distRoot: UriLike, entry: string = 'index'): string {
+  let index: string;
+  try {
+    index = fs.readFileSync(path.join(distRoot.fsPath, `${entry}.html`), 'utf-8');
+  } catch {
+    return missingBuildHtml();
+  }
+  return rewriteIndexHtml(index, webview.cspSource, webview.asWebviewUri(distRoot).toString());
+}
+
+/**
+ * Pure so the tests hold it to its word: every `/assets/…` reference gains the
+ * webview base, and the CSP names the webview scheme as the only source.
+ */
+export function rewriteIndexHtml(html: string, cspSource: string, baseUrl: string): string {
+  const withUris = html
+    .split('src="/assets/').join(`src="${baseUrl}/assets/`)
+    .split('href="/assets/').join(`href="${baseUrl}/assets/`);
+  const csp =
+    `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; ` +
+    `script-src ${cspSource}; style-src ${cspSource} 'unsafe-inline'; img-src ${cspSource} data:; font-src ${cspSource}">`;
+  return withUris.includes('<head>') ? withUris.replace('<head>', `<head>${csp}`) : `${csp}${withUris}`;
+}
+
+/** What a panel shows when nobody ran the webview build yet. */
+export function missingBuildHtml(): string {
+  return '<html><body><p>The webview build is missing. Run it once:</p>' +
+    '<pre>cd frontend &amp;&amp; corepack pnpm --filter @forebrain/vscode-webview build</pre></body></html>';
+}
+
+/**
+ * The connection-state document: what the panel shows while the host has no
+ * gateway to proxy yet. It takes no token and loads no app — the buttons ask the
+ * host to run a whitelisted command, and the host re-renders once it connects.
  */
 export function renderPanelHtml(state: PanelState, nonce: string = randomBytes(32).toString('hex')): string {
   if (!SAFE_ID.test(nonce)) throw new Error('panel nonce must be 64 hex characters');
-  const frame = state.kind === 'ready' ? ` frame-src ${state.relayOrigin};` : '';
-  const body =
-    state.kind === 'ready'
-      ? readyBody(state.relayOrigin, state.boot, state.session)
-      : statusBody(state);
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';${frame}">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <title>Forebrain</title></head>
-<body>${body}
-<script nonce="${nonce}">${panelScript(state.kind === 'ready' ? state.relayOrigin : undefined)}</script>
+<body>${statusBody(state)}
+<script nonce="${nonce}">${panelScript()}</script>
 </body></html>`;
 }
 
@@ -66,7 +107,6 @@ function escapeHtml(text: string): string {
 
 // VS Code's own theme variables, so the panel matches the editor it lives in.
 const STYLE = `html,body{margin:0;height:100%;background:var(--vscode-panel-background);color:var(--vscode-foreground);font-family:var(--vscode-font-family);font-size:var(--vscode-font-size)}
-iframe{width:100%;height:100%;border:0;display:block}
 #status{box-sizing:border-box;padding:1.5em;height:100%;display:flex;flex-direction:column;gap:.75em;justify-content:center}
 #status h1{font-size:1em;margin:0;font-weight:600}
 #status p{margin:0;color:var(--vscode-descriptionForeground);line-height:1.5}
@@ -104,14 +144,6 @@ function copy(state: PanelState): Copy {
   }
 }
 
-function readyBody(relayOrigin: string, boot: string, session?: string): string {
-  // A session id of the wrong shape is dropped, not thrown: one bad id must not
-  // cost the whole panel its document.
-  const url = panelUrl(relayOrigin, boot, session !== undefined && SESSION_ID.test(session) ? session : undefined);
-  return `<style>${STYLE}</style>
-<iframe id="panel" src="${url}" title="Forebrain" allow="clipboard-read; clipboard-write"></iframe>`;
-}
-
 function statusBody(state: PanelState): string {
   const view = copy(state);
   const detail = state.kind === 'unavailable' ? `<p>${escapeHtml(state.detail)}</p>` : '';
@@ -125,26 +157,13 @@ function statusBody(state: PanelState): string {
 </div>`;
 }
 
-// The only script the panel runs: forward a whitelisted button to the host,
-// and — while the relay frame is up — forward a file range the Web UI posts.
-// It never sees the token. A range is admitted only from the relay origin,
-// only from the panel's own iframe, only of the one whitelisted type, and only
-// in shape; the host re-checks all of it before it opens anything.
-function panelScript(relayOrigin?: string): string {
-  const relay = relayOrigin === undefined ? '' : `
-window.addEventListener('message', (e) => {
-  const frame = document.getElementById('panel');
-  if (!frame || e.origin !== ${JSON.stringify(relayOrigin)} || e.source !== frame.contentWindow) return;
-  const m = e.data;
-  if (!m || m.type !== 'openFileRange') return;
-  if (typeof m.path !== 'string' || m.path.length === 0) return;
-  if (!Number.isInteger(m.startLine) || m.startLine < 1) return;
-  if (!Number.isInteger(m.endLine) || m.endLine < m.startLine) return;
-  vscode.postMessage({ type: 'openFileRange', path: m.path, startLine: m.startLine, endLine: m.endLine });
-});`;
+// The only script the state document runs: forward a whitelisted button to the
+// host, and announce the page so a pick made while it loaded goes out now. It
+// never sees the token.
+function panelScript(): string {
   return `const vscode = acquireVsCodeApi();
 for (const b of document.querySelectorAll('button[data-command]')) {
   b.addEventListener('click', () => vscode.postMessage({ type: 'command', id: b.dataset.command }));
-}${relay}
+}
 vscode.postMessage({ type: 'ready' });`;
 }

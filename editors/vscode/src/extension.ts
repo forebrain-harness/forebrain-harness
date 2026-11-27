@@ -1,23 +1,19 @@
 import * as vscode from 'vscode';
 import { ChatPanel } from './panel';
-import { type PanelState } from './panelHtml';
+import { readyFrameFor, type PanelState } from './panelHtml';
 import { Connection } from './connection';
 import { readGatewayConfig } from './config';
 import { ConfigError } from './gatewayOrigin';
 import { GatewayClient } from './gateway';
 import { findForebrainBinary, startGateway } from './gatewayProcess';
-import { startRelay } from './relay';
 import { redact } from './token';
 import { EMPTY_SESSION_STATE, reduceSessionMessage, reconcilePending, type SessionState } from './sessionState';
 import { SessionSocket, type ServerMessage } from './sessionSocket';
-import { sessionFromRequestPath } from './sessionTarget';
-import { ChecklistTree } from './checklistTree';
 import { StatusBar } from './statusBar';
 import { Approvals } from './approvals';
 import { Deliverables } from './deliverables';
 import { ForebrainCommands } from './commands';
 import { WebviewRpc } from './webviewRpc';
-import { devWebviewHtml } from './devWebview';
 
 // Module level so that `deactivate` can reach them: the subscription below
 // disposes them too, but a shutdown closes the socket rather than racing it.
@@ -26,25 +22,43 @@ let link: SessionSocket | undefined;
 /** The host socket's link state: what the status bar's "not connected" reads. */
 let linkUp = false;
 
+/**
+ * The secondary sidebar became a public contribution point in 1.106 (1.105
+ * still gated it behind a proposed-API check). Below that the chat view falls
+ * back to the activity bar — the same capability key the manifest's `when`
+ * clauses read, so exactly one of the two chat containers is ever shown.
+ */
+function supportsSecondarySidebar(): boolean {
+  const [major, minor] = vscode.version.split('.').map((part) => Number.parseInt(part, 10));
+  if (!Number.isFinite(major) || !Number.isFinite(minor)) return false;
+  return major > 1 || (major === 1 && minor >= 106);
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const output = vscode.window.createOutputChannel('Forebrain');
   const log = (line: string) => output.appendLine(`${new Date().toISOString()} ${line}`);
-  const panel = new ChatPanel();
-  const checklist = new ChecklistTree();
-  /** The conversation the relay last saw the Web UI read — the panel's current session. */
+
+  const secondary = supportsSecondarySidebar();
+  await vscode.commands.executeCommand('setContext', 'forebrain.doesNotSupportSecondarySidebar', !secondary);
+  await vscode.commands.executeCommand('setContext', 'forebrain.sessionsListEnabled', true);
+  // Focus follows the capability, never visibility: the chat view that exists
+  // on this VS Code is the one the command opens.
+  const chatViewId = secondary ? 'forebrain.chatSecondary' : 'forebrain.chatSidebar';
+  const focusChat = () => void vscode.commands.executeCommand(`${chatViewId}.focus`);
+
+  /** The conversation the webview last bound — the panel's current session. */
   let observed: string | undefined;
-  const statusBar = new StatusBar(() => link?.boundSession ?? observed);
-  // The fold of everything the host socket receives: one state, four surfaces.
+  const statusBar = new StatusBar(() => link?.boundSession ?? observed, `${chatViewId}.focus`);
+  // The fold of everything the host socket receives: one state, the surfaces.
   const state: { current: SessionState } = { current: EMPTY_SESSION_STATE };
 
   const reflect = (previous: SessionState, next: SessionState): void => {
-    checklist.update(next);
     statusBar.update(next, linkUp);
-    approvals.onState(previous, next, panel.visible);
+    approvals.onState(previous, next, chatPanel.visible);
     deliverables.onRunEnd(previous, next);
   };
 
-  /** A different conversation: the old one's checklists and approvals do not belong to it. */
+  /** A different conversation: the old one's approvals do not belong to it. */
   const reset = (): void => {
     const previous = state.current;
     state.current = EMPTY_SESSION_STATE;
@@ -65,7 +79,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     token,
     boundSession: () => link?.boundSession,
     notificationsEnabled: () => vscode.workspace.getConfiguration('forebrain').get<boolean>('approvalNotifications', true),
-    focusPanel: () => void vscode.commands.executeCommand('forebrain.chat.focus'),
+    focusPanel: focusChat,
     reconciled: (pendingIds) => {
       const previous = state.current;
       state.current = reconcilePending(state.current, pendingIds);
@@ -91,7 +105,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (link.boundSession !== sessionId) await link.bind(sessionId, 0);
       return link.startRun(sessionId, content);
     },
-    focusPanel: () => void vscode.commands.executeCommand('forebrain.chat.focus'),
+    focusPanel: focusChat,
     log,
   });
 
@@ -127,9 +141,112 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
+  // The three views of the alignment contract: the chat workbench in two
+  // containers (one app, shown by capability) and the Sessions list. Each holds
+  // its own RPC dispatcher; the host socket follows whichever conversation the
+  // chat view binds.
+  const distRoot = () => vscode.Uri.joinPath(context.extensionUri, 'webview', 'dist');
+  /** A session a view asked for while the target view was still loading: the
+   *  webview announces itself with a `ready` frame, and the pending pick goes
+   *  out then. A rebuild lands on the conversation it had. */
+  const pendingSession: { chat?: string; sessions?: string } = {};
+  const pushThemeTo = (webview: vscode.Webview): void => {
+    const kind = vscode.window.activeColorTheme.kind;
+    void webview.postMessage({
+      type: 'theme',
+      dark: kind === vscode.ColorThemeKind.Dark || kind === vscode.ColorThemeKind.HighContrast,
+    });
+  };
+
   const setPanelState = (panelState: PanelState): void => {
-    panel.setState(panelState);
+    chatPanel.setState(panelState);
+    sessionsPanel.setState(panelState);
     onConnectionState(panelState);
+  };
+
+  const wireView = (view: vscode.WebviewView, entry: 'index' | 'sessions'): void => {
+    const rpc = new WebviewRpc({
+      post: (message) => void view.webview.postMessage(message),
+      origin: active?.origin ?? '',
+      token: () => active?.currentToken() ?? '',
+      fetchImpl: (input, init) => fetch(input, init),
+      log: (l) => log(redact(l, active?.currentToken() ?? '')),
+      workspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      workspaceTrusted: () => vscode.workspace.isTrusted,
+      trustSet: async (root, trusted) => {
+        await new GatewayClient(active?.origin ?? '').postJson('/api/host/trust', active?.currentToken() ?? '', { path: root, trusted });
+      },
+      showWarningModal: async (message, detail, confirmLabel, cancelLabel) =>
+        vscode.window.showWarningMessage(message, { modal: true, detail }, confirmLabel, cancelLabel),
+      bindSession: async (sessionId) => {
+        // The webview bound a conversation: the host socket follows it there.
+        observed = sessionId;
+        reset();
+        const socket = link;
+        if (socket && socket.boundSession !== sessionId) await socket.bind(sessionId, 0);
+      },
+      openChatSession: async (sessionId) => {
+        if (sessionId) pendingSession.chat = sessionId;
+        focusChat();
+      },
+      reportActiveSession: async (sessionId) => {
+        pendingSession.sessions = sessionId;
+        void vscode.commands.executeCommand('forebrain.sessionsList.focus');
+      },
+      openDeliverable: async (path) => {
+        await deliverables.openArtifact(path);
+      },
+      openPlanDoc: async (path) => {
+        const uri = vscode.Uri.file(path);
+        if (path.toLowerCase().endsWith('.md')) {
+          await vscode.commands.executeCommand('markdown.showPreview', uri);
+        } else {
+          await vscode.window.showTextDocument(uri, { preview: false });
+        }
+      },
+      openWebUi: async (path) => {
+        openWebUiAt(path);
+      },
+      openFileRange: (request) => deliverables.openRange(request),
+    });
+    view.webview.onDidReceiveMessage((m: unknown) => {
+      // The app announces itself once its transport is installed; anything a
+      // view asked for while it loaded goes out now — and the chat view that
+      // comes back after a rebuild lands on the conversation it had, so the
+      // re-bind and the history reload replay the snapshot.
+      if ((m as { type?: unknown })?.type === 'ready') {
+        const frame = readyFrameFor(entry, pendingSession, observed);
+        if (frame) {
+          if (entry === 'index') pendingSession.chat = undefined;
+          else pendingSession.sessions = undefined;
+          void view.webview.postMessage(frame);
+        }
+      }
+      rpc.onMessage(m);
+    });
+    const themeSubscription = vscode.window.onDidChangeActiveColorTheme(() => pushThemeTo(view.webview));
+    view.onDidDispose(() => {
+      rpc.dispose();
+      themeSubscription.dispose();
+    });
+    context.subscriptions.push(themeSubscription);
+    pushThemeTo(view.webview);
+  };
+
+  const chatPanel = new ChatPanel(distRoot, 'index', (view) => wireView(view, 'index'));
+  const sessionsPanel = new ChatPanel(distRoot, 'sessions', (view) => wireView(view, 'sessions'));
+
+  /** One page of the gateway's own Web UI, in the person's browser. The
+   *  sign-in link the gateway's banner prints carries the token in the
+   *  fragment (the Web UI reads it once and wipes it); `redirect` lands the
+   *  reader on the page they asked for. The token leaves the extension only
+   *  into that browser, the way the banner already does. */
+  const openWebUiAt = (path: string): void => {
+    if (!active) return;
+    const current = active.currentToken();
+    if (!current) { void vscode.window.showInformationMessage(vscode.l10n.t('Forebrain: connect the panel first.')); return; }
+    const target = path && path !== '/' ? `?redirect=${encodeURIComponent(path)}` : '';
+    void vscode.env.openExternal(vscode.Uri.parse(`${active.origin}/login${target}#token=${encodeURIComponent(current)}`));
   };
 
   const build = (): Connection => {
@@ -145,12 +262,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         delete: async (k) => { await context.secrets.delete(k); },
       },
       probe: (t) => probeClient.probe(t), healthy: () => probeClient.health(),
-      loadNonce: async () => context.secrets.get('forebrain.relayNonce'),
-      saveNonce: async (n) => { await context.secrets.store('forebrain.relayNonce', n); },
-      loadBoot: async () => context.secrets.get('forebrain.relayBoot'),
-      saveBoot: async (b) => { await context.secrets.store('forebrain.relayBoot', b); },
-      loadPort: async () => context.globalState.get<number>('forebrain.relayPort'),
-      savePort: async (p) => { await context.globalState.update('forebrain.relayPort', p); },
       startGateway: async () => {
         const bin = await findForebrainBinary(config.binaryPath);
         if (!bin) {
@@ -169,23 +280,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           return null;
         }
       },
-      startRelay,
       log: (l) => log(redact(l, active?.currentToken() ?? '')),
       emit: setPanelState,
-      // Mirror binding: a host socket that never binds a session is told
-      // nothing, so the panel's own transcript read is what puts it on one.
-      onRequest: (method, path) => {
-        const seen = sessionFromRequestPath(method, path);
-        if (seen === undefined || seen === observed) return;
-        observed = seen;
-        reset();
-        const socket = link;
-        if (socket && socket.boundSession !== seen) {
-          socket.bind(seen, 0).catch((err: unknown) => {
-            log(`session socket: bind failed: ${err instanceof Error ? err.message : String(err)}`);
-          });
-        }
-      },
     });
   };
 
@@ -202,152 +298,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
-  // Development loading entries (Steps 3–9): the native webview apps in
-  // panels, riding the RPC surface. Step 10 removes these when the three
-  // views of the alignment contract take over. Two views for now — the chat
-  // workbench and the Sessions list — and the host steers between them: a
-  // pick in Sessions opens that conversation in chat, and chat reports the
-  // conversation on screen so Sessions can mark its row.
-  type DevView = 'chat' | 'sessions';
-  const devPanels = new Map<DevView, { panel: vscode.WebviewPanel; rpc: WebviewRpc; disposables: vscode.Disposable }>();
-  /** A session a view asked for while the target view was still loading: the
-   *  webview announces itself with a `ready` frame, and the pending pick goes
-   *  out then. */
-  const pendingSession: { chat?: string; sessions?: string } = {};
-  const pushThemeTo = (panel: vscode.WebviewPanel): void => {
-    const kind = vscode.window.activeColorTheme.kind;
-    // `HighContrast` is the dark high-contrast kind in this API.
-    void panel.webview.postMessage({
-      type: 'theme',
-      dark: kind === vscode.ColorThemeKind.Dark || kind === vscode.ColorThemeKind.HighContrast,
-    });
-  };
-  /** One page of the gateway's own Web UI, in the person's browser. The
-   *  sign-in link the gateway's banner prints carries the token in the
-   *  fragment (the Web UI reads it once and wipes it); `redirect` lands the
-   *  reader on the page they asked for. The token leaves the extension only
-   *  into that browser, the way the banner already does. */
-  const openWebUiAt = (path: string): void => {
-    if (!active) return;
-    const current = active.currentToken();
-    if (!current) { void vscode.window.showInformationMessage(vscode.l10n.t('Forebrain: connect the panel first.')); return; }
-    const target = path && path !== '/' ? `?redirect=${encodeURIComponent(path)}` : '';
-    void vscode.env.openExternal(vscode.Uri.parse(`${active.origin}/login${target}#token=${encodeURIComponent(current)}`));
-  };
-  const openDevWebview = (view: DevView): void => {
-    const shown = devPanels.get(view);
-    if (shown) {
-      shown.panel.reveal();
-      return;
-    }
-    // `webviewDistRoot` inlining stays here rather than in devWebview.ts: Uri
-    // joining is vscode's, the loader itself stays pure for the unit tests.
-    const distRoot = vscode.Uri.joinPath(context.extensionUri, 'webview', 'dist');
-    const panel = vscode.window.createWebviewPanel(
-      view === 'chat' ? 'forebrain.devChat' : 'forebrain.devSessions',
-      view === 'chat' ? 'Forebrain Chat (dev)' : 'Forebrain Sessions (dev)',
-      vscode.ViewColumn.Active,
-      {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [distRoot],
-      },
-    );
-    panel.webview.html = devWebviewHtml(panel.webview, distRoot, view === 'chat' ? 'index' : 'sessions');
-    // One RPC dispatcher per panel; its sockets die with the panel.
-    const rpc = new WebviewRpc({
-      post: (message) => void panel.webview.postMessage(message),
-      origin: active?.origin ?? '',
-      token: () => active?.currentToken() ?? '',
-      fetchImpl: (input, init) => fetch(input, init),
-      log: (l) => log(redact(l, active?.currentToken() ?? '')),
-      workspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
-      workspaceTrusted: () => vscode.workspace.isTrusted,
-      trustSet: async (root, trusted) => {
-        await new GatewayClient(active?.origin ?? '').postJson('/api/host/trust', active?.currentToken() ?? '', { path: root, trusted });
-      },
-      showWarningModal: async (message, detail, confirmLabel, cancelLabel) =>
-        vscode.window.showWarningMessage(message, { modal: true, detail }, confirmLabel, cancelLabel),
-      bindSession: async (sessionId) => {
-        // The webview bound a conversation: follow it, the way the relay's
-        // request log is followed today.
-        observed = sessionId;
-        reset();
-        const socket = link;
-        if (socket && socket.boundSession !== sessionId) await socket.bind(sessionId, 0);
-      },
-      openChatSession: async (sessionId) => {
-        // An empty pick is the Sessions view's "new chat": open the chat view
-        // with nothing to steer.
-        if (sessionId) pendingSession.chat = sessionId;
-        openDevWebview('chat');
-      },
-      reportActiveSession: async (sessionId) => {
-        pendingSession.sessions = sessionId;
-        openDevWebview('sessions');
-      },
-      openDeliverable: async (path) => {
-        await deliverables.openArtifact(path);
-      },
-      openPlanDoc: async (path) => {
-        // The plan card's eye: the plan .md opens in the editor area, the way
-        // the web's drawer tab opens it in the drawer.
-        const uri = vscode.Uri.file(path);
-        if (path.toLowerCase().endsWith('.md')) {
-          await vscode.commands.executeCommand('markdown.showPreview', uri);
-        } else {
-          await vscode.window.showTextDocument(uri, { preview: false });
-        }
-      },
-      openWebUi: async (path) => {
-        openWebUiAt(path);
-      },
-      openFileRange: (request) => deliverables.openRange(request),
-    });
-    panel.webview.onDidReceiveMessage((m: unknown) => {
-      // The app announces itself once its transport is installed; anything a
-      // view asked for while it loaded goes out now — and the chat view that
-      // comes back after a rebuild lands on the conversation it had, so the
-      // re-bind and the history reload replay the snapshot.
-      if ((m as { type?: unknown })?.type === 'ready') {
-        const sessionId = view === 'chat'
-          ? (pendingSession.chat ?? observed)
-          : (pendingSession.sessions ?? observed);
-        if (sessionId) {
-          pendingSession[view] = undefined;
-          void panel.webview.postMessage(
-            view === 'chat' ? { type: 'openSession', sessionId } : { type: 'activeSession', sessionId },
-          );
-        }
-      }
-      rpc.onMessage(m);
-    });
-    const themeSubscription = vscode.window.onDidChangeActiveColorTheme(() => pushThemeTo(panel));
-    panel.onDidDispose(() => {
-      rpc.dispose();
-      themeSubscription.dispose();
-      devPanels.delete(view);
-    });
-    pushThemeTo(panel);
-    devPanels.set(view, { panel, rpc, disposables: themeSubscription });
-    context.subscriptions.push(themeSubscription);
-  };
-
   context.subscriptions.push(
     output,
-    checklist,
     statusBar,
     approvals,
-    vscode.window.createTreeView('forebrain.checklist', { treeDataProvider: checklist, showCollapseAll: false }),
-    vscode.window.registerWebviewViewProvider('forebrain.chat', panel, { webviewOptions: { retainContextWhenHidden: true } }),
-    vscode.commands.registerCommand('forebrain.openPanel', () => vscode.commands.executeCommand('forebrain.chat.focus')),
+    vscode.window.registerWebviewViewProvider('forebrain.chatSidebar', chatPanel, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.window.registerWebviewViewProvider('forebrain.chatSecondary', chatPanel, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.window.registerWebviewViewProvider('forebrain.sessionsList', sessionsPanel, { webviewOptions: { retainContextWhenHidden: true } }),
+    vscode.commands.registerCommand('forebrain.openPanel', focusChat),
     vscode.commands.registerCommand('forebrain.reconnect', () => void active?.reconnect()),
     vscode.commands.registerCommand('forebrain.askAboutSelection', () => commands.askAboutSelection()),
     vscode.commands.registerCommand('forebrain.askAboutFile', (uri?: vscode.Uri) => commands.askAboutFile(uri)),
     vscode.commands.registerCommand('forebrain.openDeliveredFile', () => deliverables.openDeliveredFile()),
-    vscode.commands.registerCommand('forebrain.devOpenWebview', (view?: string) => {
-      openDevWebview(view === 'sessions' ? 'sessions' : 'chat');
-    }),
     vscode.commands.registerCommand('forebrain.enterGatewayToken', async () => {
       const entered = await vscode.window.showInputBox({ prompt: vscode.l10n.t('Forebrain gateway token'), password: true, ignoreFocusOut: true });
       if (entered === undefined) return;
@@ -364,8 +326,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('forebrain.gatewayUrl') || e.affectsConfiguration('forebrain.binaryPath') || e.affectsConfiguration('forebrain.autoStartGateway')) {
-        // A new origin/binary needs a new Connection; the old one owns a relay
-        // and possibly a gateway child, so it is disposed, not dropped.
+        // A new origin/binary needs a new Connection; the old one may own a
+        // gateway child, so it is disposed, not dropped.
         const previous = active;
         active = undefined;
         void (async () => {
@@ -374,8 +336,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         })();
       }
     }),
-    panel.onCommand((id) => void vscode.commands.executeCommand(id)),
-    panel.onFileRange((range) => void deliverables.openRange(range)),
+    chatPanel.onCommand((id) => void vscode.commands.executeCommand(id)),
+    sessionsPanel.onCommand((id) => void vscode.commands.executeCommand(id)),
     {
       dispose: () => {
         // `Connection.dispose()` emits nothing, so nothing else would ever
@@ -387,9 +349,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     },
   );
-  // Before the first event arrives: the checklist view's welcome text needs the
-  // context key set, and the status bar needs its first line.
-  checklist.activate();
+  // Before the first event arrives: the status bar needs its first line.
   statusBar.update(state.current, false);
   await boot();
 }

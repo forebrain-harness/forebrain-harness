@@ -3,7 +3,6 @@ export interface GatewayConfig {
   readonly origin: string;
   readonly binaryPath: string;
   readonly autoStartGateway: boolean;
-  readonly relayLogRequests: boolean;
 }
 
 export class ConfigError extends Error {}
@@ -18,10 +17,10 @@ function echo(raw: string): string {
 }
 
 /**
- * Validates the origin. The origin becomes the upstream of a relay that adds
- * the token to every request, so it may not carry a path, a query, a fragment
- * or credentials: anything after the host would be a request the relay could
- * be talked into making.
+ * Validates the origin. The origin becomes the upstream the host's RPC proxy
+ * adds the token to, so it may not carry a path, a query, a fragment or
+ * credentials: anything after the host would be a request the proxy could be
+ * talked into making.
  */
 export function parseGatewayOrigin(raw: string): string {
   let url: URL;

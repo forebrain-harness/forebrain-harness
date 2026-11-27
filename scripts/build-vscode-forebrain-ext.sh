@@ -5,6 +5,10 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 pkg="$root/editors/vscode"
+# The native app is bundled into the extension: build the webview first, from
+# frontend/ (the pnpm workspace root), with the lockfile frozen so a cold clone
+# resolves exactly what was committed.
+( cd "$root/frontend" && corepack pnpm install --frozen-lockfile && corepack pnpm --filter @forebrain/vscode-webview build )
 cd "$pkg"
 if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
 npm run typecheck
