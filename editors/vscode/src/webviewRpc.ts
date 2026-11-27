@@ -169,10 +169,12 @@ export class WebviewRpc {
   }
 
   /**
-   * The REST proxy. The path arrives starting with `/api/`; the bearer header
-   * is added here and nowhere else, client attempts to set it are dropped,
-   * the log carries the path without its query, and an abort from an
-   * `rpcCancel` unwinds the fetch.
+   * The REST proxy. Every gateway call the webview can make lives under
+   * `/api/` — the axios instance's baseURL is `/api` and the fetch helpers
+   * write it literally — so the prefix check is what bounds where the bearer
+   * header travels: a path outside it is refused before anything dials, and
+   * the credentials go nowhere. The log carries the path without its query,
+   * and an abort from an `rpcCancel` unwinds the fetch.
    */
   private async httpRequest(params: unknown, rpc: number): Promise<unknown> {
     if (typeof params !== 'object' || params === null) throw new Error('http: params required');
@@ -185,8 +187,8 @@ export class WebviewRpc {
     };
     const verb = typeof request.method === 'string' ? request.method.toUpperCase() : '';
     const path = typeof request.path === 'string' ? request.path : '';
-    if (!['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'PATCH'].includes(verb) || !path.startsWith('/')) {
-      throw new Error(`http: bad request ${verb} ${path.split('?')[0]}`);
+    if (!['GET', 'POST', 'PUT', 'DELETE', 'HEAD', 'PATCH'].includes(verb) || !path.startsWith('/api/')) {
+      throw new Error(`http: ${verb} ${path.split('?')[0]} is not a gateway path (expected /api/…)`);
     }
     const abort = new AbortController();
     this.pending.set(rpc, { abort });

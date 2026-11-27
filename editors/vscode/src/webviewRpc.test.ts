@@ -166,6 +166,22 @@ test('an unknown method answers with an error and nothing else', async () => {
   assert.match(reply.error ?? '', /unknown rpc method/);
 });
 
+test('a path outside /api/ is refused before anything dials, so the bearer goes nowhere', async () => {
+  const dialed: string[] = [];
+  const { rpc, posted } = makeHarness({
+    fetchImpl: async (input) => {
+      dialed.push(String(input));
+      return new Response('{}', { status: 200 });
+    },
+  });
+  await rpc.handleRpc(21, 'http', { method: 'GET', path: '/health' });
+
+  const reply = replies(posted)[0];
+  assert.equal(reply.ok, false);
+  assert.match(reply.error ?? '', /not a gateway path/);
+  assert.deepEqual(dialed, [], 'no dial, no credentials');
+});
+
 test('a chat socket opens, carries sends and announces its states', async () => {
   const { rpc, posted, sockets } = makeHarness();
   await rpc.handleRpc(5, 'ws.open', {});

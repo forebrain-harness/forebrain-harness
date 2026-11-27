@@ -216,14 +216,23 @@ describe('the file range and the theme', () => {
   })
 })
 
+/** Every production source under src/, subdirectories included: the invariant
+ *  must keep biting as Steps 4–9 add components and composables below. */
+function collectSources(dir: string): string[] {
+  const sources: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) sources.push(...collectSources(full))
+    else if (entry.isFile() && /\.(ts|vue)$/.test(entry.name) && !entry.name.includes('.test.')) {
+      sources.push(readFileSync(full, 'utf-8'))
+    }
+  }
+  return sources
+}
+
 describe('the token invariant', () => {
   it('no webview source sets auth material — the host adds the only bearer header', () => {
-    const sources = readdirSync(here, { withFileTypes: true })
-      .filter((entry: { isFile(): boolean; name: string }) => (
-        entry.isFile() && /\.(ts|vue)$/.test(entry.name) && !entry.name.includes('.test.')
-      ))
-      .map((entry: { name: string }) => readFileSync(join(here, entry.name), 'utf-8'))
-    for (const source of sources) {
+    for (const source of collectSources(here)) {
       // Code shapes only: a quoted header name or a literal `Bearer ` prefix.
       expect(source).not.toMatch(/['"]authorization['"]|['"]cookie['"]|Bearer\s/)
     }
