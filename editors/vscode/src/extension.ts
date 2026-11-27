@@ -202,6 +202,105 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
   };
 
+  // Development loading entries (Steps 3–9): the native webview apps in
+  // panels, riding the RPC surface. Step 10 removes these when the three
+  // views of the alignment contract take over. Two views for now — the chat
+  // workbench and the Sessions list — and the host steers between them: a
+  // pick in Sessions opens that conversation in chat, and chat reports the
+  // conversation on screen so Sessions can mark its row.
+  type DevView = 'chat' | 'sessions';
+  const devPanels = new Map<DevView, { panel: vscode.WebviewPanel; rpc: WebviewRpc; disposables: vscode.Disposable }>();
+  /** A session a view asked for while the target view was still loading: the
+   *  webview announces itself with a `ready` frame, and the pending pick goes
+   *  out then. */
+  const pendingSession: { chat?: string; sessions?: string } = {};
+  const pushThemeTo = (panel: vscode.WebviewPanel): void => {
+    const kind = vscode.window.activeColorTheme.kind;
+    // `HighContrast` is the dark high-contrast kind in this API.
+    void panel.webview.postMessage({
+      type: 'theme',
+      dark: kind === vscode.ColorThemeKind.Dark || kind === vscode.ColorThemeKind.HighContrast,
+    });
+  };
+  const openDevWebview = (view: DevView): void => {
+    const shown = devPanels.get(view);
+    if (shown) {
+      shown.panel.reveal();
+      return;
+    }
+    // `webviewDistRoot` inlining stays here rather than in devWebview.ts: Uri
+    // joining is vscode's, the loader itself stays pure for the unit tests.
+    const distRoot = vscode.Uri.joinPath(context.extensionUri, 'webview', 'dist');
+    const panel = vscode.window.createWebviewPanel(
+      view === 'chat' ? 'forebrain.devChat' : 'forebrain.devSessions',
+      view === 'chat' ? 'Forebrain Chat (dev)' : 'Forebrain Sessions (dev)',
+      vscode.ViewColumn.Active,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [distRoot],
+      },
+    );
+    panel.webview.html = devWebviewHtml(panel.webview, distRoot, view === 'chat' ? 'index' : 'sessions');
+    // One RPC dispatcher per panel; its sockets die with the panel.
+    const rpc = new WebviewRpc({
+      post: (message) => void panel.webview.postMessage(message),
+      origin: active?.origin ?? '',
+      token: () => active?.currentToken() ?? '',
+      fetchImpl: (input, init) => fetch(input, init),
+      log: (l) => log(redact(l, active?.currentToken() ?? '')),
+      workspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
+      workspaceTrusted: () => vscode.workspace.isTrusted,
+      trustSet: async (root, trusted) => {
+        await new GatewayClient(active?.origin ?? '').postJson('/api/host/trust', active?.currentToken() ?? '', { path: root, trusted });
+      },
+      showWarningModal: async (message, detail, confirmLabel, cancelLabel) =>
+        vscode.window.showWarningMessage(message, { modal: true, detail }, confirmLabel, cancelLabel),
+      bindSession: async (sessionId) => {
+        // The webview bound a conversation: follow it, the way the relay's
+        // request log is followed today.
+        observed = sessionId;
+        reset();
+        const socket = link;
+        if (socket && socket.boundSession !== sessionId) await socket.bind(sessionId, 0);
+      },
+      openChatSession: async (sessionId) => {
+        // An empty pick is the Sessions view's "new chat": open the chat view
+        // with nothing to steer.
+        if (sessionId) pendingSession.chat = sessionId;
+        openDevWebview('chat');
+      },
+      reportActiveSession: async (sessionId) => {
+        pendingSession.sessions = sessionId;
+        openDevWebview('sessions');
+      },
+      openFileRange: (request) => deliverables.openRange(request),
+    });
+    panel.webview.onDidReceiveMessage((m: unknown) => {
+      // The app announces itself once its transport is installed; anything a
+      // view asked for while it loaded goes out now.
+      if ((m as { type?: unknown })?.type === 'ready') {
+        const sessionId = view === 'chat' ? pendingSession.chat : pendingSession.sessions;
+        if (sessionId) {
+          pendingSession[view] = undefined;
+          void panel.webview.postMessage(
+            view === 'chat' ? { type: 'openSession', sessionId } : { type: 'activeSession', sessionId },
+          );
+        }
+      }
+      rpc.onMessage(m);
+    });
+    const themeSubscription = vscode.window.onDidChangeActiveColorTheme(() => pushThemeTo(panel));
+    panel.onDidDispose(() => {
+      rpc.dispose();
+      themeSubscription.dispose();
+      devPanels.delete(view);
+    });
+    pushThemeTo(panel);
+    devPanels.set(view, { panel, rpc, disposables: themeSubscription });
+    context.subscriptions.push(themeSubscription);
+  };
+
   context.subscriptions.push(
     output,
     checklist,
@@ -214,56 +313,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('forebrain.askAboutSelection', () => commands.askAboutSelection()),
     vscode.commands.registerCommand('forebrain.askAboutFile', (uri?: vscode.Uri) => commands.askAboutFile(uri)),
     vscode.commands.registerCommand('forebrain.openDeliveredFile', () => deliverables.openDeliveredFile()),
-    // Development loading entry (Steps 3–9): the native webview app in a
-    // panel, riding the RPC surface. Step 10 removes this when the three
-    // views of the alignment contract take over.
-    vscode.commands.registerCommand('forebrain.devOpenWebview', () => {
-      // `webviewDistRoot` lives here rather than in devWebview.ts: Uri joining
-      // is vscode's, the loader itself stays pure for the unit tests.
-      const distRoot = vscode.Uri.joinPath(context.extensionUri, 'webview', 'dist');
-      const panel = vscode.window.createWebviewPanel('forebrain.devChat', 'Forebrain Chat (dev)', vscode.ViewColumn.Active, {
-        enableScripts: true,
-        retainContextWhenHidden: true,
-        localResourceRoots: [distRoot],
-      });
-      panel.webview.html = devWebviewHtml(panel.webview, distRoot);
-      // One RPC dispatcher per panel; its sockets die with the panel.
-      const rpc = new WebviewRpc({
-        post: (message) => void panel.webview.postMessage(message),
-        origin: active?.origin ?? '',
-        token: () => active?.currentToken() ?? '',
-        fetchImpl: (input, init) => fetch(input, init),
-        log: (l) => log(redact(l, active?.currentToken() ?? '')),
-        workspaceRoots: () => (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath),
-        workspaceTrusted: () => vscode.workspace.isTrusted,
-        trustSet: async (root, trusted) => {
-          await new GatewayClient(active?.origin ?? '').postJson('/api/host/trust', active?.currentToken() ?? '', { path: root, trusted });
-        },
-        showWarningModal: async (message, detail, confirmLabel, cancelLabel) =>
-          vscode.window.showWarningMessage(message, { modal: true, detail }, confirmLabel, cancelLabel),
-        bindSession: async (sessionId) => {
-          // The webview bound a conversation: follow it, the way the relay's
-          // request log is followed today.
-          observed = sessionId;
-          reset();
-          const socket = link;
-          if (socket && socket.boundSession !== sessionId) await socket.bind(sessionId, 0);
-        },
-        openFileRange: (request) => deliverables.openRange(request),
-      });
-      panel.webview.onDidReceiveMessage((m: unknown) => rpc.onMessage(m));
-      panel.onDidDispose(() => rpc.dispose());
-      const pushTheme = (): void => {
-        const kind = vscode.window.activeColorTheme.kind;
-        // `HighContrast` is the dark high-contrast kind in this API.
-        void panel.webview.postMessage({
-          type: 'theme',
-          dark: kind === vscode.ColorThemeKind.Dark || kind === vscode.ColorThemeKind.HighContrast,
-        });
-      };
-      pushTheme();
-      const themeSubscription = vscode.window.onDidChangeActiveColorTheme(pushTheme);
-      panel.onDidDispose(() => themeSubscription.dispose());
+    vscode.commands.registerCommand('forebrain.devOpenWebview', (view?: string) => {
+      openDevWebview(view === 'sessions' ? 'sessions' : 'chat');
     }),
     vscode.commands.registerCommand('forebrain.enterGatewayToken', async () => {
       const entered = await vscode.window.showInputBox({ prompt: vscode.l10n.t('Forebrain gateway token'), password: true, ignoreFocusOut: true });

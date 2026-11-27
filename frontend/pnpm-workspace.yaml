@@ -71,3 +71,5 @@ trustPolicy: no-downgrade
 trustPolicyExclude:
   - chokidar@4.0.3
   - langium@3.3.1
+  - lucide-vue-next@0.460.0
+  - undici-types@6.21.0

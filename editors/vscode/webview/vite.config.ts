@@ -16,10 +16,12 @@ export default defineConfig({
   plugins: [vue()],
   // Component tests mount real components, so they need a DOM. The markdown
   // renderer's stylesheet needs the same inlining the web app's tests use:
-  // externalized deps never pass through the PostCSS pipeline.
+  // externalized deps never pass through the PostCSS pipeline. The panel's
+  // copy is the web's copy: the tests read in Chinese.
   test: {
     environment: 'jsdom',
     server: { deps: { inline: ['vue-stream-markdown'] } },
+    setupFiles: ['./src/test-setup.ts'],
   },
   define: {
     __FOREBRAIN_VERSION__: JSON.stringify(forebrainVersion),
@@ -37,6 +39,14 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    // Two apps, one bundle graph: the chat workbench and the Sessions view.
+    // Vite only takes index.html by default, so the Sessions entry is named.
+    rollupOptions: {
+      input: {
+        index: resolve(here, 'index.html'),
+        sessions: resolve(here, 'sessions.html'),
+      },
+    },
     // A stale dist must not linger next to a fresh build.
     emptyOutDir: true,
   },

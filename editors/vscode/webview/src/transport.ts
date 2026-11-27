@@ -8,6 +8,7 @@
 //
 // Frame vocabulary mirrors editors/vscode/src/webviewRpc.ts.
 import axios, { AxiosError, CanceledError, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
+import type { InjectionKey } from 'vue'
 import {
   setForebrainChatSocketTransport,
   setForebrainFetchTransport,
@@ -20,6 +21,11 @@ interface VsCodeApi {
 }
 
 declare function acquireVsCodeApi(): VsCodeApi
+
+/** main.ts provides the one transport under this key; surfaces that must call
+ *  the host directly (the workbench's trust question, session steering) read
+ *  it back. Components that can stay transport-free take props instead. */
+export const TRANSPORT_KEY: InjectionKey<WebviewTransport> = Symbol('forebrain.transport')
 
 /** The slice of a cancellation signal the adapter needs; axios hands a
  *  `GenericAbortSignal`, whose optional listeners this covers. */
@@ -39,15 +45,39 @@ export class WebviewTransport {
   private readonly pending = new Map<number, Pending>()
   private readonly sockets = new Map<number, HostSocket>()
   private nextId = 0
+  private openSessionHandler: ((sessionId: string) => void) | null = null
+  private activeSessionHandler: ((sessionId: string) => void) | null = null
 
   constructor(private readonly host: VsCodeApi) {}
 
-  /** The one inbound gate: RPC answers, socket frames, theme pushes. */
+  /** Registers what the chat app does when the host hands it a session to
+   *  open — the Sessions view's pick arriving. */
+  onOpenSession(handler: (sessionId: string) => void): void {
+    this.openSessionHandler = handler
+  }
+
+  /** Registers what a Sessions view does when the chat's open session moves. */
+  onActiveSession(handler: (sessionId: string) => void): void {
+    this.activeSessionHandler = handler
+  }
+
+  /** The one inbound gate: RPC answers, socket frames, theme pushes, session
+   *  steering. */
   onHostMessage(raw: unknown): void {
     if (typeof raw !== 'object' || raw === null) return
     const frame = raw as { type?: unknown };
     if (frame.type === 'theme') {
       this.applyTheme(raw as { dark?: unknown });
+      return
+    }
+    if (frame.type === 'openSession') {
+      const sessionId = String((raw as { sessionId?: unknown }).sessionId ?? '').trim();
+      if (sessionId) this.openSessionHandler?.(sessionId);
+      return
+    }
+    if (frame.type === 'activeSession') {
+      const sessionId = String((raw as { sessionId?: unknown }).sessionId ?? '').trim();
+      if (sessionId) this.activeSessionHandler?.(sessionId);
       return
     }
     if (frame.type === 'wsFrame') {
@@ -210,6 +240,30 @@ export class WebviewTransport {
     void this.request('openFileRange', { path: ref.path, startLine: ref.from, endLine: ref.to })
   }
 
+  /**
+   * The trust question before a first send into a directory nobody has judged:
+   * the host runs the three branches (inside the workspace writes the record
+   * outright; outside it a native modal with these words; an untrusted
+   * workspace refuses). The strings are this app's locale's — the host has no
+   * locale of its own. A refusal answers false and nothing is sent.
+   */
+  askTrust(root: string, strings: { title: string; body: string; confirm: string; once: string; cancel: string }): Promise<boolean> {
+    return this.request<boolean>('trust.ask', { root, strings })
+  }
+
+  /** The Sessions view picked a conversation: the host opens it in the chat
+   *  view (and reveals that view). Fire and forget — the chat app learns of
+   *  it through the host's own push. */
+  openChatSession(sessionId: string): void {
+    void this.request('openSession', { sessionId })
+  }
+
+  /** The chat app reports which conversation is on screen, so the Sessions
+   *  view can mark it. Fire and forget. */
+  reportActiveSession(sessionId: string): void {
+    void this.request('reportActiveSession', { sessionId })
+  }
+
   /** The host pushes the editor theme; dark is the one class the web app's
    *  stylesheet answers to (main.css `html.dark`, the frozen prototype's family). */
   private applyTheme(frame: { dark?: unknown }): void {
@@ -276,7 +330,9 @@ export class HostSocket {
 }
 
 /** Installs the transport over the webview's own message channel. Call once,
- *  before the first request — everything the app does afterwards goes through it. */
+ *  before the first request — everything the app does afterwards goes through
+ *  it. The install announces itself with a `ready` frame, so a host holding a
+ *  pick made while this app loaded can steer it the moment it listens. */
 export function installWebviewTransport(): WebviewTransport {
   const host = acquireVsCodeApi()
   const transport = new WebviewTransport(host)
@@ -286,6 +342,7 @@ export function installWebviewTransport(): WebviewTransport {
   // surface they touch (send/close/readyState/handlers), which is the contract.
   setForebrainChatSocketTransport(() => transport.openSocket() as unknown as WebSocket)
   setNativeFileRangeSender((ref) => transport.openFileRange(ref))
+  host.postMessage({ type: 'ready' })
   return transport
 }
 
@@ -308,14 +365,24 @@ function headerMap(headers: unknown): Record<string, string> {
 
 function joinPath(baseURL: unknown, url: unknown, params: unknown): string {
   let path = `${typeof baseURL === 'string' ? baseURL : ''}${typeof url === 'string' ? url : ''}`
-  // buildURL: same order axios's own adapters append with.
-  if (params && typeof params === 'object' && !path.includes('?')) {
-    const query = new URLSearchParams()
-    for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
-      if (value !== undefined && value !== null) query.append(key, String(value))
+  // buildURL: same order axios's own adapters append with. The params arrive
+  // either as a plain object (api.ts's own literals) or as the URLSearchParams
+  // listParams builds — the latter carries the query inside itself, so
+  // Object.entries (which sees none of it) would silently drop it.
+  if (params && !path.includes('?')) {
+    if (typeof URLSearchParams !== 'undefined' && params instanceof URLSearchParams) {
+      const encoded = params.toString()
+      if (encoded) path += `?${encoded}`
+      return path
     }
-    const encoded = query.toString()
-    if (encoded) path += `?${encoded}`
+    if (typeof params === 'object') {
+      const query = new URLSearchParams()
+      for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
+        if (value !== undefined && value !== null) query.append(key, String(value))
+      }
+      const encoded = query.toString()
+      if (encoded) path += `?${encoded}`
+    }
   }
   return path
 }

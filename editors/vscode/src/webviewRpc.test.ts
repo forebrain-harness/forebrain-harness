@@ -56,6 +56,8 @@ function makeHarness(overrides: Partial<WebviewRpcDeps> = {}): Harness {
     trustSet: async () => {},
     showWarningModal: async () => undefined,
     bindSession: async () => {},
+    openChatSession: async () => {},
+    reportActiveSession: async () => {},
     openFileRange: async () => {},
     socketFactory: () => {
       throw new Error('the tests inject their own sockets');
@@ -182,6 +184,25 @@ test('a path outside /api/ is refused before anything dials, so the bearer goes 
   assert.deepEqual(dialed, [], 'no dial, no credentials');
 });
 
+test('a gateway that never answers is cut off, not waited on forever', async () => {
+  // AbortSignal.timeout's timer is unref'ed: without a held handle the test
+  // runner would drain the event loop and cancel the wait instead of timing
+  // the gateway out.
+  const keepAlive = setTimeout(() => {}, 5_000);
+  const { rpc, posted } = makeHarness({
+    httpTimeoutMs: 50,
+    fetchImpl: (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new Error('This operation was aborted')));
+    }),
+  });
+  await rpc.handleRpc(25, 'http', { method: 'GET', path: '/api/chat/sessions/s1/events' });
+  clearTimeout(keepAlive);
+
+  const reply = replies(posted)[0];
+  assert.equal(reply.ok, false);
+  assert.match(reply.error ?? '', /abort/i);
+});
+
 test('a chat socket opens, carries sends and announces its states', async () => {
   const { rpc, posted, sockets } = makeHarness();
   await rpc.handleRpc(5, 'ws.open', {});
@@ -249,6 +270,33 @@ test('bind follows the webview to the conversation it bound', async () => {
 
   await rpc.handleRpc(11, 'bind', { sessionId: '   ' });
   assert.equal(replies(posted)[1].ok, false);
+});
+
+test('openSession hands the pick to the host; reportActiveSession records the screen', async () => {
+  const opened: string[] = [];
+  const reported: string[] = [];
+  const { rpc, posted } = makeHarness({
+    openChatSession: async (sessionId) => {
+      opened.push(sessionId);
+    },
+    reportActiveSession: async (sessionId) => {
+      reported.push(sessionId);
+    },
+  });
+  await rpc.handleRpc(22, 'openSession', { sessionId: 's-7' });
+  await rpc.handleRpc(23, 'reportActiveSession', { sessionId: 's-7' });
+  assert.deepEqual(opened, ['s-7']);
+  assert.deepEqual(reported, ['s-7']);
+  assert.equal(replies(posted)[0].ok, true);
+  assert.equal(replies(posted)[1].ok, true);
+
+  // An empty pick is the "new chat" button: open chat, steer nothing.
+  await rpc.handleRpc(24, 'openSession', { sessionId: '  ' });
+  assert.equal(replies(posted)[2].ok, true);
+  assert.deepEqual(opened, ['s-7', '']);
+
+  await rpc.handleRpc(25, 'reportActiveSession', { sessionId: '  ' });
+  assert.equal(replies(posted)[3].ok, false, 'an empty active session is refused');
 });
 
 test('openFileRange reuses the host opener behind the shape check', async () => {

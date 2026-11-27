@@ -21,12 +21,13 @@ export interface DevUriLike {
   readonly fsPath: string;
 }
 
-/** The panel document: the built index.html with its asset URLs rewritten to
- *  webview URIs and a CSP that allows nothing but the webview's own build. */
-export function devWebviewHtml(webview: DevWebviewLike, distRoot: DevUriLike): string {
+/** The panel document: one built entry's index with its asset URLs rewritten
+ *  to webview URIs and a CSP that allows nothing but the webview's own build.
+ *  `entry` names the built html — `index` (the chat workbench) or `sessions`. */
+export function devWebviewHtml(webview: DevWebviewLike, distRoot: DevUriLike, entry: string = 'index'): string {
   let index: string;
   try {
-    index = fs.readFileSync(path.join(distRoot.fsPath, 'index.html'), 'utf-8');
+    index = fs.readFileSync(path.join(distRoot.fsPath, `${entry}.html`), 'utf-8');
   } catch {
     return missingBuildHtml();
   }

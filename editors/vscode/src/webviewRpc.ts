@@ -64,6 +64,15 @@ export interface WebviewRpcDeps {
   ) => Promise<string | undefined>;
   /** The session the webview just bound: what the relay's request log used to sniff. */
   readonly bindSession: (sessionId: string) => Promise<void>;
+  /** Opens one conversation in the chat view and reveals it — the Sessions
+   *  view's pick. */
+  readonly openChatSession: (sessionId: string) => Promise<void>;
+  /** Records which conversation the chat view is on, so the Sessions view can
+   *  mark the row. */
+  readonly reportActiveSession: (sessionId: string) => Promise<void>;
+  /** The proxied gateway call's ceiling; the default is 60s and the tests
+   *  shrink it. */
+  readonly httpTimeoutMs?: number;
   /** Opens a workspace file at a line range — `Deliverables.openRange`, unchanged. */
   readonly openFileRange: (request: unknown) => Promise<void>;
   /** Injected so the tests hand over a fake socket. */
@@ -101,6 +110,11 @@ export function trustBranchOf(
 /** Response headers the webview may see: the ones a page reads, nothing that
  *  could carry credentials or hop-by-hop noise. */
 const RESPONSE_HEADER_ALLOWLIST = new Set(['content-type', 'content-length', 'content-disposition']);
+
+/** How long one proxied gateway call may take before the webview is told the
+ *  request failed. Long enough for an attachment upload, short enough that a
+ *  dead gateway never leaves a panel hanging. */
+const HTTP_TIMEOUT_MS = 60_000;
 
 /** Request headers a webview may set; the bearer header is never one of them. */
 function clientHeaders(headers: unknown): Record<string, string> {
@@ -159,6 +173,10 @@ export class WebviewRpc {
         return this.closeSocket(params);
       case 'bind':
         return this.bind(params);
+      case 'openSession':
+        return this.openChatSession(params);
+      case 'reportActiveSession':
+        return this.reportActiveSession(params);
       case 'trust.ask':
         return this.askTrust(params);
       case 'openFileRange':
@@ -174,7 +192,9 @@ export class WebviewRpc {
    * write it literally — so the prefix check is what bounds where the bearer
    * header travels: a path outside it is refused before anything dials, and
    * the credentials go nowhere. The log carries the path without its query,
-   * and an abort from an `rpcCancel` unwinds the fetch.
+   * an abort from an `rpcCancel` unwinds the fetch, and a gateway that never
+   * answers is cut off at `HTTP_TIMEOUT_MS` — the webview waits bounded, and
+   * its surfaces say the request failed instead of hanging.
    */
   private async httpRequest(params: unknown, rpc: number): Promise<unknown> {
     if (typeof params !== 'object' || params === null) throw new Error('http: params required');
@@ -197,7 +217,9 @@ export class WebviewRpc {
       method: verb,
       headers: { ...clientHeaders(request.headers), ...(token ? { authorization: `Bearer ${token}` } : {}) },
       body: request.body === undefined ? undefined : (request.body as string | ArrayBuffer),
-      signal: abort.signal,
+      // `any` covers both directions: an `rpcCancel` unwinds the fetch at
+      // once, and a gateway that never answers is cut off at the timeout.
+      signal: AbortSignal.any([abort.signal, AbortSignal.timeout(this.deps.httpTimeoutMs ?? HTTP_TIMEOUT_MS)]),
     });
     const headers: Record<string, string> = {};
     res.headers.forEach((value, name) => {
@@ -290,6 +312,23 @@ export class WebviewRpc {
     const sessionId = String((params as { sessionId?: unknown }).sessionId ?? '').trim();
     if (!sessionId) throw new Error('bind: a session id is required');
     return this.deps.bindSession(sessionId);
+  }
+
+  /** The Sessions view picked a conversation: open it in the chat view. An
+   *  empty id opens the chat view on its fresh-chat page (the "new chat"
+   *  button), with nothing to steer. */
+  private openChatSession(params: unknown): Promise<void> {
+    if (typeof params !== 'object' || params === null) throw new Error('openSession: params required');
+    const sessionId = String((params as { sessionId?: unknown }).sessionId ?? '').trim();
+    return this.deps.openChatSession(sessionId);
+  }
+
+  /** The chat view reports the conversation on screen. */
+  private reportActiveSession(params: unknown): Promise<void> {
+    if (typeof params !== 'object' || params === null) throw new Error('reportActiveSession: params required');
+    const sessionId = String((params as { sessionId?: unknown }).sessionId ?? '').trim();
+    if (!sessionId) throw new Error('reportActiveSession: a session id is required');
+    return this.deps.reportActiveSession(sessionId);
   }
 
   /**
