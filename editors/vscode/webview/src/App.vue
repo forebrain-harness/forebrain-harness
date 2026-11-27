@@ -130,6 +130,7 @@
       :records="conversationSubagents"
       :seen="seenAgentActivity"
       :now="subagentNow"
+      :overlay="true"
       @select="selectSubagentTab"
       @close-tab="closeSubagentTab"
       @open="openSubagentTab"
@@ -170,6 +171,7 @@
       :other-total="peerDirectory.otherTotal"
       :page="peerDirectoryPage"
       :page-size="PEER_DIRECTORY_PAGE_SIZE"
+      :now="subagentNow"
       @close="peerDrawerOpen = false"
       @release="releaseHeldPeer"
       @deny="denyHeldPeer"
@@ -216,6 +218,14 @@ import { computed, inject, onMounted, ref, watch } from 'vue'
 import { Plus, Sparkles } from 'lucide-vue-next'
 import ComposerBar from './components/ComposerBar.vue'
 import ThreadView from './components/ThreadView.vue'
+import TodoPanel from './components/TodoPanel.vue'
+import McpNotice from '@/components/chat/McpNotice.vue'
+import PeerDrawer from '@/components/chat/PeerDrawer.vue'
+import PlanApprovalDock from '@/components/chat/PlanApprovalDock.vue'
+import ProjectServersConsentDialog from '@/components/chat/ProjectServersConsentDialog.vue'
+import RewindDialog from '@/components/chat/RewindDialog.vue'
+import SubagentDrawer from '@/components/chat/SubagentDrawer.vue'
+import SubagentTab from '@/components/chat/SubagentTab.vue'
 import { TRANSPORT_KEY } from './transport'
 import { useChatStream, emptyPendingInputPreview, type ChatMessage, type PlanUpdateData } from '@/composables/useChatStream'
 import { useViewMode } from '@/composables/useViewMode'
@@ -536,9 +546,13 @@ function pickDraftModel(option: SessionModelOption) {
 }
 
 // The catalog facts name the option in force; without a shared catalog row
-// the selection itself is the answer (the web reads the same two).
-const sessionEfforts = computed(() => sessionModelData.value?.options.find((o) => o.id === sessionModelData.value?.modelId)?.efforts ?? [])
-const sessionDefaultEffort = computed(() => sessionModelData.value?.options.find((o) => o.id === sessionModelData.value?.modelId)?.defaultEffort ?? '')
+// the selection itself is the answer (the web reads the same two). A session
+// whose model payload carries no options list is the same "no catalog row"
+// case, not a crash.
+const sessionModelOption = computed(() =>
+  (sessionModelData.value?.options ?? []).find((o) => o.id === sessionModelData.value?.modelId) ?? null)
+const sessionEfforts = computed(() => sessionModelOption.value?.efforts ?? [])
+const sessionDefaultEffort = computed(() => sessionModelOption.value?.defaultEffort ?? '')
 
 async function selectEffort(effort: string) {
   const sid = sessionId.value
@@ -694,7 +708,7 @@ watch(projectServersScopeId, (projectId) => {
 const mcpFailures = computed(() =>
   (mcpStatus.value?.servers ?? [])
     .filter((row) => row.connStatus === 'error' && (row.error ?? '').trim())
-    .map((row) => ({ name: row.name, error: (row.error ?? '').trim })),
+    .map((row) => ({ name: row.name, error: (row.error ?? '').trim() })),
 )
 
 // ---- the peer letters and the directory ----

@@ -55,6 +55,7 @@
 // row keeps a brand dot and bold text until the reader marks it read, and
 // flashes once when it arrives. This is a webview surface, not a native
 // tree, and there is no PlanUpdateCard message card in the panel.
+import { computed } from 'vue'
 import { Check, Circle, Loader2, X } from 'lucide-vue-next'
 import type { PlanUpdateData, PlanUpdateItem } from '@/composables/useChatStream'
 
@@ -72,7 +73,9 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
-const items = props.todo.items
+// The list follows the payload: a session_todo update hands over a new object,
+// and the rows and the tally must move with it.
+const items = computed(() => props.todo.items)
 
 function statusOf(item: PlanUpdateItem): string {
   return String(item.status ?? '').trim().toLowerCase()
@@ -99,7 +102,7 @@ function rowClass(item: PlanUpdateItem, index: number): string[] {
   ].filter(Boolean)
 }
 
-const countText = `${items.filter((item) => isDone(item)).length}/${items.length}`
+const countText = computed(() => `${items.value.filter((item) => isDone(item)).length}/${items.value.length}`)
 </script>
 
 <style scoped>
