@@ -169,6 +169,9 @@
               :label="deliverableLabelOf(msg)"
               @preview="(artifact: ArtifactView) => emit('open-deliverable', artifact)"
             />
+            <!-- The run's closing line, in the turn's column: how long it
+                 worked and what the plan reached, the web's own wording. -->
+            <RunWorkedLine class="ml-8" :line="workedLineOf(msg, t)" />
           </MessageContent>
         </Message>
       </template>
@@ -215,6 +218,7 @@ import PeerDeliveryCard from '@/components/chat/PeerDeliveryCard.vue'
 import PeerMessageCard from '@/components/chat/PeerMessageCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
 import ArtifactList from '@/components/chat/ArtifactList.vue'
+import RunWorkedLine from '@/components/chat/RunWorkedLine.vue'
 import type { ArtifactView } from '@/lib/artifacts'
 import {
   artifactsOfPresentFiles,
@@ -233,6 +237,7 @@ import {
   stepHoldsNoCard,
   stoppedCardSaysNothing,
   timelineBlockKey,
+  workedLineOf,
   type ChatMessage,
   type TimelineBlock,
 } from '@/composables/useChatStream'

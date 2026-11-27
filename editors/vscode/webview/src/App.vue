@@ -177,6 +177,14 @@
       @deny="denyHeldPeer"
       @page-change="changePeerPage"
     />
+    <!-- The language server the turn recommended: the card owns its own
+         install poll and its goodbye, exactly as the web's does. -->
+    <LspRecommendationCard
+      v-if="lspRecommendation"
+      :recommendation="lspRecommendation"
+      :session-id="sessionId ?? undefined"
+      @close="lspRecommendation = null"
+    />
     <!-- The project's servers that still want an answer, asked in the panel
          the way the web asks them, and recorded the same way. -->
     <ProjectServersConsentDialog
@@ -220,6 +228,7 @@ import ComposerBar from './components/ComposerBar.vue'
 import ThreadView from './components/ThreadView.vue'
 import TodoPanel from './components/TodoPanel.vue'
 import McpNotice from '@/components/chat/McpNotice.vue'
+import LspRecommendationCard from '@/components/chat/LspRecommendationCard.vue'
 import PeerDrawer from '@/components/chat/PeerDrawer.vue'
 import PlanApprovalDock from '@/components/chat/PlanApprovalDock.vue'
 import ProjectServersConsentDialog from '@/components/chat/ProjectServersConsentDialog.vue'
@@ -252,7 +261,7 @@ const {
   mcpStatus,
   suggestion, acceptSuggestion, dismissSuggestion,
   cancelAutoContinue, autoContinueForView,
-  pendingInputPreview, editLastQueuedMessage, sendPendingSteersAfterInterrupt,
+  pendingInputPreview, editLastQueuedMessage, sendPendingSteersAfterInterrupt, lspRecommendation,
   runtimeStatus, send, cancel, switchMode, switchToSession, resetForNewChat,
   subagents, subagentCallTasks, subagentNow, subagentPendingInput,
   sendToSubagent, recallSubagentInput, pauseSubagent, interruptSubagentToSend,

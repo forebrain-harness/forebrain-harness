@@ -165,6 +165,22 @@ describe('the webview thread', () => {
     expect(wrapper.get('[data-testid="busy-notice"]').text()).toContain('另一端运行')
   })
 
+  it('closes a finished turn with the worked line the web writes', () => {
+    const wrapper = mount(ThreadView, {
+      props: {
+        ...base,
+        messages: [{
+          ...messageWith([]),
+          role: 'assistant',
+          workedDurationMs: 72_000,
+          runFinishedAt: Date.now(),
+        } as never],
+      },
+    })
+    expect(wrapper.findComponent({ name: 'RunWorkedLine' }).exists()).toBe(true)
+    expect(wrapper.text()).toContain('1m')
+  })
+
   it('draws the gate on the call it parks, from the same pending store the tail reads', async () => {
     // The pending-actions store reads /api/actions through gatewayFetch, so the
     // stub sits on the fetch seam and answers the array the gateway sends.
