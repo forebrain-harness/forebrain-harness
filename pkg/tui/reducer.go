@@ -723,12 +723,21 @@ func appendFanoutTaskTool(t *FanoutTaskState, stepID, label string) {
 	}
 }
 
-// fanoutToolLabel builds a display label for a subagent tool event.
-func fanoutToolLabel(msg Message) string {
-	if inv := strings.TrimSpace(msg.ToolMeta.Invocation); inv != "" {
+// fanoutToolLabel names a subagent's tool call on the dispatching card's third
+// layer with the very header its own card draws (ToolDisplayHeader): one
+// wording source, so the row and the card it names never disagree. The row used
+// to read the invocation label, which for a process call is the raw argument
+// JSON — "process {…}" beside a card head saying "Started background process
+// <cmd>" (owner 2026-11-27). A frame the header cannot word keeps the invocation
+// label, then the tool name.
+func fanoutToolLabel(f Frame) string {
+	if header := ToolDisplayHeader(f, ""); header != "" {
+		return header
+	}
+	if inv := strings.TrimSpace(f.ToolMeta.Invocation); inv != "" {
 		return inv
 	}
-	if name := strings.TrimSpace(msg.ToolName); name != "" {
+	if name := strings.TrimSpace(f.Title); name != "" {
 		return name
 	}
 	return "tool"
@@ -2507,10 +2516,13 @@ func (r *Reducer) reduceMessage(msg Message) []Frame {
 		}
 		// A subagent's own tool calls fold into the card task its execution is
 		// bound to. Emit AgentID-tagged FrameTool for the per-agent view, then
-		// re-emit the card for the surface that shows it.
+		// re-emit the card for the surface that shows it. The card's third layer
+		// names the call by the same frame's header, so the two surfaces read the
+		// same words about it.
 		if fs, task := r.cardTaskOf(agentID); task != nil {
-			appendFanoutTaskTool(task, stepID, fanoutToolLabel(msg))
-			frames := r.withFlushedBuffers(r.agentBuf(agentID), r.buildFrame(FrameTool, toolName, msg), msg.Timestamp)
+			frame := r.buildFrame(FrameTool, toolName, msg)
+			appendFanoutTaskTool(task, stepID, fanoutToolLabel(frame))
+			frames := r.withFlushedBuffers(r.agentBuf(agentID), frame, msg.Timestamp)
 			return append(frames, r.emitFanoutFrame(fs))
 		}
 		buf := r.agentBuf(agentID)
@@ -2534,6 +2546,18 @@ const subagentPausedLine = "Interrupted waiting for your message"
 // subagentPausedCardLine is the same pause on the task row of the card that
 // dispatched the subagent.
 const subagentPausedCardLine = "waiting for your message"
+
+// The two lines that close a stopped subagent's own view, one per ending. A
+// stop reaches a subagent from the roster, from cancel-all, from
+// subagent_close, or from the dispatching turn ending above it, and the ended
+// event does not say which — so neither line may claim the user pressed
+// anything. They take the conversation's actorless stop wording
+// (interruptStoppedRunLine) rather than its "You stopped this run". The roster
+// answers the press itself where the press happened.
+const (
+	subagentStoppedLine     = "Run stopped"
+	subagentInterruptedLine = "Run interrupted"
+)
 
 // setCardTaskPaused marks the card task bound to agentID paused or resumed and
 // returns the card redrawn, or nothing when no running task follows it.
@@ -2565,13 +2589,13 @@ func (r *Reducer) subagentClosingFrames(agentID string, m SubagentEndedMsg) []Fr
 	// (RunStoppedLine): its word, and the reason beside it when there is one.
 	// It is a status, not an error — nothing went wrong that the user must fix.
 	if status == "cancelled" || status == "interrupted" {
-		title := "Cancelled"
+		title := subagentStoppedLine
 		content := errText
 		if status == "interrupted" {
-			title = "Interrupted"
+			title = subagentInterruptedLine
 		} else {
-			// A cancelled run's error field carries the status word itself
-			// ("cancelled"), which the line's title already says. The web
+			// A cancelled run's error field carries the engine's status word
+			// ("cancelled"), which is a state name and not a reason. The web
 			// drawer draws the same stop with no reason (RunStoppedLine), and a
 			// reason belongs on this line only when there is a real one.
 			content = ""

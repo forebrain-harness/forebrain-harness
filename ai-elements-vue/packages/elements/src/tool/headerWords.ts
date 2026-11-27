@@ -196,3 +196,25 @@ export function headerSuffixWords(suffix: string, lang: 'zh' | 'en'): string {
   if (match) return `在 ${match[1]} 中`
   return suffix
 }
+
+/**
+ * The head as one line of text, in the reader's language — the same words
+ * ToolHeader lays out, in the order it draws them (the woven Chinese order
+ * included), with the duration last. A surface that names a call inside a
+ * sentence of its own (the subagent card's latest-tool row) reads this instead
+ * of assembling its own label, so the row and the card head never disagree
+ * (owner 2026-11-27, the terminal's fanoutToolLabel rule).
+ */
+export function headerLine(
+  parts: { action: string; target?: string; suffix?: string; duration?: string },
+  lang: 'zh' | 'en',
+): string {
+  const action = headerActionWord(parts.action, lang)
+  const target = String(parts.target ?? '').trim()
+  const suffix = parts.suffix ? headerSuffixWords(parts.suffix, lang) : ''
+  const woven = target ? headerTargetedWord(parts.action, lang) : null
+  const head = woven
+    ? `${woven.before} ${target} ${woven.after}`
+    : [action, target].filter(Boolean).join(' ')
+  return [head, suffix, String(parts.duration ?? '').trim()].filter(Boolean).join(' ')
+}

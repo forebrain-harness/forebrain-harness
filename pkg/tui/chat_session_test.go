@@ -30458,7 +30458,7 @@ func TestInterruptedSubagentViewSaysItsReasonOnce(t *testing.T) {
 		return stripANSI(strings.Join(renderViewport(vm, 80, 40, 1<<30, DiffThemeDark).lines, "\n"))
 	}
 	view := paint(r.perAgentVM[rosterKey])
-	if !strings.Contains(view, "Interrupted") {
+	if !strings.Contains(view, subagentInterruptedLine) {
 		t.Fatalf("the subagent's view must close on the interrupted stop line:\n%s", view)
 	}
 	if strings.Contains(view, "subagent failed") {

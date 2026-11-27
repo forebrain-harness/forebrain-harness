@@ -2167,6 +2167,7 @@ export interface PeerDirectoryView {
 import { persistLastSessionId } from '@/composables/useLastSession'
 import { mergeSubmissions, type ComposerSubmission, type SubmittedAttachment } from '@/lib/composerSubmission'
 import { currentLocale, t as translate, type I18nKey } from '@/locales'
+import { headerLine } from '@/locales/toolHeader'
 import { AUTO_CONTINUE_EVENT_TYPES, parseAutoContinue, type AutoContinueEntry, type AutoContinueState } from '@/lib/autoContinue'
 import { PAID_TIER_EVENT_TYPE, parsePaidTierOffer, type PaidTierOffer } from '@/lib/paidTier'
 import { LSP_RECOMMENDATION_EVENT_TYPE, parseLspRecommendation, type LspRecommendation } from '@/lib/lspRecommendation'
@@ -3418,7 +3419,17 @@ export function useChatStream() {
   function countSubagentToolEvent(agentId: string, evt: ForebrainRunEvent, payload: Record<string, unknown>) {
     const completed = evt.type === 'tool_call_completed'
     const step = toolStepFromPayload(payload, completed, `${payload.toolName ?? 'tool'}-${evt.id ?? ''}`)
-    countSubagentTool(agentId, step.stepId, String(subagentStepMeta(payload).invocation ?? '').trim() || step.toolName)
+    // The row names the call with the very words its own card head draws
+    // (headerLine over the engine's parts) — the terminal's fanoutToolLabel
+    // rule. The invocation label is raw argument JSON for a process call, which
+    // read "process {…}" beside a head saying "Started background process <cmd>"
+    // (owner 2026-11-27); it stands in only for a payload that carries no
+    // header, the way the card's own title falls back.
+    const label = (step.headerParts ? headerLine(step.headerParts, currentLocale.value === 'zh' ? 'zh' : 'en') : '')
+      || step.header
+      || String(subagentStepMeta(payload).invocation ?? '').trim()
+      || step.toolName
+    countSubagentTool(agentId, step.stepId, label)
   }
 
   /**

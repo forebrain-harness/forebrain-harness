@@ -4358,6 +4358,43 @@ func TestCtrlXCtrlKRequestsCancelAllAgents(t *testing.T) {
 	}
 }
 
+// ctrl+x ctrl+k answers with what the press stopped, not with a state name and
+// two bare counts ("agents cancelled primary 1 subagents 1").
+func TestStopAllAgentsSaysWhatItStopped(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		summary AgentCancelSummary
+		want    string
+	}{
+		{name: "the conversation and its subagents", summary: AgentCancelSummary{Main: 1, Subagents: 2}, want: "You stopped this conversation and 2 subagents"},
+		{name: "one subagent reads as one", summary: AgentCancelSummary{Main: 1, Subagents: 1}, want: "You stopped this conversation and 1 subagent"},
+		{name: "the conversation alone", summary: AgentCancelSummary{Main: 1}, want: userStoppedRunLine},
+		{name: "subagents alone", summary: AgentCancelSummary{Subagents: 3}, want: "You stopped 3 subagents"},
+		{name: "nothing was running", summary: AgentCancelSummary{}, want: "Nothing to stop. No agent is running."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := stoppedAllAgentsLine(tc.summary); got != tc.want {
+				t.Fatalf("stop-all line = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	session := &fakeSession{}
+	state := &streamState{sessionID: "s1"}
+	renderer := NewRenderer(io.Discard, io.Discard)
+	handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyAgentControlPrefix)
+	if !handleIdleHotkey(context.Background(), session, renderer, state, nil, nil, hotkeyAgentStopAll) {
+		t.Fatal("expected ctrl+k after ctrl+x to be handled")
+	}
+	got := stripANSI(strings.Join(renderViewport(&renderer.vm, 120, 40, 0, DiffThemeDark).lines, "\n"))
+	if !strings.Contains(got, "You stopped this conversation and 1 subagent") {
+		t.Fatalf("the transcript must say what the press stopped, got:\n%s", got)
+	}
+	if strings.Contains(got, "agents cancelled") || strings.Contains(got, "primary 1 subagents 1") {
+		t.Fatalf("the stop-all tally is still printed as counts:\n%s", got)
+	}
+}
+
 func TestAgentRosterEnterSwitchesSelectedView(t *testing.T) {
 	session := &fakeSession{}
 	state := &streamState{
@@ -4406,6 +4443,55 @@ func TestAgentRosterXUsesSelectedRowCancel(t *testing.T) {
 	}
 	if session.cancelSubagentQuery.AgentID != "child-agent" || session.cancelSubagentQuery.RunID != "run-1" {
 		t.Fatalf("cancel query=%#v want child-agent/run-1", session.cancelSubagentQuery)
+	}
+}
+
+// The roster answers a stop in the conversation's own voice: the press is the
+// user's, so the line names them and the agent they stopped, and a row with
+// nothing left to stop says why instead of naming a state. It printed
+// "subagent cancelled general-purpose" and "subagent no cancellable run".
+func TestAgentRosterStopSaysWhoStoppedWhat(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  AgentRosterRow
+		want string
+	}{
+		{
+			name: "a stopped subagent is named by its type",
+			row:  AgentRosterRow{ID: "child-agent", Kind: "subagent", Label: "general-purpose", RunID: "run-1"},
+			want: "You stopped the general-purpose subagent",
+		},
+		{
+			name: "a row without a type still says what stopped",
+			row:  AgentRosterRow{ID: "child-agent", Kind: "subagent", RunID: "run-1"},
+			want: "You stopped this subagent",
+		},
+		{
+			name: "a row with no run left says why nothing stopped",
+			row:  AgentRosterRow{ID: "main", Kind: "primary", Label: "main"},
+			want: rosterNothingToStopLine,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &streamState{
+				sessionID:          "parent",
+				agentRosterFocused: true,
+				agentRoster:        AgentRosterSnapshot{Rows: []AgentRosterRow{tc.row}},
+			}
+			renderer := NewRenderer(io.Discard, io.Discard)
+			if !state.handleAgentRosterLineInput(&fakeSession{}, renderer, nil, "x") {
+				t.Fatal("expected x on selected roster row to be handled")
+			}
+			got := stripANSI(strings.Join(renderViewport(&renderer.vm, 120, 40, 0, DiffThemeDark).lines, "\n"))
+			if !strings.Contains(got, tc.want) {
+				t.Fatalf("the stop line must read %q, got:\n%s", tc.want, got)
+			}
+			for _, machine := range []string{"subagent cancelled", "no cancellable run"} {
+				if strings.Contains(got, machine) {
+					t.Fatalf("the roster still prints %q:\n%s", machine, got)
+				}
+			}
+		})
 	}
 }
 

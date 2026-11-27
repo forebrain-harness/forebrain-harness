@@ -1705,7 +1705,7 @@ func TestReplaySettlesAStoppedSubagentsWaitingCardAway(t *testing.T) {
 	}
 	stops := 0
 	for _, b := range vm.blocks {
-		if b.frame.Kind == FrameStatus && b.frame.Title == "Cancelled" {
+		if b.frame.Kind == FrameStatus && b.frame.Title == subagentStoppedLine {
 			stops++
 			if b.frame.Content != "" {
 				t.Fatalf("the stop line says its status word twice: %q", b.frame.Content)
@@ -4966,7 +4966,7 @@ func TestReplayContinueCardNamesTheSubagentsLastCall(t *testing.T) {
 	for _, block := range renderer.vm.blocks {
 		f := block.frame
 		if f.Kind == FrameFanout && strings.HasPrefix(stripANSI(f.Summary), "Continued") {
-			if !strings.Contains(stripANSI(f.Content), "└ sleep 600") {
+			if !strings.Contains(stripANSI(f.Content), "└ Failed to run sleep 600") {
 				t.Fatalf("continue card = %q, want it to name the subagent's last call", stripANSI(f.Content))
 			}
 			return

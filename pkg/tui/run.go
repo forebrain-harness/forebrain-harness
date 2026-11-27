@@ -2206,7 +2206,43 @@ const (
 	// which may come from a supervisor rather than a person, so it must not
 	// claim to be one.
 	interruptStoppedRunLine = "Run stopped"
+	// rosterNothingToStopLine answers a stop asked of a row with no run left
+	// to stop. It says why the press did nothing rather than naming a state.
+	rosterNothingToStopLine = "Nothing to stop. This agent isn't running."
 )
+
+// rosterStoppedSubagentLine answers x on a subagent row. The press is the
+// user's own, so the line names them, as userStoppedRunLine does for the
+// conversation's run.
+func rosterStoppedSubagentLine(row AgentRosterRow) string {
+	if label := strings.TrimSpace(row.Label); label != "" {
+		return "You stopped the " + label + " subagent"
+	}
+	return "You stopped this subagent"
+}
+
+// stoppedAllAgentsLine answers ctrl+x ctrl+k with what the press stopped. The
+// tally is the same count the summary carries, said as a sentence.
+func stoppedAllAgentsLine(summary AgentCancelSummary) string {
+	subagents := ""
+	switch summary.Subagents {
+	case 0:
+	case 1:
+		subagents = "1 subagent"
+	default:
+		subagents = fmt.Sprintf("%d subagents", summary.Subagents)
+	}
+	switch {
+	case summary.Main > 0 && subagents != "":
+		return "You stopped this conversation and " + subagents
+	case summary.Main > 0:
+		return userStoppedRunLine
+	case subagents != "":
+		return "You stopped " + subagents
+	default:
+		return "Nothing to stop. No agent is running."
+	}
+}
 
 func persistSurfaceBrowseState(session Session, renderer *Renderer, sessionID string) {
 	if session == nil || renderer == nil || strings.TrimSpace(sessionID) == "" {
@@ -2332,16 +2368,16 @@ func (s *streamState) handleAgentRosterLineInput(session Session, renderer *Rend
 				RunID:   strings.TrimSpace(row.RunID),
 			})
 			if cancelled {
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "subagent cancelled", Content: strings.TrimSpace(row.Label)})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: rosterStoppedSubagentLine(row), Final: true})
 			} else {
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "subagent", Content: "no cancellable run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: rosterNothingToStopLine, Final: true})
 			}
 			return true
 		case "primary":
 			if session.CancelActiveRun() {
 				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: userStoppedRunLine})
 			} else {
-				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "agent", Content: "no cancellable run"})
+				renderer.RenderFrame(Frame{Kind: FrameStatus, Title: rosterNothingToStopLine, Final: true})
 			}
 			return true
 		}
@@ -5969,7 +6005,7 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		return true
 	case hotkeyAgentControlPrefix:
 		state.agentControlPrefixArmed = true
-		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "agents", Content: "ctrl+k cancels all agents"})
+		renderer.RenderFrame(Frame{Kind: FrameStatus, Title: "press ctrl+k to stop every agent"})
 		return true
 	case hotkeyAgentStopAll:
 		if !state.agentControlPrefixArmed {
@@ -5978,9 +6014,9 @@ func handleIdleHotkey(ctx context.Context, session Session, renderer *Renderer, 
 		state.agentControlPrefixArmed = false
 		summary := session.CancelAllAgents()
 		renderer.RenderFrame(Frame{
-			Kind:    FrameStatus,
-			Title:   "agents cancelled",
-			Content: fmt.Sprintf("primary %d subagents %d", summary.Main, summary.Subagents),
+			Kind:  FrameStatus,
+			Title: stoppedAllAgentsLine(summary),
+			Final: true,
 		})
 		return true
 	case hotkeyCycleMode:

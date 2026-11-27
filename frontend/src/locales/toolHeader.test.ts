@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest'
 // what the engine ships and turns red when a word is not worded here.
 import goldenActions from '../../../pkg/tool/testdata/header_actions.json'
 
-import { HEADER_ACTION_ZH, headerActionWord, headerSuffixWords } from './toolHeader'
+import { HEADER_ACTION_ZH, headerActionWord, headerSuffixWords, headerLine } from './toolHeader'
 
 describe('the card head vocabulary', () => {
   it('words every action the engine can put in a head, in Chinese and nothing else', () => {
@@ -74,5 +74,23 @@ describe('the card head vocabulary', () => {
     expect(headerSuffixWords('repo: forebrain-harness limit: 10', 'zh')).toBe('repo: forebrain-harness limit: 10')
     expect(headerSuffixWords('lines 15-20', 'en')).toBe('lines 15-20')
     expect(headerSuffixWords('to be ready', 'en')).toBe('to be ready')
+  })
+
+  // headerLine is the head as one line of text — the same words ToolHeader
+  // draws, in its order — for a surface that names a call inside a sentence of
+  // its own (the subagent card's latest-tool row).
+  it('joins the head as one line in the order ToolHeader draws it', () => {
+    const parts = { action: 'Started background process', target: 'sleep 6; echo ok', duration: '6.0s' }
+    expect(headerLine(parts, 'en')).toBe('Started background process sleep 6; echo ok 6.0s')
+    expect(headerLine(parts, 'zh')).toBe('已在后台启动 sleep 6; echo ok 6.0s')
+    // A suffix rides between the target and the duration, worded.
+    expect(headerLine({ action: 'Read', target: 'types.go', suffix: 'lines 2-101' }, 'zh')).toBe('已读取 types.go 第 2-101 行')
+    expect(headerLine({ action: 'Waiting for', target: 'sleep 6', suffix: 'to be ready' }, 'zh')).toBe('正在等待 sleep 6 直到就绪')
+    // A woven Chinese action puts its target inside the sentence.
+    expect(headerLine({ action: 'Sent a message to', target: 'agent-1' }, 'zh')).toBe('已向 agent-1 发送消息')
+    expect(headerLine({ action: 'Sent a message to', target: 'agent-1' }, 'en')).toBe('Sent a message to agent-1')
+    // A head with no object is its action alone; no part invents a space.
+    expect(headerLine({ action: 'Listed processes' }, 'zh')).toBe('已列出进程')
+    expect(headerLine({ action: 'Listed processes' }, 'en')).toBe('Listed processes')
   })
 })

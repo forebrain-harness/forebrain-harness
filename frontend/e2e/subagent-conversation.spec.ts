@@ -225,12 +225,12 @@ test('a subagent is interrupted first and stopped second, never with its dispatc
   // its own turn — the proof that the subagent's button never cancelled it.
   await stop.click()
   await expect(drawer.locator('textarea')).toHaveCount(0, { timeout: 60_000 })
-  await expect(drawer.locator('[data-testid="run-stopped-line"]').last()).toHaveText('Cancelled', { timeout: 60_000 })
+  await expect(drawer.locator('[data-testid="run-stopped-line"]').last()).toHaveText('Run stopped', { timeout: 60_000 })
 
   // The stop is said once, in its place: the quiet line above, and no second
   // account at the foot of the tab beside it.
-  const cancelled = drawer.getByText('Cancelled', { exact: true })
-  await expect(cancelled).toHaveCount(1)
+  const stopped = drawer.getByText('Run stopped', { exact: true })
+  await expect(stopped).toHaveCount(1)
   await expect(drawer.locator('[data-testid="run-error"]')).toHaveCount(0)
   await expect(page.locator('body')).toContainText('primary done', { timeout: 60_000 })
   await expect(page.locator('body')).not.toContainText('cancelling run')

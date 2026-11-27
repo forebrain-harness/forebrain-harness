@@ -1464,7 +1464,7 @@ func TestReducerFanoutTaskToolFolding(t *testing.T) {
 	if got2[fanoutIdx].Kind != FrameFanout {
 		t.Fatalf("expected FrameFanout in result, got %#v", got2)
 	}
-	if !strings.Contains(got2[fanoutIdx].Content, "example auth") {
+	if !strings.Contains(got2[fanoutIdx].Content, "Called example_tool") {
 		t.Fatalf("FrameFanout.Content missing tool label: %q", got2[fanoutIdx].Content)
 	}
 
@@ -1484,7 +1484,7 @@ func TestReducerFanoutTaskToolFolding(t *testing.T) {
 	if got3[0].Kind != FrameFanout {
 		fanoutIdx3 = 1
 	}
-	if strings.Count(got3[fanoutIdx3].Content, "example auth") != 1 {
+	if strings.Count(got3[fanoutIdx3].Content, "Called example_tool") != 1 {
 		t.Fatalf("expected single tool entry after started+completed dedup: %q", got3[fanoutIdx3].Content)
 	}
 }
@@ -1606,8 +1606,87 @@ func TestReducerFanoutTaskCountsACallSeenOnlyByItsCompletion(t *testing.T) {
 	_ = r.Reduce(NewMessageMsg{Msg: completed})
 	_ = r.Reduce(NewMessageMsg{Msg: completed})
 	task := r.findFanoutByStepID("fanout-done-only").Tasks[0]
-	if task.ToolTotal != 1 || len(task.RecentTools) != 1 || task.RecentTools[0].Label != "sleep 600" {
+	if task.ToolTotal != 1 || len(task.RecentTools) != 1 || task.RecentTools[0].Label != "Ran sleep 600" {
 		t.Fatalf("task tools = %d %+v, want the one call, named", task.ToolTotal, task.RecentTools)
+	}
+}
+
+// A subagent card's third layer names a call with the very words its own card
+// header says — one wording source, the engine's header, feeds both. A process
+// call's row read "process {…raw json…}" while its card head said "Started
+// background process <cmd>" (owner 2026-11-27).
+func TestReducerFanoutTaskToolLabelMatchesTheToolCardHeader(t *testing.T) {
+	command := "cd /repo/.worktrees/plan-review-420422479 && go test ./pkg/tool"
+	var r Reducer
+	_ = r.Reduce(NewMessageMsg{Msg: subagentStepMessage("fanout-label", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "subagent_run",
+		Input: map[string]any{"task": "review the plan", "title": "Plan review"},
+	})})
+	_ = r.Reduce(SubagentSpawnedMsg{
+		AgentID: "agent-label", AgentType: "explore", TaskID: "agent-label",
+		ParentToolCallID: "fanout-label", TaskIndex: 0,
+	})
+
+	// One reduction, two readers: the tool frame the subagent's own view draws
+	// and the card row the dispatcher sees must say the same words.
+	assertRowMatchesHead := func(t *testing.T, msg Message) {
+		t.Helper()
+		frames := r.Reduce(NewMessageMsg{Msg: msg}).Frames
+		var toolFrame Frame
+		var card Frame
+		for _, f := range frames {
+			switch f.Kind {
+			case FrameTool:
+				toolFrame = f
+			case FrameFanout:
+				card = f
+			}
+		}
+		if toolFrame.Kind != FrameTool || card.Kind != FrameFanout {
+			t.Fatalf("reduction drew no tool frame and card: %#v", frames)
+		}
+		head := ToolDisplayHeader(toolFrame, "")
+		if head == "" || !strings.Contains(card.Content, head) {
+			t.Fatalf("card row does not say the card head %q:\n%s", head, card.Content)
+		}
+	}
+
+	started := subagentStepMessage("proc-start", tool.StepEvent{
+		Kind: tool.StepKindToolStarted, ToolName: "process",
+		Input: map[string]any{"action": "start", "command": command},
+	})
+	started.AgentID = "agent-label"
+	assertRowMatchesHead(t, started)
+	task := r.findFanoutByStepID("fanout-label").Tasks[0]
+	if len(task.RecentTools) != 1 || task.RecentTools[0].Label != "Starting background process "+command {
+		t.Fatalf("running process row = %+v, want the card head naming the command", task.RecentTools)
+	}
+	if strings.Contains(task.RecentTools[0].Label, "{") {
+		t.Fatalf("process row carries raw JSON: %q", task.RecentTools[0].Label)
+	}
+
+	completed := subagentStepMessage("proc-start", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "process",
+		Input:    map[string]any{"action": "start", "command": command},
+		Output:   map[string]any{"output": `{"id":1,"command":"` + command + `","pid":42,"running":true}`},
+		Duration: 2 * time.Second,
+	})
+	completed.AgentID = "agent-label"
+	assertRowMatchesHead(t, completed)
+
+	// A wait's facts ride every event of the call (plan 380): the row names the
+	// command the wait drives, exactly as its card head does.
+	waited := subagentStepMessage("proc-wait", tool.StepEvent{
+		Kind: tool.StepKindToolCompleted, ToolName: "process",
+		Input:    map[string]any{"action": "wait", "id": 1, "command": command},
+		Output:   map[string]any{"output": `{"id":1,"command":"` + command + `","ready":true,"elapsed_ms":12}`},
+		Duration: 12 * time.Millisecond,
+	})
+	waited.AgentID = "agent-label"
+	assertRowMatchesHead(t, waited)
+	task = r.findFanoutByStepID("fanout-label").Tasks[0]
+	if len(task.RecentTools) != 1 || !strings.HasPrefix(task.RecentTools[0].Label, "Waited for "+command) {
+		t.Fatalf("waited process row = %+v, want the card head naming the command", task.RecentTools)
 	}
 }
 
@@ -2049,12 +2128,12 @@ func TestStoppedSubagentClosesItsViewQuietly(t *testing.T) {
 		title  string
 		want   string
 	}{
-		{name: "cancelled without a reason", status: "cancelled", title: "Cancelled"},
-		// The engine names the status word in the run's error field, so a
-		// cancelled subagent always arrives with one. It is the same word the
-		// line's own title already says: the line is drawn once.
-		{name: "cancelled with the status word as its reason", status: "cancelled", err: "cancelled", title: "Cancelled"},
-		{name: "interrupted with its reason", status: "interrupted", err: reason, title: "Interrupted", want: reason},
+		{name: "cancelled without a reason", status: "cancelled", title: subagentStoppedLine},
+		// The engine names its own status word in the run's error field, so a
+		// cancelled subagent always arrives with one. It is a state name, not a
+		// reason: the line is drawn once, without it.
+		{name: "cancelled with the status word as its reason", status: "cancelled", err: "cancelled", title: subagentStoppedLine},
+		{name: "interrupted with its reason", status: "interrupted", err: reason, title: subagentInterruptedLine, want: reason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var r Reducer
@@ -2837,7 +2916,7 @@ func TestReducerHoldsNoCardForTheExitGateWait(t *testing.T) {
 
 // A call a stop settled as canceled whose card would name no subject and carry
 // no output is not drawn at all: the surface already says the run stopped (the
-// conversation's "You stopped this run", a subagent's "Cancelled"), so such a
+// conversation's "You stopped this run", a subagent's "Run stopped"), so such a
 // card repeats it (owner 2026-11-23). A card that names its call or carries
 // real output stays. The call still ends the response that issued it, exactly
 // as a held gate does.

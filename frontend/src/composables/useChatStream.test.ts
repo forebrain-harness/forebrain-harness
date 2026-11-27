@@ -2,6 +2,7 @@ import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest'
 import { effectScope } from 'vue'
 
 import { setLocale, t } from '@/locales'
+import { headerLine } from '@/locales/toolHeader'
 import { toCamelCase } from '@/lib/case'
 import { artifactsOfPresentFiles, planArtifactOf } from '@/lib/artifacts'
 import { forebrainApi, GatewayHttpError } from '@/lib/api'
@@ -5421,6 +5422,91 @@ describe('subagent_* call cards', () => {
     // extra block for the dispatch, and nothing else of it exists.
     expect((primaryOf()?.blocks ?? []).filter((b) => b.kind === 'subagent')).toHaveLength(0)
     await finish()
+  })
+
+  // The fanout row names a subagent's call with the very words its own card
+  // head draws (the terminal's fanoutToolLabel rule, owner 2026-11-27). The row
+  // used to read the invocation label, which for a process call is the raw
+  // argument JSON — "process {…}" beside a head saying "Started background
+  // process <cmd>".
+  it('names the fanout row with the tool card head, never the raw argument JSON', async () => {
+    const { stream, runEvent, finish } = liveStream()
+    const command = 'cd /repo/.worktrees/plan-review-420422479 && go test ./pkg/tool'
+    const invocation = `process {"action":"start","command":"${command}"}`
+    runEvent('tool_call_started', {
+      step_id: 'call-run-1',
+      tool_name: 'subagent_run',
+      tool_meta: {
+        tool_name: 'subagent_run', status: 'running',
+        subagent_call: { verb: 'run', tasks: [{ index: 0, title: 'Plan review', agent_type: 'general-purpose', status: 'waiting' }] },
+      },
+    })
+    runEvent('subagent_spawned', {
+      agent_id: 'subagent-label', agent_type: 'general-purpose', task_id: 'subagent-label',
+      title: 'Plan review', task: 'review the plan', execution_id: 'exec-1',
+      parent_run_id: 'run-1', parent_tool_call_id: 'call-run-1', task_index: 0,
+    }, '2026-10-07T08:00:02.000Z')
+    const task = () => stream.subagentCallTasks.get('call-run-1')?.get(0)
+
+    runEvent('tool_call_started', {
+      step_id: 'proc-1', tool_name: 'process',
+      header: `Starting background process ${command}`,
+      header_parts: { action: 'Starting background process', target: command },
+      input: { action: 'start', command },
+      tool_meta: { tool_name: 'process', status: 'running', agent_id: 'subagent-label', invocation },
+    }, '2026-10-07T08:00:03.000Z')
+    expect(task()?.latestTool).toBe(`Starting background process ${command}`)
+    expect(task()?.latestTool).not.toContain('{')
+    expect(task()?.toolCount).toBe(1)
+
+    // The completion refines the same row to the settled head, duration and
+    // all — the words the call's own card draws from the same parts.
+    const completedPayload = {
+      step_id: 'proc-1', tool_name: 'process', duration_seconds: 6,
+      header: `Started background process ${command} 6.0s`,
+      header_parts: { action: 'Started background process', target: command, duration: '6.0s' },
+      tool_meta: { tool_name: 'process', status: 'completed', agent_id: 'subagent-label', invocation },
+    }
+    runEvent('tool_call_completed', completedPayload, '2026-10-07T08:00:09.000Z')
+    expect(task()?.latestTool).toBe(`Started background process ${command} 6.0s`)
+    expect(task()?.toolCount).toBe(1)
+    // The invariant itself: the row is the head of the card the same payload
+    // builds, word for word — one wording source, never two.
+    const cardStep = toolStepFromPayload(toCamelCase(completedPayload) as Record<string, unknown>, true, 'proc-1')
+    expect(task()?.latestTool).toBe(headerLine(cardStep.headerParts!, 'en'))
+    await finish()
+  })
+
+  // The row speaks the reader's language exactly as the head does: the action
+  // is worded, the command never translated.
+  it('words the fanout row in the reader’s language, as the card head does', async () => {
+    setLocale('zh')
+    try {
+      const { stream, runEvent, finish } = liveStream()
+      const command = 'sleep 6; echo review-ok'
+      runEvent('tool_call_started', {
+        step_id: 'call-run-1', tool_name: 'subagent_run',
+        tool_meta: {
+          tool_name: 'subagent_run', status: 'running',
+          subagent_call: { verb: 'run', tasks: [{ index: 0, title: 'Plan review', agent_type: 'general-purpose', status: 'waiting' }] },
+        },
+      })
+      runEvent('subagent_spawned', {
+        agent_id: 'subagent-zh', agent_type: 'general-purpose', task_id: 'subagent-zh',
+        title: 'Plan review', task: 'review the plan', execution_id: 'exec-1',
+        parent_run_id: 'run-1', parent_tool_call_id: 'call-run-1', task_index: 0,
+      }, '2026-10-07T08:00:02.000Z')
+      runEvent('tool_call_started', {
+        step_id: 'proc-1', tool_name: 'process',
+        header_parts: { action: 'Starting background process', target: command },
+        input: { action: 'start', command },
+        tool_meta: { tool_name: 'process', status: 'running', agent_id: 'subagent-zh', invocation: `process {"action":"start","command":"${command}"}` },
+      }, '2026-10-07T08:00:03.000Z')
+      expect(stream.subagentCallTasks.get('call-run-1')?.get(0)?.latestTool).toBe(`正在后台启动 ${command}`)
+      await finish()
+    } finally {
+      setLocale('en')
+    }
   })
 
   it('draws each query card as the snapshot its call took', () => {

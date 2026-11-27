@@ -4,4 +4,4 @@
  * (@repo/elements/tool/headerWords); this module is the app-side face of the
  * same table, so the app's own tests and callers import it from the locales.
  */
-export { HEADER_ACTION_ZH, headerActionWord, headerSuffixWords } from '@repo/elements/tool/headerWords'
+export { HEADER_ACTION_ZH, headerActionWord, headerSuffixWords, headerLine } from '@repo/elements/tool/headerWords'

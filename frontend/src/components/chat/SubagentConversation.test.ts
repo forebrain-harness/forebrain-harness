@@ -78,11 +78,11 @@ describe('SubagentConversation', () => {
       },
     })
     const line = stopped.get('[data-testid="run-stopped-line"]')
-    expect(line.text()).toBe('Cancelled')
+    expect(line.text()).toBe('Run stopped')
     // The red account is not drawn a second time, nowhere at all.
     expect(stopped.find('[data-testid="run-error"]').exists()).toBe(false)
     expect(stopped.find('[data-slot="alert-title"]').exists()).toBe(false)
-    expect(stopped.text().match(/Cancelled/g)).toHaveLength(1)
+    expect(stopped.text().match(/Run stopped/g)).toHaveLength(1)
 
     const failed = mount(SubagentConversation, {
       props: {
@@ -101,8 +101,8 @@ describe('SubagentConversation', () => {
   })
 
   // An execution whose approval wait could not be resumed says so in its own
-  // words, in the same quiet line: the engine's payload word and reason, never
-  // the stop's "Cancelled" borrowed for a different ending.
+  // words, in the same quiet line: its own ending and the engine's reason,
+  // never the stop's sentence borrowed for a different ending.
   it('says an interrupted run in its own word, with the reason it carries', () => {
     const reason = 'approval continuation was interrupted after execution began; tool outcome is uncertain and was not retried'
     const wrapper = mount(SubagentConversation, {
@@ -118,8 +118,8 @@ describe('SubagentConversation', () => {
       },
     })
     const line = wrapper.get('[data-testid="run-stopped-line"]')
-    expect(line.text()).toContain('Interrupted')
-    expect(line.text()).not.toContain('Cancelled')
+    expect(line.text()).toContain('Run interrupted')
+    expect(line.text()).not.toContain('Run stopped')
     expect(line.text()).toContain(reason)
     expect(line.get(`[title="${reason}"]`).text()).toBe(reason)
     // Still a stop: no red account anywhere.

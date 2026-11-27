@@ -21,17 +21,21 @@
  * closes the run, because both mark where a run ended.
  *
  * The engine names which ending it was and, when an approval wait could not be
- * resumed, why. Both are the payload's, said here once: a pressed stop is
- * "Cancelled", an aborted wait is "Interrupted" with its sentence beside it.
+ * resumed, why. A stop reaches a subagent from the roster, from stop-all, from
+ * a close call, or from the turn above it ending, and the payload does not say
+ * which — so the line states the ending without naming who pressed anything.
+ * The terminal prints these same two sentences (subagentStoppedLine,
+ * subagentInterruptedLine); the drawer's tabs and menu keep the one-word status
+ * labels, which are a badge's vocabulary rather than a sentence's.
  */
 import { Ban } from 'lucide-vue-next'
 import { computed } from 'vue'
-import { subagentStatusLabel } from '@/lib/subagentStatus'
+import { useI18n } from '@/locales'
 
 const props = withDefaults(defineProps<{ status?: 'cancelled' | 'interrupted'; reason?: string }>(), {
   status: 'cancelled',
   reason: '',
 })
-// The drawer's own vocabulary, so the word a stop is called is chosen once.
-const label = computed(() => subagentStatusLabel(props.status))
+const { t } = useI18n()
+const label = computed(() => (props.status === 'interrupted' ? t('chat.subagentInterruptedLine') : t('chat.subagentStoppedLine')))
 </script>
