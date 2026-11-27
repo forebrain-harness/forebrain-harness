@@ -6,3 +6,8 @@ tsconfig.json
 **/*.map
 dist-test/**
 out/**
+webview/src/**
+webview/node_modules/**
+webview/index.html
+webview/*.config.*
+webview/tsconfig.json

@@ -2,7 +2,7 @@ import axios, { type AxiosError, type AxiosResponse, type InternalAxiosRequestCo
 
 import { toCamelCase, toSnakeCase } from './case'
 import { reportGatewayUnauthorized } from './gatewaySession'
-import type { ForebrainTokenBudget } from './forebrainGatewayRuntime'
+import { buildBrowserForebrainGatewayChatWsUrl, type ForebrainTokenBudget } from './forebrainGatewayRuntime'
 import type { LogBlobText, LogExchange, LogPage, LogQuery } from './logs'
 import type { LspRecommendationChoice } from './lspRecommendation'
 
@@ -2565,6 +2565,45 @@ const api = axios.create({
 export const __apiClient = api
 
 /**
+ * The transport seam an embedded surface (the VS Code native webview) swaps at
+ * startup. The browser implementations stay the default, and installing one
+ * redirects every request and chat socket without touching a call site: the
+ * axios pipeline above (read merge, camel-casing, 401 reporting) and the fetch
+ * helpers keep running on top of whatever is installed. Only who carries the
+ * bytes changes — the reducing, parsing and error shapes are shared.
+ */
+type ForebrainHttpAdapter = (config: InternalAxiosRequestConfig) => Promise<AxiosResponse>
+
+const browserHttpAdapter: ForebrainHttpAdapter = axios.getAdapter(axios.defaults.adapter)
+
+/** Installs the adapter every axios request rides on; `null` restores the browser's own. */
+export function setForebrainHttpAdapter(adapter: ForebrainHttpAdapter | null): void {
+  axios.defaults.adapter = adapter ?? browserHttpAdapter
+}
+
+const browserFetch: typeof fetch = (...args) => fetch(...args)
+let transportFetch = browserFetch
+
+/** Installs the fetch the gateway HTTP helpers ride on; `null` restores the browser's own. */
+export function setForebrainFetchTransport(fetchImpl: typeof fetch | null): void {
+  transportFetch = fetchImpl ?? browserFetch
+}
+
+let chatSocketOpener: ((url: string) => WebSocket) | null = null
+
+/** Installs the chat WebSocket opener; `null` restores the browser's own dial. */
+export function setForebrainChatSocketTransport(opener: ((url: string) => WebSocket) | null): void {
+  chatSocketOpener = opener
+}
+
+/** One chat WebSocket: a browser tab dials the same-origin gateway itself, an
+ * embedded surface gets whatever its transport opened. */
+export function openForebrainChatSocket(): WebSocket {
+  const url = buildBrowserForebrainGatewayChatWsUrl()
+  return chatSocketOpener ? chatSocketOpener(url) : new WebSocket(url)
+}
+
+/**
  * Reads that are in flight, keyed by the exact request they make. Two pages
  * (or two mounts of one page) asking the same question at the same moment
  * share one answer instead of racing two identical GETs at the gateway.
@@ -2631,7 +2670,7 @@ api.interceptors.response.use(
  * router. Used where axios does not fit (streams, uploads).
  */
 async function gatewayFetch(input: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(input, init)
+  const res = await transportFetch(input, init)
   if (res.status === 401) reportGatewayUnauthorized()
   return res
 }

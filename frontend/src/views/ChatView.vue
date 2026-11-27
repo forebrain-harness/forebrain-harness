@@ -952,7 +952,7 @@ import { sessionTitleFromContent } from '@/lib/sessionTitle'
 import { sessionModelOptionInForce } from '@/lib/sessionModel'
 import { useI18n } from '@/locales'
 import type { I18nKey } from '@/locales'
-import { captureHostParam, isVscodeHost, openFileLineKey, postFileRangeToHost } from '@/lib/fileLineLinks'
+import { captureHostParam, isNativeWebviewHost, isVscodeHost, openFileLineKey, sendFileRangeToHost } from '@/lib/fileLineLinks'
 import FileDoc from '@/components/chat/FileDoc.vue'
 // The panel's iframe URL names the host once; write it down before any
 // navigation drops the query, so every later page still knows it is embedded.
@@ -2444,12 +2444,13 @@ function openDocTab(tab: DocTab) {
   scheduleBrowsePersist()
 }
 
-// The prose file:line links of this conversation's whole subtree: inside the
-// VS Code panel the range goes to the host, which opens the editor; in a
-// browser it opens as a read-only tab of this drawer, at the lines named.
+// The prose file:line links of this conversation's whole subtree: in a VS Code
+// host — the old panel's iframe or the native webview's transport — the range
+// goes to the host, which opens the editor; in a browser it opens as a
+// read-only tab of this drawer, at the lines named.
 provide(openFileLineKey, (ref) => {
-  if (isVscodeHost()) {
-    postFileRangeToHost(ref)
+  if (isVscodeHost() || isNativeWebviewHost()) {
+    sendFileRangeToHost(ref)
     return
   }
   openDocTab(docTabFor('file', '', {

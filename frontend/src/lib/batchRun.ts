@@ -1,6 +1,6 @@
-import { forebrainApi } from '@/lib/api'
+import { forebrainApi, openForebrainChatSocket } from '@/lib/api'
 import { refusalCodeOf } from '@/lib/tasks'
-import { FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION, buildBrowserForebrainGatewayChatWsUrl } from '@/lib/forebrainGatewayRuntime'
+import { FOREBRAIN_GATEWAY_WS_PROTOCOL_VERSION } from '@/lib/forebrainGatewayRuntime'
 
 /**
  * Driving a batch execution from the task pages (plan 153).
@@ -46,7 +46,7 @@ export function startBatchRun(sessionId: string, options: BatchRunStart = {}): P
   const timeoutMs = options.timeoutMs ?? 20000
   return new Promise<string>((resolve, reject) => {
     let settled = false
-    const socket = new WebSocket(buildBrowserForebrainGatewayChatWsUrl())
+    const socket = openForebrainChatSocket()
     const finish = (fn: () => void) => {
       if (settled) return
       settled = true

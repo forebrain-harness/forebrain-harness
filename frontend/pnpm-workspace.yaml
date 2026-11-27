@@ -2,6 +2,7 @@ packages:
   - .
   - ../ai-elements-vue/packages/elements
   - ../ai-elements-vue/packages/shadcn-vue
+  - ../editors/vscode/webview
 
 allowedDeprecatedVersions:
   '@oxc-parser/wasm': 0.60.0

@@ -125,6 +125,96 @@
   --path-ink: #1C1C1F;
 }
 
+/* Dark tokens — webview only (plan 391). The values are the frozen prototype's
+   (`#vsc.dark` and its BRANDS[*].dark), copied hex for hex; the host pushes
+   activeColorTheme.kind over RPC and the webview toggles this class, so the
+   web SPA never sets it and stays always-white. Where the prototype names a
+   family main.css spells differently, the mapping follows the flat tokens
+   above (bg→surface, line→divider, ink→text, soft→hover-bg). The prototype
+   defines a strong border only for navy dark — teal and graphite reuse their
+   dark border there until the prototype names values. */
+html.dark {
+  color-scheme: dark;
+  --forebrain-bg: #13151A;
+  --forebrain-page-bg: #13151A;
+  --forebrain-surface: #13151A;
+  --forebrain-input-bg: #13151A;
+  --forebrain-bg-alt: #181B21;
+  --forebrain-input-hover-bg: #1D222A;
+  --forebrain-button-alt-bg: #1D222A;
+  --forebrain-button-alt-hover-bg: #232A33;
+  --forebrain-divider: #282E37;
+  --forebrain-divider-strong: #3A424D;
+  --forebrain-rule-line: #3A424D;
+  --forebrain-text: #E8EBF0;
+  --forebrain-text-2: #B4BCC7;
+  --forebrain-muted-text: #8B95A3;
+  --forebrain-on-brand: #FFFFFF;
+  --forebrain-danger: #FF8C82;
+  --forebrain-warning: #F0B44E;
+  --forebrain-warning-soft: #241C0F;
+  --forebrain-success: #4BD59B;
+  --forebrain-success-soft: #10241B;
+  --forebrain-code-bg: #0E1116;
+  --forebrain-code-surface: #1A1E25;
+  --forebrain-code-text: #E6E9ED;
+  --forebrain-brand-scrollbar: #3A424D;
+  --forebrain-brand-scrollbar-thumb: #3A424D;
+  --forebrain-shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.4);
+  /* shadcn bridge, dark counterparts of the values above. */
+  --page: 223 16% 9%;
+  --surface: 223 16% 9%;
+  --ink: 218 21% 93%;
+  --ink-2: 215 15% 74%;
+  --ink-3: 215 12% 59%;
+  --subtle: 217 18% 14%;
+  --line: 216 16% 19%;
+  --danger: 5 100% 75%;
+}
+
+/* Dark brand families: the prototype's BRANDS[*].dark, one per scheme. The
+   bare `html.dark` selector carries navy so a page with no scheme attribute
+   still lands on the default scheme's family. */
+html.dark,
+html.dark[data-brand="navy"] {
+  --brand: 220 72% 71%;
+  --forebrain-brand-1: #7EA2EA;
+  --forebrain-brand-hover: #9BB8F0;
+  --forebrain-brand-soft: #1B2A46;
+  --forebrain-brand-border: #2C4573;
+  --forebrain-brand-border-strong: #4C6DA8;
+  --forebrain-focus-border: #7EA2EA;
+  --forebrain-ring-soft: #2C4573;
+  --path-bg: #1B2A46;
+  --path-ink: #7EA2EA;
+}
+
+html.dark[data-brand="teal"] {
+  --brand: 188 48% 54%;
+  --forebrain-brand-1: #4FB3C2;
+  --forebrain-brand-hover: #6FC5D2;
+  --forebrain-brand-soft: #0E2A2F;
+  --forebrain-brand-border: #1D4A52;
+  --forebrain-brand-border-strong: #1D4A52;
+  --forebrain-focus-border: #4FB3C2;
+  --forebrain-ring-soft: #1D4A52;
+  --path-bg: #0E2A2F;
+  --path-ink: #4FB3C2;
+}
+
+html.dark[data-brand="graphite"] {
+  --brand: 230 6% 80%;
+  --forebrain-brand-1: #C8C9CE;
+  --forebrain-brand-hover: #E0E1E5;
+  --forebrain-brand-soft: #26262A;
+  --forebrain-brand-border: #3E3E44;
+  --forebrain-brand-border-strong: #3E3E44;
+  --forebrain-focus-border: #C8C9CE;
+  --forebrain-ring-soft: #3E3E44;
+  --path-bg: #26262A;
+  --path-ink: #C8C9CE;
+}
+
 /* Rail themes, scoped to the shell root — not the rail element itself —
    because plan 005 renders rail-owned overlays (the tenant dropdown, collapse
    tooltips) outside the rail's overflow-hidden subtree. Content-area

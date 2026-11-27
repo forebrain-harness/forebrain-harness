@@ -1,13 +1,16 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defineComponent, h, provide } from 'vue'
 import { mount } from '@vue/test-utils'
 import { MessageResponse } from '@repo/elements/message'
 import {
   captureHostParam,
   fileLineRefOf,
+  isNativeWebviewHost,
   isVscodeHost,
   openFileLineKey,
   postFileRangeToHost,
+  sendFileRangeToHost,
+  setNativeFileRangeSender,
   splitFileLineLinks,
   type FileLineRef,
 } from './fileLineLinks'
@@ -243,6 +246,37 @@ describe('the VS Code host flag', () => {
       { type: 'openFileRange', path: 'pkg/a.go', startLine: 3, endLine: 7 },
       '*',
     )
+    post.mockRestore()
+  })
+})
+
+describe('the native webview range transport', () => {
+  afterEach(() => setNativeFileRangeSender(null))
+
+  it('is absent in a browser or the old panel iframe, so ranges post to the parent', () => {
+    expect(isNativeWebviewHost()).toBe(false)
+    const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {})
+    sendFileRangeToHost({ path: 'a.go', from: 1, to: 2 })
+    expect(post).toHaveBeenCalledWith({ type: 'openFileRange', path: 'a.go', startLine: 1, endLine: 2 }, '*')
+    post.mockRestore()
+  })
+
+  it('rides the registered transport once the webview app installs it', () => {
+    const send = vi.fn()
+    setNativeFileRangeSender(send)
+    expect(isNativeWebviewHost()).toBe(true)
+    sendFileRangeToHost({ path: 'b.ts', from: 4, to: 9 })
+    expect(send).toHaveBeenCalledWith({ path: 'b.ts', from: 4, to: 9 })
+  })
+
+  it('falls back to the panel iframe once the transport is removed', () => {
+    const send = vi.fn()
+    setNativeFileRangeSender(send)
+    setNativeFileRangeSender(null)
+    const post = vi.spyOn(window.parent, 'postMessage').mockImplementation(() => {})
+    sendFileRangeToHost({ path: 'c.md', from: 2, to: 2 })
+    expect(send).not.toHaveBeenCalled()
+    expect(post).toHaveBeenCalled()
     post.mockRestore()
   })
 })

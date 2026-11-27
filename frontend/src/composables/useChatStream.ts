@@ -2150,7 +2150,7 @@ export function emptyContextRuntimeSignals(): ContextRuntimeSignals {
   return { compactVersion: 0, budgetVersion: 0, activeRunId: undefined }
 }
 
-import { getErrorMessage, forebrainApi, GatewayHttpError, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug, type PeerAgentRow, type PeerFileRow, type PeerHeldRow } from '@/lib/api'
+import { getErrorMessage, forebrainApi, GatewayHttpError, openForebrainChatSocket, type ChatAttachmentRecord, type ChatMessageRecord, type ModelCatalogListing, type RunInputResponse, type SessionContextDebug, type PeerAgentRow, type PeerFileRow, type PeerHeldRow } from '@/lib/api'
 
 /**
  * The drawer's own view of the machine (plan 200 §3): the files being edited
@@ -2174,7 +2174,6 @@ import { LSP_RECOMMENDATION_EVENT_TYPE, parseLspRecommendation, type LspRecommen
 import { noteSessionBound, recordBatchExecution } from '@/lib/batchExecution'
 import { liveStateFor, setLiveState } from '@/lib/liveConnection'
 import {
-  buildBrowserForebrainGatewayChatWsUrl,
   isSupportedForebrainRunEventSchema,
   isTerminalRunEventType,
   parseForebrainGatewayServerHello,
@@ -4132,7 +4131,7 @@ export function useChatStream() {
     stopObserverReconnect()
     closeSessionObserver()
     observerSessionId = target
-    const ws = new WebSocket(buildBrowserForebrainGatewayChatWsUrl())
+    const ws = openForebrainChatSocket()
     sessionObserver = ws
     observerReady = new Promise<void>((resolve) => {
       let settled = false
@@ -6283,9 +6282,8 @@ export function useChatStream() {
     const sid = String(options?.sessionId ?? sessionId.value ?? '').trim()
     if (!sid || typeof WebSocket === 'undefined') return
     const requestId = `mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    const wsUrl = buildBrowserForebrainGatewayChatWsUrl()
     await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl)
+      const ws = openForebrainChatSocket()
       let settled = false
       const finish = (err?: Error) => {
         if (settled) return
@@ -6398,7 +6396,6 @@ export function useChatStream() {
       const currentSessionId = options?.sessionId ?? sessionId.value ?? undefined
       const attachmentIds = (options?.attached?.attachments ?? []).map((attachment) => attachment.fileId)
       const mentionImagePaths = options?.attached?.mentionImages ?? []
-      const wsUrl = buildBrowserForebrainGatewayChatWsUrl()
       const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
       const handleOp = (op: string, payload: Record<string, unknown>) => {
         if (!op) return
@@ -6609,7 +6606,7 @@ export function useChatStream() {
         }
       }
       const connectOnce = (resume: boolean, attempt = 0) => new Promise<void>((resolve, reject) => {
-        const ws = new WebSocket(wsUrl)
+        const ws = openForebrainChatSocket()
         activeSocket = ws
         let terminal = false
         let opened = false

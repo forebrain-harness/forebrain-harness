@@ -35,7 +35,8 @@
       { "command": "forebrain.reconnect", "title": "%command.reconnect%" },
       { "command": "forebrain.askAboutSelection", "title": "%command.askAboutSelection%", "icon": "$(comment-discussion)" },
       { "command": "forebrain.askAboutFile", "title": "%command.askAboutFile%", "icon": "$(comment-discussion)" },
-      { "command": "forebrain.openDeliveredFile", "title": "%command.openDeliveredFile%" }
+      { "command": "forebrain.openDeliveredFile", "title": "%command.openDeliveredFile%" },
+      { "command": "forebrain.devOpenWebview", "title": "Forebrain: Open Webview (dev)" }
     ],
     "keybindings": [
       { "command": "forebrain.askAboutSelection", "key": "ctrl+alt+k", "mac": "ctrl+cmd+k", "when": "editorHasSelection" }

@@ -1,0 +1,17 @@
+{
+  "extends": "../../../frontend/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../../../frontend/src/*"],
+      "@repo/elements": ["../../../ai-elements-vue/packages/elements/src"],
+      "@repo/elements/*": ["../../../ai-elements-vue/packages/elements/src/*"],
+      "@repo/shadcn-vue": ["../../../ai-elements-vue/packages/shadcn-vue"],
+      "@repo/shadcn-vue/*": ["../../../ai-elements-vue/packages/shadcn-vue/*"]
+    },
+    "types": ["vite/client", "node"],
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.vue"],
+  "exclude": ["dist", "node_modules"]
+}

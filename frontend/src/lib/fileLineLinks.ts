@@ -45,3 +45,28 @@ export function postFileRangeToHost(ref: FileLineRef): void {
     '*',
   )
 }
+
+/**
+ * The native webview's range transport, registered by the webview app at
+ * startup: a native webview is no iframe (window.parent is the window itself
+ * and no ?host=vscode ever arrives), so its links ride the embedder's RPC to
+ * the host instead of this frame's parent. The browser and the old panel
+ * iframe paths stay exactly as they were.
+ */
+let nativeFileRangeSender: ((ref: FileLineRef) => void) | null = null
+
+/** Registers the native webview's range transport; `null` removes it again. */
+export function setNativeFileRangeSender(send: ((ref: FileLineRef) => void) | null): void {
+  nativeFileRangeSender = send
+}
+
+/** Whether this page's file ranges ride the native webview transport. */
+export function isNativeWebviewHost(): boolean {
+  return nativeFileRangeSender !== null
+}
+
+/** Hands a file range to the host over whichever transport this page has. */
+export function sendFileRangeToHost(ref: FileLineRef): void {
+  if (nativeFileRangeSender) nativeFileRangeSender(ref)
+  else postFileRangeToHost(ref)
+}
