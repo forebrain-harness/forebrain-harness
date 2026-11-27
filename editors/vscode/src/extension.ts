@@ -215,6 +215,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // comes back after a rebuild lands on the conversation it had, so the
       // re-bind and the history reload replay the snapshot.
       if ((m as { type?: unknown })?.type === 'ready') {
+        // The app is listening now: push the theme again (the resolve-time push
+        // races the bundle load) and hand it the conversation it had.
+        pushThemeTo(view.webview);
         const frame = readyFrameFor(entry, pendingSession, observed);
         if (frame) {
           if (entry === 'index') pendingSession.chat = undefined;

@@ -214,6 +214,17 @@ describe('the file range and the theme', () => {
     deliver({ type: 'theme', dark: false })
     expect(document.documentElement.classList.contains('dark')).toBe(false)
   })
+
+  it('the install wires the inbound window channel, not just the test handle', () => {
+    // The host posts to the webview; the app receives it as a window message.
+    // Pumping onHostMessage by hand (the deliver handle) would pass even if the
+    // install never listened — so this drives the real channel the host uses.
+    document.documentElement.classList.remove('dark')
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'theme', dark: true } }))
+    expect(document.documentElement.classList.contains('dark')).toBe(true)
+    window.dispatchEvent(new MessageEvent('message', { data: { type: 'theme', dark: false } }))
+    expect(document.documentElement.classList.contains('dark')).toBe(false)
+  })
 })
 
 /** Every production source under src/, subdirectories included: the invariant

@@ -360,6 +360,11 @@ export function installWebviewTransport(): WebviewTransport {
   // surface they touch (send/close/readyState/handlers), which is the contract.
   setForebrainChatSocketTransport(() => transport.openSocket() as unknown as WebSocket)
   setNativeFileRangeSender((ref) => transport.openFileRange(ref))
+  // The inbound half of the channel: the host's RPC answers, socket frames,
+  // theme pushes and session picks arrive as window messages. Without this
+  // listener every request would hang and the theme would never apply — the
+  // tests pump onHostMessage by hand, so only a real mount proves it is wired.
+  window.addEventListener('message', (event: MessageEvent) => transport.onHostMessage(event.data))
   host.postMessage({ type: 'ready' })
   return transport
 }
