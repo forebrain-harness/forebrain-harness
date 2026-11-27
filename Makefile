@@ -60,11 +60,14 @@ export CGO_LDFLAGS := -L$(PDFIUM_DIR)/lib -lpdfium $(CGO_LDFLAGS)
 all: build
 
 ## ui: build the frontend straight into the embed package (vite outDir).
-## Installs deps only on a fresh checkout; otherwise builds with what's present.
+## The install runs on every build, as it does in CI and the Dockerfile: it is a
+## no-op once node_modules matches the lockfile, and the alternative leaves a
+## checkout whose node_modules predates a dependency commit failing the build
+## with an unresolved import instead of installing the new package.
 ui:
 	scripts/gen-subscription-plugins.sh
 	find $(WEBUI_DIST) -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
-	cd frontend && [ -d node_modules ] || CI=true corepack pnpm install --frozen-lockfile
+	cd frontend && CI=true corepack pnpm install --frozen-lockfile
 	cd frontend && corepack pnpm build
 
 ## libtokenizers: fetch the tokenizers static library the binary links

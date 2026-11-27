@@ -4892,15 +4892,21 @@ func sendableEffortLevels(provider, model, apiPath string, levels []string) []st
 	return append([]string(nil), levels...)
 }
 
-// usableModelRawLevels is the row's own level list before the protocol trim:
-// the live capability projection wins (a row added mid-turn is not in the
-// installed override registry), the catalog answers through ReasoningEffortsRow
-// otherwise. A non-nil empty CapEfforts means "explicitly no levels".
+// usableModelRawLevels is the row's level list before the protocol trim, merged
+// the way the picker's lookup merges it (llm.applyModelOverride, owner
+// 2026-11-16): the catalog's vendor levels are the single source when it
+// documents discrete levels and the provider is not login-backed; the row's own
+// CapEfforts only fill a gap the catalog leaves or override a login-backed
+// provider. The live capability projection is read directly so a row added
+// mid-turn — not yet in the installed override registry — still answers, but it
+// never shadows the catalog's documented levels (a stale ["high"] must not hide
+// the none/low/high/xhigh the model actually runs at).
 func usableModelRawLevels(m usableModel) []string {
-	if m.Caps != nil && m.Caps.Efforts != nil {
-		return m.Caps.Efforts
+	var override llm.ModelOverride
+	if m.Caps != nil {
+		override = *m.Caps
 	}
-	levels, _ := llm.ReasoningEffortsRow(m.Entry.ID, m.Entry.Provider, m.Entry.Model)
+	levels, _ := llm.ReasoningEffortsWithOverride(m.Entry.Provider, m.Entry.Model, override)
 	return levels
 }
 

@@ -9498,6 +9498,66 @@ func TestListUsableModelsRowsCarryLabelsAndEfforts(t *testing.T) {
 	}
 }
 
+// TestUsableModelsCatalogLevelsWinOverStaleRowEfforts pins the roster against the
+// picker's merge rule (llm.applyModelOverride, owner 2026-11-16): when the
+// catalog documents a model's discrete thinking levels and the provider is not
+// login-backed, those vendor levels are the single source — a row's own stale
+// CapEfforts must not shadow them. The real bug: a custom qwen4-max-preview row
+// whose catalog offers none/low/high/xhigh but whose CapEfforts was stored as
+// ["high"] listed only "high", so the model could neither see nor dispatch on the
+// xhigh it actually runs at. The roster and the dispatch check share
+// usableModelRawLevels, so both must agree with the catalog.
+func TestUsableModelsCatalogLevelsWinOverStaleRowEfforts(t *testing.T) {
+	llm.SetBuiltinModels("custom", []llm.Model{{
+		ID: "catalog-documented-preview", Name: "Catalog Documented Preview",
+		ReasoningKnown:   true,
+		ReasoningOptions: []llm.ReasoningOption{{Type: "effort", Values: []string{"none", "low", "high", "xhigh"}}},
+	}})
+	t.Cleanup(func() { llm.SetBuiltinModels("custom", nil) })
+
+	fix := newModelArgumentFixture(t, subagentsEnabledConfig())
+	row := fix.insertModelRow(t, state.LLMModel{
+		Provider: "custom", Model: "catalog-documented-preview",
+		BaseURL: "https://qwen.test/v1", APIPath: "/chat/completions", APIKey: "key-qwen",
+		SubagentAllowed: true,
+		CapEfforts:      []string{"high"},
+	})
+
+	want := []string{"none", "low", "high", "xhigh"}
+	usable, err := usableModelByID(dispatchTestCtx(), fix.fac, row.ID)
+	if err != nil {
+		t.Fatalf("usableModelByID: %v", err)
+	}
+	if got := usableModelEfforts(usable); !reflect.DeepEqual(got, want) {
+		t.Fatalf("roster efforts = %v, want the catalog's %v (a stale row override must not shadow it)", got, want)
+	}
+	if err := dispatchEffortRefused(usable.Entry, usable, "xhigh"); err != nil {
+		t.Fatalf("dispatch at xhigh refused, but the catalog offers it: %v", err)
+	}
+
+	// The serialized tool answer — the card a person reads — carries the same
+	// levels, not the row's stale ["high"].
+	text, err := listUsableModels(dispatchTestCtx(), fix.fac)
+	if err != nil {
+		t.Fatalf("listUsableModels: %v", err)
+	}
+	var payload struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		t.Fatalf("unmarshal %s: %v", text, err)
+	}
+	for _, m := range payload.Models {
+		if m["id"] == row.ID {
+			if !reflect.DeepEqual(m["efforts"], []any{"none", "low", "high", "xhigh"}) {
+				t.Fatalf("listed efforts = %v, want the catalog's levels", m["efforts"])
+			}
+			return
+		}
+	}
+	t.Fatalf("the seeded row is missing from the roster: %s", text)
+}
+
 // A model row's capabilities must survive both places the pin is rebuilt: the
 // dispatch-to-execution context and a continuation rereading that same row.
 // Dropping Caps there sends the child's requests back to the catalog (or a

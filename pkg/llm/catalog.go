@@ -1001,6 +1001,20 @@ func ReasoningEffortsRow(rowID, provider, apiModel string) (levels []string, kno
 	return hit.ReasoningEfforts()
 }
 
+// ReasoningEffortsWithOverride is ReasoningEffortsRow for a caller that holds the
+// row's live capability override rather than reading the installed registry — a
+// row added mid-turn is not yet installed (owner 2026-11-10). It lays that
+// override over the catalog entry for the pair (or the override's CatalogKey)
+// exactly as LookupRow lays the registry's, so the merge rule is the same one the
+// picker reads: the catalog's vendor levels are the single source when it
+// documents discrete levels and the provider is not login-backed, and the row's
+// own levels only fill a gap the catalog leaves or override a login-backed
+// provider (owner 2026-11-16).
+func ReasoningEffortsWithOverride(provider, apiModel string, override ModelOverride) (levels []string, known bool) {
+	hit, _ := LookupCatalogFor(provider, apiModel, override.CatalogKey)
+	return applyModelOverride(provider, hit, override).ReasoningEfforts()
+}
+
 // LoginBackedProvider reports whether provider's catalog belongs to an account
 // rather than to models.json: ChatGPT's models come from the subscription
 // backend, and the two OpenCode surfaces' from the Console / Go catalog after
