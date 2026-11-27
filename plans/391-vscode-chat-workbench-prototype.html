@@ -26,6 +26,7 @@
   /* VS Code chrome (scenery, not the design surface) */
   --ch-tb:#DDDDDD; --ch-tb-ink:#333333; --ch-ab:#2C2C32; --ch-ab-ink:#C8C8C8; --ch-ab-ink-2:#868A90;
   --ch-side:#F8F8F8; --ch-ed:#FFFFFF; --ch-ed-ink:#3B3B3B; --ch-ed-line:#E7E7E7; --ch-status:#F8F8F8; --ch-status-ink:#616161;
+  --ch-ed-sel:#ADD6FF;
 }
 #vsc.dark{
   --bg:#13151A; --alt:#181B21; --soft:#1D222A; --soft-2:#232A33;
@@ -39,6 +40,7 @@
   --shadow:0 1px 2px rgba(0,0,0,.4);
   --ch-tb:#3C3C3C; --ch-tb-ink:#CCCCCC; --ch-ab:#333333; --ch-ab-ink:#D7D7D7; --ch-ab-ink-2:#8A8A8A;
   --ch-side:#252526; --ch-ed:#1E1E1E; --ch-ed-ink:#D4D4D4; --ch-ed-line:#2B2B2B; --ch-status:#007ACC; --ch-status-ink:#FFFFFF;
+  --ch-ed-sel:#264F78;
 }
 *{box-sizing:border-box}
 /* A scrolling column must not squeeze its cards: every child keeps its own
@@ -96,8 +98,13 @@ code,pre,.mono{font-family:var(--mono)}
 .ed-tab.on{background:var(--ch-ed);opacity:1}
 .ed-tab .dot{width:7px;height:7px;border-radius:50%;background:#3A67C6}
 .ed-code{padding:10px 0 0;font-family:var(--mono);font-size:11.5px;line-height:1.85;overflow:hidden;flex:1;opacity:.85}
-.ed-code .ln{display:flex;padding:0 14px;transition:background-color 1.1s ease}
-.ed-code .ln.hl{background:var(--brand-soft);transition:none}
+.ed-code .ln{display:flex;padding:0 14px}
+/* 链接落地＝VS Code 原生选区：选中的是正文字符区间，行号槽不选；
+   选区常驻，不淡出（淡出是 web 只读抽屉的语义，本稿没有那个面）。 */
+.ed-code .ln.sel code{background:var(--ch-ed-sel)}
+/* 点正文＝光标落在那一处、选区收起（VS Code 的鼠标语义）。光标闪，减动效时不闪。 */
+.ed-code .caret{display:inline-block;width:1px;margin-right:-1px;height:1.15em;vertical-align:-.25em;background:var(--ch-ed-ink);animation:caretBlink 1.06s steps(1) infinite}
+@keyframes caretBlink{0%,49%{opacity:1}50%,100%{opacity:0}}
 .ed-code .ln span{width:30px;flex:none;text-align:right;padding-right:14px;opacity:.45}
 .ed-code .ln code{white-space:pre;color:inherit}
 .ed-code .k{color:#A626A4}
@@ -295,7 +302,7 @@ body.dark .ed-code .s{color:#CE9178}
 .status-line{display:flex;align-items:center;gap:7px;padding:2px 2px 6px;font-size:11.5px;color:var(--ink-2)}
 .spin{width:11px;height:11px;border:1.5px solid var(--brand-line);border-top-color:var(--brand);border-radius:50%;animation:sp 900ms linear infinite;flex:none}
 @keyframes sp{to{transform:rotate(360deg)}}
-@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}.ed-code .caret{animation:none}}
 .status-line>.muted{margin-left:auto;flex:none}
 .worked{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);padding:2px 0}
 .hb{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--quiet);padding:1px 0}
@@ -431,6 +438,10 @@ body.dark .ed-code .s{color:#CE9178}
 
 /* 选择器 / 弹层 */
 .picker{border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);background:var(--bg);overflow:hidden;margin:0 0 6px}
+/* 浮在输入框上的菜单要压住框里的内容：待办计数（opacity）、未读角标（transform 动画）、
+   上下文环（position:relative）各自生成层叠上下文，且 DOM 顺序排在菜单之后，菜单没有
+   层级就会被它们透出来。抽屉与弹窗遮罩再高一档，仍然盖得住还开着的菜单。 */
+.composer-wrap>.picker{z-index:20}
 .picker-h{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--alt);border-bottom:1px solid var(--line);font-size:10.5px;color:var(--muted)}
 .picker-b{max-height:170px;overflow:auto;padding:3px}
 .picker-search{display:flex;align-items:center;gap:6px;height:26px;margin:6px 3px 0;padding:0 7px;border:1px solid var(--line);border-radius:6px;background:var(--alt);color:var(--muted);font-size:11.5px}
@@ -446,7 +457,7 @@ body.dark .ed-code .s{color:#CE9178}
 .pk-row .k{margin-left:auto;flex:none;font-size:10px;color:var(--quiet);font-family:var(--mono)}
 
 /* 抽屉 */
-.drawer-mask{position:absolute;inset:0;background:rgba(16,24,40,.18);display:flex;justify-content:flex-end}
+.drawer-mask{position:absolute;inset:0;z-index:30;background:rgba(16,24,40,.18);display:flex;justify-content:flex-end}
 .drawer{width:322px;background:var(--bg);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
 .drawer-h{height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid var(--line)}
 .tabs{display:flex;gap:2px;padding:5px 6px 0;border-bottom:1px solid var(--line);overflow-x:auto}
@@ -464,7 +475,7 @@ body.dark .ed-code .s{color:#CE9178}
 .kv-mini b{color:var(--ink-2);font-weight:500}
 
 /* 弹窗 */
-.dlg-mask{position:absolute;inset:0;background:rgba(16,24,40,.28);display:flex;align-items:center;justify-content:center;padding:14px}
+.dlg-mask{position:absolute;inset:0;z-index:30;background:rgba(16,24,40,.28);display:flex;align-items:center;justify-content:center;padding:14px}
 .dlg{width:100%;max-width:392px;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);display:flex;flex-direction:column;max-height:100%}
 .dlg-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);font-size:12.5px;font-weight:600}
 .dlg-h .grow{flex:1}
@@ -851,8 +862,8 @@ function fresh(){
     consent:null,consentAnswer:null,approval:'waiting',queueOpen:true,
     drawer:null,dialog:null,picker:null,slash:0,plus:false,model:false,effort:false,modelFilter:'',dockFilter:'',modelName:'claude-sonnet-4-6',openTool:null,openThink:null,scmOpen:false,diffFile:null,collapseUnchanged:true,
     planDock:'waiting',planDecision:null,verdict:true,dockPick:null,handoffModel:modelLabel(EXIT_MODELS[0]),handoffEffort:'',reviewModel:modelLabel(EXIT_MODELS[0]),batchState:'paused',rewound:false,
-    composer:'',composerFocus:false,atOpen:false,preset:DEFAULT_PRESET,presetMenu:false,editorTab:'code',planTabOpen:false,todosOpen:false,todoItems:SESSION_TODO.items.map((item)=>({...item})),todoChanged:[],todoFlash:false,todoUnread:[],todoTimer:null,events:[],
-    fileRange:null,fileRangeTimer:null
+    composer:'',composerFocus:false,atOpen:false,preset:DEFAULT_PRESET,presetMenu:false,editorTab:'code',editorFile:'package.json',openFiles:['panel.ts','package.json','relay.ts'],planTabOpen:false,todosOpen:false,todoItems:SESSION_TODO.items.map((item)=>({...item})),todoChanged:[],todoFlash:false,todoUnread:[],todoTimer:null,events:[],
+    fileRange:null,pendingCentre:false,caret:null
   };
 }
 let S=fresh();
@@ -1468,7 +1479,7 @@ function thread(scene){
       ${uMsg('@<span class="mention">editors/vscode/package.json</span> 这个 <strong>secondarySidebar</strong> 的贡献为什么在 1.105 里不生效？帮我确认闸门到底在哪。',[
         {n:'package.json',sz:'2.1 KB'},{n:'extension-host.log',sz:'18 KB',ic:'file'}])}
       ${think('t1','先读 package.json 的贡献点，再去 <code>@types/vscode</code> 里找 secondarySidebar 的闸门。如果 1.105 还在 proposed API 后面，那「不生效」就是预期行为，不是我们的 bug。')}
-      ${md('<p>它没有失效，是 <strong>1.105 还在闸门后面</strong>。</p><p><code>viewsContainers.secondarySidebar</code> 在 1.105 的源码里会先走 <code>checkProposedApiEnabled(\'contribSecondarySidebar\')</code>，只有带 proposed API 的扩展能声明它；1.106 才公开。</p><p>面板注册的入口在 <a class="flink" data-act="open-file-range" data-v="panel.ts:49-54" role="button" tabindex="0" title="打开 panel.ts 第 49-54 行">panel.ts:49-54</a>，先看它再动 manifest。</p><p>所以能力探测按 <strong>≥1.106</strong> 判，<code>engines</code> 保持 <code>^1.100.0</code>，旧版回退到活动栏容器，旧版只是忽略这个键，不会拒绝整个 manifest。</p>')}
+      ${md('<p>它没有失效，是 <strong>1.105 还在闸门后面</strong>。</p><p><code>viewsContainers.secondarySidebar</code> 在 1.105 的源码里会先走 <code>checkProposedApiEnabled(\'contribSecondarySidebar\')</code>，只有带 proposed API 的扩展能声明它；1.106 才公开。</p><p>面板注册的入口在 <a class="flink" data-act="open-file-range" data-v="panel.ts:49-54" role="button" tabindex="0" title="panel.ts:49-54">panel.ts:49-54</a>，先看它再动 manifest。</p><p>所以能力探测按 <strong>≥1.106</strong> 判，<code>engines</code> 保持 <code>^1.100.0</code>，旧版回退到活动栏容器，旧版只是忽略这个键，不会拒绝整个 manifest。</p>')}
       ${think('t2','贡献点确认无误，接下来核对 1.105 的 proposed API 闸门与能力探测分支，再决定 engines 与回退容器怎么写。')}
       ${act([{l:'已读取 editors/vscode/package.json',t:'0.3s'},{l:'已搜索 contribSecondarySidebar',t:'1.1s'},{l:'已读取 editors/vscode/src/extension.ts',t:'0.2s'}])}
       ${docCard('已运行','grep -rn contribSecondarySidebar','grep -rn contribSecondarySidebar node_modules/@types/vscode/ | head','vscode/index.d.ts:18422: * Secondary sidebar is proposed in 1.105 (contribSecondarySidebar)\nvscode/index.d.ts:18423: * @proposed\nvscode/index.d.ts:18431: secondarySidebar?: SecondarySidebar[];')}
@@ -1492,7 +1503,7 @@ function thread(scene){
       ${uMsg('跑一遍 editors/vscode 的测试，红了就把原因贴出来。')}
       ${toolOk('已运行','npm --prefix editors/vscode test','<pre class="doc-out">  panelHtml\n    ✓ renders the waiting state (12 ms)\n    ✓ keeps the nonce out of the frame src (9 ms)\n\n  2 passing (21ms)</pre>')}
       ${toolFail('运行失败','npm --prefix editors/vscode test','<pre class="doc-out">  manifest\n    1) declares three webview views\n\n  1 failing\n\n  1) manifest.test.ts:41\n     expected [ secondarySidebar ] to have 3 items, got 2</pre>')}
-      ${md('<p>红的是 <code>manifest.test.ts:41</code>：它还在断言 383 之前的两个容器。这条断言要跟着贡献结构改，不是代码错。</p>')}
+      ${md('<p>红的是 <code><a class="flink" data-act="open-file-range" data-v="manifest.test.ts:41" role="button" tabindex="0" title="manifest.test.ts:41">manifest.test.ts:41</a></code>：它还在断言 383 之前的两个容器。这条断言要跟着贡献结构改，不是代码错。</p>')}
       ${errBlock()}
       ${refusedLine()}
       ${act([{l:'已读取 editors/vscode/src/manifest.test.ts',t:'0.2s',st:'ok'},{l:'等待批准 修改 manifest.test.ts',t:'',st:'run'}])}
@@ -1645,39 +1656,246 @@ function boards(){
 }
 
 /* ============================== 窗口外壳 ============================== */
-const EDITOR_LINES=[
-  ['import * as vscode from \'vscode\';',''],
-  ['import { ChatPanel } from \'./panel\';',''],
-  ['import { Connection } from \'./connection\';',''],
-  ['import { statusBarItem } from \'./statusBar\';',''],
-  ['',''],
-  ['// The chat surface is a webview built by vite; the host only carries the',''],
-  ['// RPC the page may make and the token it must never see.',''],
-  ['export function registerPanel(ctx: vscode.ExtensionContext, connection: Connection) {',''],
-  ['  const panel = new ChatPanel(ctx, connection);',''],
-  ['  const secondary = vscode.window.registerWebviewViewProvider(',''],
-  ['    \'forebrain.chatSecondary\',',''],
-  ['    panel,',''],
-  ['    { webviewOptions: { retainContextWhenHidden: true } },',''],
-  ['  );',''],
-  ['  const sidebar = vscode.window.registerWebviewViewProvider(',''],
-  ['    \'forebrain.chatSidebar\',',''],
-  ['    panel,',''],
-  ['    { webviewOptions: { retainContextWhenHidden: true } },',''],
-  ['  );',''],
-  ['  ctx.subscriptions.push(secondary, sidebar, panel);',''],
-  ['}',''],
-  ['',''],
-  ['/**',''],
-  [' * The capability probe: secondarySidebar sits behind the proposed API',''],
-  [' * until 1.106, so this stays true on everything older and the',''],
-  [' * activity-bar container keeps carrying the same app.',''],
-  [' */',''],
-  ['function doesNotSupportSecondarySidebar(): boolean {',''],
-  ['  const [major, minor] = vscode.version.split(\'.\').map(Number);',''],
-  ['  return major < 1 || (major === 1 && minor < 106);',''],
-  ['}','']
-];
+/* 编辑区代码页的文件（scenery）：一份文件一份内容，链接打开哪个就渲染哪一份，
+   与真实 showTextDocument 一致。行号从 1 起算，长文件才滚得动、才谈得上落中。 */
+const EDITOR_FILES={
+  'package.json':[
+    '{',
+    '  "name": "forebrain-vscode",',
+    '  "displayName": "%ext.displayName%",',
+    '  "description": "%ext.description%",',
+    '  "version": "0.2.1",',
+    '  "publisher": "forebrain",',
+    '  "license": "MIT",',
+    '  "engines": {',
+    '    "vscode": "^1.100.0"',
+    '  },',
+    '  "categories": [',
+    '    "Machine Learning",',
+    '    "Chat"',
+    '  ],',
+    '  "main": "./dist/extension.js",',
+    '  "l10n": "./l10n",',
+    '  "activationEvents": [',
+    '    "onStartupFinished"',
+    '  ],',
+    '  "contributes": {',
+    '    "commands": [',
+    '      {',
+    '        "command": "forebrain.openChat",',
+    '        "title": "%cmd.openChat%"',
+    '      },',
+    '      {',
+    '        "command": "forebrain.sendSelection",',
+    '        "title": "%cmd.sendSelection%"',
+    '      },',
+    '      {',
+    '        "command": "forebrain.openDeliveredFile",',
+    '        "title": "%cmd.openDeliveredFile%"',
+    '      }',
+    '    ],',
+    '    "menus": {',
+    '      "editor/context": [{ "command": "forebrain.sendSelection", "group": "forebrain" }]',
+    '    },',
+    '    "viewsContainers": {',
+    '      "secondarySidebar": [{',
+    '        "id": "forebrain-sidebar-secondary",',
+    '        "title": "Forebrain",',
+    '        "icon": "assets/forebrain.svg",',
+    '        "when": "!forebrain.doesNotSupportSecondarySidebar"',
+    '      }],',
+    '      "activitybar": [{',
+    '        "id": "forebrain-sidebar",',
+    '        "title": "Forebrain",',
+    '        "icon": "assets/forebrain.svg"',
+    '      }]',
+    '    },',
+    '    "views": {',
+    '      "forebrain-sidebar-secondary": [',
+    '        { "type": "webview", "id": "forebrain.chatSecondary", "name": "Chat" }',
+    '      ],',
+    '      "forebrain-sidebar": [',
+    '        { "type": "webview", "id": "forebrain.chatSidebar", "name": "Chat" }',
+    '      ]',
+    '    }',
+    '  }',
+    '}'
+  ],
+  'panel.ts':[
+    "import * as vscode from 'vscode';",
+    "import { ChatPanel } from './panel';",
+    "import { Connection } from './connection';",
+    "import { statusBarItem } from './statusBar';",
+    '',
+    '/** The two containers the same webview app is registered into. */',
+    'export const CONTAINERS = {',
+    "  secondary: 'forebrain.chatSecondary',",
+    "  sidebar: 'forebrain.chatSidebar',",
+    '} as const;',
+    '',
+    '/** Webview options both containers share: keep the page alive when hidden. */',
+    'const VIEW_OPTIONS = {',
+    '  webviewOptions: { retainContextWhenHidden: true },',
+    '};',
+    '',
+    '/**',
+    ' * The capability probe: secondarySidebar sits behind the proposed API',
+    ' * until 1.106, so this stays true on everything older and the',
+    ' * activity-bar container keeps carrying the same app.',
+    ' */',
+    'function doesNotSupportSecondarySidebar(): boolean {',
+    "  const [major, minor] = vscode.version.split('.').map(Number);",
+    '  return major < 1 || (major === 1 && minor < 106);',
+    '}',
+    '',
+    '/** The context key the manifest\'s "when" clause reads. */',
+    'function publishCapability(ctx: vscode.ExtensionContext) {',
+    '  const unsupported = doesNotSupportSecondarySidebar();',
+    '  void vscode.commands.executeCommand(',
+    "    'setContext',",
+    "    'forebrain.doesNotSupportSecondarySidebar',",
+    '    unsupported,',
+    '  );',
+    '  ctx.subscriptions.push(',
+    '    vscode.workspace.onDidChangeConfiguration(() => publishCapability(ctx)),',
+    '  );',
+    '}',
+    '',
+    '/**',
+    ' * Registers the same panel into both containers. The secondary sidebar is',
+    ' * only declared when the probe says the host is 1.106 or newer; older hosts',
+    ' * keep the activity-bar container and nothing else changes.',
+    ' *',
+    ' * The host owns the token; the page only ever sees the RPC whitelist.',
+    ' */',
+    '',
+    'export function registerPanel(ctx: vscode.ExtensionContext, connection: Connection) {',
+    '  const panel = new ChatPanel(ctx, connection);',
+    '  const secondary = vscode.window.registerWebviewViewProvider(',
+    "    'forebrain.chatSecondary',",
+    '    panel,',
+    '    { webviewOptions: { retainContextWhenHidden: true } },',
+    '  );',
+    '  const sidebar = vscode.window.registerWebviewViewProvider(',
+    "    'forebrain.chatSidebar',",
+    '    panel,',
+    '    { webviewOptions: { retainContextWhenHidden: true } },',
+    '  );',
+    '  ctx.subscriptions.push(secondary, sidebar, panel);',
+    '}',
+    '',
+    '/** The status bar item reports the bound session, not the container. */',
+    'export function registerStatusBar(ctx: vscode.ExtensionContext, connection: Connection) {',
+    '  ctx.subscriptions.push(statusBarItem(connection));',
+    '}',
+    '',
+    '/**',
+    ' * Commands the panel exposes to the host. Each one is a thin wrapper: the',
+    ' * page asks, the host answers, and nothing here touches the gateway token.',
+    ' */',
+    'export function registerCommands(ctx: vscode.ExtensionContext) {',
+    '  ctx.subscriptions.push(',
+    "    vscode.commands.registerCommand('forebrain.openChat', () => {",
+    "      void vscode.commands.executeCommand('workbench.view.extension.forebrain-sidebar');",
+    '    }),',
+    '  );',
+    '}',
+    '',
+    'export { doesNotSupportSecondarySidebar, VIEW_OPTIONS };'
+  ],
+  'relay.ts':[
+    "import { createServer, type Server } from 'node:http';",
+    "import { WebSocketServer } from 'ws';",
+    '',
+    '/**',
+    ' * The loopback relay: the webview talks to its own origin, the host forwards',
+    ' * to the gateway with the Bearer it never hands the page. Frozen by plan 376.',
+    ' */',
+    'export function startRelay(token: string): Promise<Server> {',
+    '  const server = createServer((req, res) => {',
+    '    if (! authorised(req, token)) {',
+    '      res.writeHead(401).end();',
+    '      return;',
+    '    }',
+    '    void forward(req, res);',
+    '  });',
+    "  const sockets = new WebSocketServer({ noServer: true });",
+    "  server.on('upgrade', (req, socket, head) => {",
+    '    if (! authorised(req, token) || req.headers.origin !== ownOrigin) {',
+    '      socket.destroy();',
+    '      return;',
+    '    }',
+    '    sockets.handleUpgrade(req, socket, head, (ws) => bind(ws));',
+    '  });',
+    "  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)));",
+    '}'
+  ],
+  'manifest.test.ts':[
+    "import assert from 'node:assert/strict';",
+    "import { readFileSync } from 'node:fs';",
+    "import { join } from 'node:path';",
+    "import { test } from 'node:test';",
+    '',
+    "const manifest = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));",
+    '',
+    'function containerIds(): string[] {',
+    '  return Object.keys(manifest.contributes.viewsContainers);',
+    '}',
+    '',
+    'function viewIds(container: string): string[] {',
+    '  return (manifest.contributes.views[container] ?? []).map(',
+    '    (view: { id: string }) => view.id,',
+    '  );',
+    '}',
+    '',
+    "test('the activity bar container is always declared', () => {",
+    "  assert.ok(containerIds().includes('activitybar'));",
+    '});',
+    '',
+    "test('every container carries a webview view', () => {",
+    '  for (const id of containerIds()) {',
+    '    const views = manifest.contributes.views[`forebrain-${id}`] ?? [];',
+    '    assert.ok(views.length > 0, `${id} has no view`);',
+    '  }',
+    '});',
+    '',
+    "test('the engine range stays at the oldest supported host', () => {",
+    "  assert.equal(manifest.engines.vscode, '^1.100.0');",
+    '});',
+    '',
+    '/**',
+    ' * The container list is the contract the panel registers against: a new',
+    ' * container without a matching registration leaves an empty sidebar.',
+    ' *',
+    ' * 383 added the secondary sidebar, so the expected list grows with it;',
+    ' * the provider registrations are the source of truth for this assertion.',
+    ' */',
+    "test('declares three webview views', () => {",
+    "  assert.deepEqual(containerIds(), ['activitybar', 'panel']);",
+    '});',
+    '',
+    "test('the secondary container is gated by the capability key', () => {",
+    '  const secondary = manifest.contributes.viewsContainers.secondarySidebar?.[0];',
+    "  assert.equal(secondary?.when, '!forebrain.doesNotSupportSecondarySidebar');",
+    '});',
+    '',
+    "test('view ids match the provider registrations', () => {",
+    "  assert.deepEqual(viewIds('forebrain-sidebar'), ['forebrain.chatSidebar']);",
+    '});',
+    '',
+    "test('the sessions list is its own webview', () => {",
+    "  assert.ok(viewIds('forebrain-sessions').includes('forebrain.sessionsList'));",
+    '});',
+    '',
+    "test('no proposed API is declared in the manifest', () => {",
+    '  assert.equal(manifest.enabledApiProposals, undefined);',
+    '});',
+    '',
+    "test('the l10n bundle ships with the extension', () => {",
+    "  assert.equal(manifest.l10n, './l10n');",
+    '});'
+  ]
+};
 const DIFF_LINES={
   'editors/vscode/package.json':[
     {k:'',no:'38',t:'   "viewsContainers": {'},
@@ -1744,12 +1962,17 @@ function scmView(){
   </div>`;
 }
 function editorCode(){
-  const range=S.fileRange;
-  return EDITOR_LINES.map((parts,i)=>{
-    const no=i+41;
+  const lines=EDITOR_FILES[S.editorFile];
+  const range=S.fileRange&&S.fileRange.path===S.editorFile?S.fileRange:null;
+  const caret=S.caret&&S.caret.file===S.editorFile?S.caret:null;
+  return lines.map((text,i)=>{
+    const no=i+1;
     const on=range&&no>=range.from&&no<=range.to;
     const ln=String(no).padStart(3,' ');
-    return `<div class="ln${on?' hl':''}"><span>${ln}</span><code>${esc(parts.join(''))}</code></div>`;
+    const body=caret&&caret.line===no
+      ? `${esc(text.slice(0,caret.ch))}<i class="caret"></i>${esc(text.slice(caret.ch))}`
+      : esc(text);
+    return `<div class="ln${on?' sel':''}"><span>${ln}</span><code>${body}</code></div>`;
   }).join('');
 }
 /**
@@ -1770,15 +1993,13 @@ function editorTabs(){
     ? `<span class="ed-tab md ${S.editorTab==='diff'?'on':''}" data-act="ed-tab" data-v="diff" data-testid="editor-tab-diff"><span class="tl">${esc(S.diffFile.split('/').pop())}</span><span class="prev">diff</span></span>`
     : '';
   return `<div class="ed-tabs">
-    ${tab('panel.ts',codeActive,'ed-tab','code')}
-    ${tab('package.json',false,'ed-tab','code')}
-    ${tab('relay.ts',false,'ed-tab','code')}
+    ${S.openFiles.map(f=>tab(esc(f),codeActive&&S.editorFile===f,'ed-tab','file:'+f)).join('')}
     ${planTab}
     ${diffTab}
   </div>`;
 }
 function editorPane(){
-  const body=S.editorTab==='diff'&&S.diffFile?editorDiff():(S.editorTab==='plan'&&S.planTabOpen?planEditorPreview():`<div class="ed-code">${editorCode()}</div>`);
+  const body=S.editorTab==='diff'&&S.diffFile?editorDiff():(S.editorTab==='plan'&&S.planTabOpen?planEditorPreview():`<div class="ed-code" data-file="${esc(S.editorFile)}" data-act="ed-click">${editorCode()}</div>`);
   return `<div class="ed" data-testid="editor-area">
       ${editorTabs()}
       ${body}
@@ -1822,8 +2043,8 @@ function windowHTML(){
 
 /* ============================== 场景说明 ============================== */
 const CAPTIONS={
-  thread:['主对话线程','用户消息带附件与 <code>@</code> 引用；思考是可展开收起的「深度思考」行（展开后左竖线缩进渲染思考正文），工具调用是扁平折叠行（图标按工具类型 file/search/term/code 区分，文件读取带品牌蓝链，chevron 展开输出），进行中图标旋转、完成/失败静态（失败用 danger 图标色），不写「完成」状态字；本轮交付物带 +/− 计数，代码文件点小眼睛在左侧源代码管理面板与编辑区 diff 视图打开（可折叠未更改区域），非代码交付物（PDF/图片等）交系统默认应用外部打开；内联审批（待决定）、消息队列两条、运行状态行与 composer 全芯片。正文里的文件行引用（panel.ts:49-54）可点：切到编辑区代码页，那几行落中并高亮，2.5 秒后淡去；键盘 Enter/Space 同样能打开。'],
-  fail:['失败与拒绝','运行失败的工具行用静态 danger 图标（不旋转、不写状态字）；错误块给重试与日志入口；被拒绝的调用不留假句子，只留终端说过的那一行。'],
+  thread:['主对话线程','用户消息带附件与 <code>@</code> 引用；思考是可展开收起的「深度思考」行（展开后左竖线缩进渲染思考正文），工具调用是扁平折叠行（图标按工具类型 file/search/term/code 区分，文件读取带品牌蓝链，chevron 展开输出），进行中图标旋转、完成/失败静态（失败用 danger 图标色），不写「完成」状态字；本轮交付物带 +/− 计数，代码文件点小眼睛在左侧源代码管理面板与编辑区 diff 视图打开（可折叠未更改区域），非代码交付物（PDF/图片等）交系统默认应用外部打开；内联审批（待决定）、消息队列两条、运行状态行与 composer 全芯片。正文里的文件行引用（panel.ts:49-54）可点：编辑区打开那个文件（标签页跟着切），那几行按 VS Code 原生选区选中并居中，选区常驻不淡出；在编辑区正文点一下，选区收起、光标落在点击处；键盘 Enter/Space 同样能打开。'],
+  fail:['失败与拒绝','运行失败的工具行用静态 danger 图标（不旋转、不写状态字）；错误块给重试与日志入口；被拒绝的调用不留假句子，只留终端说过的那一行。正文行内代码里的 manifest.test.ts:41 同样是链接：点开一个新标签页并选中那一行；工具输出里的路径行号保持纯文本。'],
   runtime:['运行态卡片','压缩卡（148k → 62k）、目标行、自动继续横幅、MCP 超时、语言服务器推荐、跑批三行与继续/停止、心跳行。跑批卡片的按钮在暂停与执行两态互换。'],
   plan:['计划与检查点','计划更新卡挂在时间线上；输入框位置换成 plan dock：标题、计划正文、评审结论、四个去向（批准 / 交给其他模型执行 / 请其他模型评审 / 继续规划）；session_todo 在插件里只有一面：输入框上方那张待办卡（样式取自之前那张任务清单卡；标题与计数用 web 自己的词，见 OverviewTab 的待办卡）。会话里的「待办」芯片按开/收起。它更新时不再沉默：收起时芯片挂未读角标，展开时变化的行闪一下并保持未读标记（品牌点＋加粗），点行或「全部已读」才转已读。web 端那张会自己渲染的消息卡在插件里不显示。'],
   'todos-unread':['待办未读/已读','默认就停在未读态：刚更新的两行带品牌点＋加粗＋浅底，头部有「全部已读」。点某行读某行，点「全部已读」全清；收起卡片时「待办」芯片挂未读角标（角标自带脉冲动效）。未读持续到显式已读，闪一下只是落地提醒，不是唯一信号。'],
@@ -1847,7 +2068,7 @@ function facts(){
   const rows=[
     ['场景',S.scene],['主题',S.theme],['品牌 scheme',S.brand],['选中会话',S.selected],
     ['可视对话',visibleSessions().length],['搜索',S.search||'（空）'],
-    ['内联审批',S.approval],['plan dock',S.planDecision||'waiting'],['dock 屏',S.dockPick||'四去向'],['待办卡',(S.todosOpen?'展开':'收起')+(S.todoUnread.length?` 未读 ${S.todoUnread.length}`:'')],['编辑区',S.editorTab==='plan'&&S.planTabOpen?'计划预览（.md）':'panel.ts'],
+    ['内联审批',S.approval],['plan dock',S.planDecision||'waiting'],['dock 屏',S.dockPick||'四去向'],['待办卡',(S.todosOpen?'展开':'收起')+(S.todoUnread.length?` 未读 ${S.todoUnread.length}`:'')],['编辑区',S.editorTab==='plan'&&S.planTabOpen?'计划预览（.md）':S.editorTab==='diff'?'diff':S.editorFile],
     ['消息队列',S.queueOpen?'2 条待发':'已收起'],['抽屉',S.drawer||'无'],['弹窗',S.dialog||'无'],
     ['覆盖组件',comps().filter(n=>n!=='SessionsList').length]
   ];
@@ -1871,8 +2092,19 @@ function comps(){
   return [...seen];
 }
 function render(){
+  const before=q('vsc').querySelector('.ed-code');
+  const codeScroll=before&&before.dataset.file===S.editorFile?before.scrollTop:0;
   q('vsc').classList.toggle('dark',S.theme==='dark');
   q('vsc').innerHTML=windowHTML();
+  // The editor keeps its place across a redraw, the way a real editor does.
+  // revealRange(InCenter) happens once per jump, after the DOM it scrolls exists.
+  const box=q('vsc').querySelector('.ed-code');
+  if(S.pendingCentre){
+    S.pendingCentre=false;
+    const marked=box.querySelectorAll('.ln.sel');
+    const first=marked[0].getBoundingClientRect(),last=marked[marked.length-1].getBoundingClientRect(),edge=box.getBoundingClientRect();
+    box.scrollTop+=((first.top+last.bottom)/2)-((edge.top+edge.bottom)/2);
+  }else if(box){box.scrollTop=codeScroll;}
   // The scheme is set as attributes on the window root, so both webviews read
   // one accent family: chat content area and sidebar switch together.
   q('vsc').setAttribute('style',brandVars());
@@ -1888,7 +2120,6 @@ function consentFromData(){
   return {mcp:CONSENT_MCP.map(r=>({...r,allow:true})),lsp:CONSENT_LSP.map(r=>({...r,allow:true})),alwaysAllow:false};
 }
 function goScene(id){
-  clearTimeout(S.fileRangeTimer);
   const theme=S.theme,brand=S.brand;
   S=fresh();S.theme=theme;S.brand=brand;S.scene=id;
   if(id==='subagent') S.drawer='subagent';
@@ -1930,21 +2161,42 @@ function handle(act,v,el,e){
       if(S.editorTab==='plan'&&S.planTabOpen) log('计划已经在编辑器里打开');
       else {S.planTabOpen=true;S.editorTab='plan';log('在编辑器中打开计划文件 '+PLAN_DOC.file,'ok');}
       break;
-    case 'ed-tab':S.editorTab=v==='plan'?'plan':v==='diff'?'diff':'code';log(v==='plan'?'切到计划预览':v==='diff'?'切到 diff':'切回代码');break;
+    case 'ed-tab':
+      if(v==='plan'||v==='diff'){S.editorTab=v;log(v==='plan'?'切到计划预览':'切到 diff');}
+      else{S.editorTab='code';S.editorFile=v.slice(5);log('切到 '+S.editorFile);}
+      break;
+    case 'ed-click':{
+      // Clicking the text puts the cursor there and collapses the selection,
+      // the way a mouse down in a real editor does. The column comes from the
+      // monospace advance, measured off the line's own first character.
+      const ln=e.target.closest('.ln');
+      const no=Number(ln.querySelector('span').textContent.trim());
+      const code=ln.querySelector('code');
+      const text=EDITOR_FILES[S.editorFile][no-1];
+      let ch=0;
+      const node=Array.from(code.childNodes).find(n=>n.nodeType===3&&n.data.length);
+      if(node&&text){
+        const r=document.createRange();r.setStart(node,0);r.setEnd(node,1);
+        const advance=r.getBoundingClientRect().width;
+        ch=Math.max(0,Math.min(text.length,Math.round((e.clientX-code.getBoundingClientRect().left)/advance)));
+      }
+      S.fileRange=null;S.caret={file:S.editorFile,line:no,ch};
+      log('光标落在第 '+no+' 行第 '+(ch+1)+' 列，选区收起');
+      break;
+    }
     case 'open-file-range':{
-      // A prose file:line reference (plan file-line-range-links): land on the
-      // editor's code tab, centre the named lines, hold the mark 2.5s, then
-      // let the line's own transition fade it.
+      // A prose file:line reference (plan file-line-range-links) does what the
+      // host does: open that file in the editor, select the named lines and
+      // centre them. The selection is VS Code's own, so it stays put.
       const m=/^([\w./-]+):(\d+)(?:[-–—](\d+))?$/.exec(v||'');
       if(!m) break;
-      clearTimeout(S.fileRangeTimer);
-      S.editorTab='code';S.planTabOpen=false;
-      S.fileRange={path:m[1],from:+m[2],to:m[3]?+m[3]:+m[2]};
-      log('打开 '+m[1]+'，定位第 '+S.fileRange.from+(S.fileRange.to>S.fileRange.from?'-'+S.fileRange.to:'')+' 行');
-      render();
-      const first=q('vsc').querySelector('.ed-code .ln.hl');
-      if(first) first.scrollIntoView({block:'center'});
-      S.fileRangeTimer=setTimeout(()=>{S.fileRange=null;S.fileRangeTimer=null;render();},2500);
+      const base=m[1].split('/').pop();
+      S.editorTab='code';S.planTabOpen=false;S.editorFile=base;
+      if(!S.openFiles.includes(base)) S.openFiles.push(base);
+      S.fileRange={path:base,from:+m[2],to:m[3]?+m[3]:+m[2]};
+      S.caret=null;
+      S.pendingCentre=true;
+      log('打开 '+m[1]+'，选中第 '+S.fileRange.from+(S.fileRange.to>S.fileRange.from?'-'+S.fileRange.to:'')+' 行');
       break;
     }
     case 'open-rewind':S.dialog='rewind';log('打开回到这里');break;
@@ -2042,6 +2294,7 @@ window.chatWorkbenchPrototype={
       caption:CAPTIONS[S.scene][0],
       comps:comps(),
       fileRange:S.fileRange,
+      editorFile:S.editorFile,openFiles:S.openFiles.slice(),caret:S.caret,
       events:S.events.slice()
     };
   }

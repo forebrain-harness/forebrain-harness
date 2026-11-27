@@ -166,34 +166,104 @@ const EXPECTED = {
       assert.match(await text('[data-comp="ApprovalCard"]'), /你拒绝了这条命令，它没有运行/);
     });
 
-    await check('A prose file:line reference lands in the editor code tab and fades', async () => {
+    await check('A prose file:line reference opens that file and selects the lines', async () => {
       await scene('thread');
       const link = page.locator('[data-act="open-file-range"]');
       assert.equal(await link.count(), 1, 'the thread answer carries one file:line reference');
       assert.match(await text('[data-act="open-file-range"]'), /panel\.ts:49-54/);
       assert.equal(await link.evaluate(el => el.getAttribute('role')), 'button', 'the reference is a button-shaped anchor');
       assert.equal(await link.evaluate(el => el.getAttribute('tabindex')), '0', 'the reference is keyboard reachable');
+      assert.equal(await link.evaluate(el => el.getAttribute('title')), 'panel.ts:49-54', 'the tooltip is the reference itself');
+      // The editor sits on another file, so the click has a file to open.
+      assert.equal((await snap()).editorFile, 'package.json');
       await click('[data-act="open-file-range"]');
       const s = await snap();
       assert.equal(s.editorTab, 'code', 'the click takes the editor code tab');
+      assert.equal(s.editorFile, 'panel.ts', 'the editor opens the referenced file');
+      assert.equal(await text('.ed-tab.on .tl'), 'panel.ts', 'the tab follows the opened file');
       assert.deepEqual(s.fileRange, { path: 'panel.ts', from: 49, to: 54 });
-      assert.equal(await page.locator('.ed-code .ln.hl').count(), 6, 'each named line carries the landing mark');
-      const marked = await page.locator('.ed-code .ln.hl').first().evaluate(el => getComputedStyle(el).backgroundColor);
-      assert.notEqual(marked, 'rgba(0, 0, 0, 0)', 'the landing mark paints in the brand soft');
       assert(s.events.some(e => /panel\.ts/.test(e.text)), 'the event log names the jump');
-      // The mark holds ~2.5s, then the class leaves and the line's own
-      // transition fades the background back.
+      // VS Code's own selection: the text carries it, the gutter does not, and
+      // the colour is the editor's, not a brand wash.
+      const rows = page.locator('.ed-code .ln.sel');
+      assert.equal(await rows.count(), 6, 'each named line is selected');
+      assert.match(await rows.first().locator('code').textContent(), /new ChatPanel\(ctx, connection\)/, 'line 49 is the registration the answer names');
+      assert.equal(await rows.first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgba(0, 0, 0, 0)', 'the row itself is not painted');
+      assert.equal(await rows.first().locator('code').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(173, 214, 255)', 'the text carries the editor selection colour');
+      assert.equal(await page.locator('.ed-code .ln.sel span').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgba(0, 0, 0, 0)', 'the line number stays out of the selection');
+      // Centred: the file is longer than the viewport, so the jump really scrolls.
+      const centre = await page.evaluate(() => {
+        const box = document.querySelector('.ed-code');
+        const marked = box.querySelectorAll('.ln.sel');
+        const first = marked[0].getBoundingClientRect(), last = marked[marked.length - 1].getBoundingClientRect();
+        const b = box.getBoundingClientRect();
+        return {
+          scrollTop: box.scrollTop,
+          overflow: box.scrollHeight - box.clientHeight,
+          offset: Math.round(((first.top + last.bottom) / 2) - ((b.top + b.bottom) / 2)),
+        };
+      });
+      assert(centre.overflow > 0, 'the file is longer than the editor viewport');
+      assert(centre.scrollTop > 0, 'the jump scrolled the editor');
+      assert(Math.abs(centre.offset) <= 2, 'the selected block sits in the centre, got ' + centre.offset);
+      await shot('391-shot-light-file-range.png');
+      // The selection is the editor's own: it stays until the user moves it.
       await page.waitForTimeout(2700);
-      assert.equal(await page.locator('.ed-code .ln.hl').count(), 0, 'the landing mark has faded');
+      assert.equal(await page.locator('.ed-code .ln.sel').count(), 6, 'the selection stays put');
+      assert.deepEqual((await snap()).fileRange, { path: 'panel.ts', from: 49, to: 54 });
+      // A mouse down in the text collapses the selection and leaves the cursor
+      // where the click landed, the way a real editor does.
+      await page.locator('.ed-code .ln.sel code').first().click();
+      await frame();
+      assert.equal(await page.locator('.ed-code .ln.sel').count(), 0, 'the click collapsed the selection');
       assert.equal((await snap()).fileRange, null);
+      assert.equal(await page.locator('.ed-code .caret').count(), 1, 'one cursor, where the click was');
+      const caret = (await snap()).caret;
+      assert.equal(caret.line, 49, 'the cursor is on the clicked line');
+      assert(caret.ch > 0 && caret.ch <= 40, 'the column follows the click, got ' + caret.ch);
+      assert.equal(await page.locator('.ed-code .caret').evaluate(el => getComputedStyle(el).animationName), 'none', 'the cursor yields to reduced motion');
+      await page.emulateMedia({ reducedMotion: 'no-preference' });
+      assert.equal(await page.locator('.ed-code .caret').evaluate(el => getComputedStyle(el).animationName), 'caretBlink');
+      await page.emulateMedia({ reducedMotion: 'reduce' });
+      await shot('391-shot-light-file-range-caret.png');
+      await page.locator('.ed-code .ln').nth(20).click();
+      await frame();
+      assert.notEqual((await snap()).caret.line, 49, 'another click moves the cursor');
+      await click('.ed-tab[data-v="file:package.json"]');
+      assert.equal(await page.locator('.ed-code .caret').count(), 0, 'the cursor belongs to its own file');
       // Keyboard: Enter opens the reference the way the click does.
       await scene('thread');
       await page.locator('[data-act="open-file-range"]').focus();
       await page.keyboard.press('Enter');
       await frame();
       assert.deepEqual((await snap()).fileRange, { path: 'panel.ts', from: 49, to: 54 }, 'Enter opens the reference');
-      await page.waitForTimeout(2700);
+      // Dark paints the editor's own dark selection, not the light one.
+      await page.evaluate(() => window.chatWorkbenchPrototype.setTheme('dark'));
+      await frame();
+      assert.equal(await page.locator('.ed-code .ln.sel code').first().evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(38, 79, 120)', 'dark uses the editor selection colour');
+      await shot('391-shot-dark-file-range.png');
+      await page.evaluate(() => window.chatWorkbenchPrototype.setTheme('light'));
+      await frame();
       assert.deepEqual(errors, [], 'Browser console errors');
+    });
+
+    await check('An inline code reference opens its own tab; tool output stays plain', async () => {
+      await scene('fail');
+      const inCode = page.locator('code [data-act="open-file-range"]');
+      assert.equal(await inCode.count(), 1, 'the inline code span carries the reference');
+      assert.match(await inCode.textContent(), /manifest\.test\.ts:41/);
+      assert.equal(await page.locator('.doc-out [data-act="open-file-range"]').count(), 0, 'tool output carries no links');
+      assert.match((await page.locator('.doc-out').allTextContents()).join('\n'), /manifest\.test\.ts:41/);
+      const before = (await snap()).openFiles.length;
+      await click('code [data-act="open-file-range"]');
+      const s = await snap();
+      assert.equal(s.editorFile, 'manifest.test.ts', 'the referenced file opens');
+      assert.equal(s.openFiles.length, before + 1, 'a file that was not open gets its own tab');
+      assert.equal(await text('.ed-tab.on .tl'), 'manifest.test.ts');
+      assert.deepEqual(s.fileRange, { path: 'manifest.test.ts', from: 41, to: 41 }, 'a bare line selects that line alone');
+      assert.equal(await page.locator('.ed-code .ln.sel').count(), 1);
+      assert.match(await page.locator('.ed-code .ln.sel code').textContent(), /deepEqual\(containerIds\(\)/, 'line 41 is the assertion the answer names');
+      await shot('391-shot-light-file-range-inline.png');
     });
 
     await check('Inline approval records the decision and the scene resets it', async () => {
@@ -484,7 +554,7 @@ const EXPECTED = {
       assert.equal((await snap()).planTabOpen, false);
       assert.equal(await page.locator('[data-testid="editor-tab-plan"]').count(), 0);
       assert.equal(await page.locator('[data-testid="editor-md-preview"]').count(), 0);
-      assert.match(await text('[data-testid="editor-area"]'), /import \* as vscode from 'vscode'/);
+      assert.match(await text('[data-testid="editor-area"]'), /"viewsContainers": \{/);
 
       const eye = page.locator('[data-act="open-plan-editor"]');
       assert.equal(await eye.count(), 1);
@@ -513,7 +583,7 @@ const EXPECTED = {
       assert.match(await preview.textContent(), /目标/);
       assert.equal(await page.locator('.ed-md h1').count(), 1);
       assert.equal(await page.locator('.ed-md ol li').count(), 5, 'the five steps travel with the card');
-      assert(!(await text('[data-testid="editor-area"]')).includes("import * as vscode"), 'the code pane gave way');
+      assert(!(await text('[data-testid="editor-area"]')).includes('"viewsContainers"'), 'the code pane gave way');
 
       // The card stays where it was: the editor is a different surface.
       assert.equal(await page.locator('[data-comp="PlanApprovalDock"]').count(), 1);
@@ -750,6 +820,46 @@ const EXPECTED = {
       await click('[data-act="open-external"][data-v="docs/auth-review.pdf"]');
       await frame();
       assert((await snap()).events.some(e => /交给系统默认应用打开 docs\/auth-review\.pdf/.test(e.text)));
+    });
+
+    await check('An open composer menu covers the composer; a drawer still covers the menu', async () => {
+      // The todo count (opacity), the unread badge (transform) and the context ring
+      // (position:relative) each open a stacking context of their own and come after
+      // the menu in the DOM, so a menu without a layer of its own is painted through.
+      const bleed = () => page.evaluate(() => {
+        const menu = document.querySelector('.composer-wrap > .picker');
+        const r = menu.getBoundingClientRect();
+        const out = [];
+        for (const el of document.querySelectorAll('.wv *')) {
+          if (el === menu || menu.contains(el)) continue;
+          const b = el.getBoundingClientRect();
+          const x = Math.max(r.x, b.x), y = Math.max(r.y, b.y);
+          const w = Math.min(r.right, b.right) - x, h = Math.min(r.bottom, b.bottom) - y;
+          if (w <= 0 || h <= 0) continue;
+          const top = document.elementFromPoint(x + w / 2, y + h / 2);
+          if (top && top !== menu && !menu.contains(top)) {
+            out.push(top.tagName + '.' + (typeof top.className === 'string' ? top.className : ''));
+          }
+        }
+        return out;
+      });
+      for (const [id, act] of [['thread', 'model'], ['thread', 'plus'], ['thread', 'preset'], ['todos-unread', 'model']]) {
+        await scene(id);
+        await click(`[data-act="${act}"]`);
+        assert.deepEqual(await bleed(), [], `${id}/${act}: the composer paints through the open menu`);
+      }
+      await shot('391-shot-light-model-menu.png');
+      // Opening a drawer does not close the menu, so the mask must stay above it.
+      await scene('thread');
+      await click('[data-act="model"]');
+      await click('[data-act="open-subagent"]');
+      assert.equal(await page.locator('.composer-wrap > .picker').count(), 1, 'the menu is still open under the drawer');
+      assert.equal(await page.evaluate(() => {
+        const r = document.querySelector('.composer-wrap > .picker').getBoundingClientRect();
+        return document.querySelector('.drawer-mask').contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2));
+      }), true, 'the drawer mask covers a menu left open');
+      await page.keyboard.press('Escape');
+      await frame();
     });
 
     await check('Sessions searches, counts and switches the conversation', async () => {
