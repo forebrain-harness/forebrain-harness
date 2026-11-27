@@ -128,13 +128,13 @@
  * lists the agent's other heartbeats, each one click from pausing.
  */
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
 import { Activity, Pause, Play } from 'lucide-vue-next'
 import { Button } from '@repo/shadcn-vue/components/ui/button'
 import { Input } from '@repo/shadcn-vue/components/ui/input'
 import { Textarea } from '@repo/shadcn-vue/components/ui/textarea'
 import SwitchComponent from '@/components/common/SwitchComponent.vue'
 import { useHeartbeats } from '@/composables/useHeartbeats'
+import { useSurfaceNavigation } from '@/composables/provideSurfaceNavigation'
 import type { HeartbeatRecord } from '@/lib/api'
 import { formatAutoContinueTime } from '@/lib/autoContinue'
 import { currentLocale, useI18n } from '@/locales'
@@ -142,8 +142,7 @@ import { currentLocale, useI18n } from '@/locales'
 const props = defineProps<{ sessionId: string }>()
 
 const { t } = useI18n()
-const route = useRoute()
-const router = useRouter()
+const navigation = useSurfaceNavigation()
 const { records, refresh, forSession, save, clear, errorMessage } = useHeartbeats()
 
 const open = ref(false)
@@ -280,7 +279,7 @@ function remove() {
 }
 
 function openConversation(sessionId: string) {
-  void router.push({ path: '/', query: { ...route.query, session: sessionId } })
+  navigation.openConversation(sessionId)
 }
 
 function onDocPointerDown(event: PointerEvent) {

@@ -222,6 +222,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       dark: kind === vscode.ColorThemeKind.Dark || kind === vscode.ColorThemeKind.HighContrast,
     });
   };
+  /** One page of the gateway's own Web UI, in the person's browser. The
+   *  sign-in link the gateway's banner prints carries the token in the
+   *  fragment (the Web UI reads it once and wipes it); `redirect` lands the
+   *  reader on the page they asked for. The token leaves the extension only
+   *  into that browser, the way the banner already does. */
+  const openWebUiAt = (path: string): void => {
+    if (!active) return;
+    const current = active.currentToken();
+    if (!current) { void vscode.window.showInformationMessage(vscode.l10n.t('Forebrain: connect the panel first.')); return; }
+    const target = path && path !== '/' ? `?redirect=${encodeURIComponent(path)}` : '';
+    void vscode.env.openExternal(vscode.Uri.parse(`${active.origin}/login${target}#token=${encodeURIComponent(current)}`));
+  };
   const openDevWebview = (view: DevView): void => {
     const shown = devPanels.get(view);
     if (shown) {
@@ -287,6 +299,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await vscode.window.showTextDocument(uri, { preview: false });
         }
       },
+      openWebUi: async (path) => {
+        openWebUiAt(path);
+      },
       openFileRange: (request) => deliverables.openRange(request),
     });
     panel.webview.onDidReceiveMessage((m: unknown) => {
@@ -345,13 +360,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       else if (verdict === 'unreachable') void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: the gateway is not answering.'));
     }),
     vscode.commands.registerCommand('forebrain.openWebUiInBrowser', () => {
-      if (!active) return;
-      const current = active.currentToken();
-      if (!current) { void vscode.window.showInformationMessage(vscode.l10n.t('Forebrain: connect the panel first.')); return; }
-      // The sign-in link the gateway's own banner prints (the Web UI reads the
-      // fragment once and wipes it). The token leaves the extension only into
-      // the person's own browser, the way the banner already does.
-      void vscode.env.openExternal(vscode.Uri.parse(`${active.origin}/login#token=${encodeURIComponent(current)}`));
+      openWebUiAt('/');
     }),
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('forebrain.gatewayUrl') || e.affectsConfiguration('forebrain.binaryPath') || e.affectsConfiguration('forebrain.autoStartGateway')) {

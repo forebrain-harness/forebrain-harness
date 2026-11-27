@@ -2,6 +2,9 @@
   <div class="wv-app">
     <header class="wv-h" data-testid="webview-header">
       <span class="wv-h-title">{{ headerTitle }}</span>
+      <!-- This conversation's own heartbeat, where the web's conversation
+           header keeps it: the recurring instruction and when it next fires. -->
+      <SessionHeartbeat v-if="sessionId" :session-id="sessionId" />
       <span class="grow" />
       <button
         type="button"
@@ -12,6 +15,36 @@
         @click="newChat"
       >
         <Plus class="size-3.5" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="wv-icon-btn"
+        :aria-label="t('chat.subagentDrawer')"
+        :title="t('chat.subagentDrawer')"
+        data-testid="header-subagents"
+        @click="openSubagentDrawer"
+      >
+        <Bot class="size-3.5" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="wv-icon-btn"
+        :aria-label="t('chat.peerDrawerTitle')"
+        :title="t('chat.peerDrawerTitle')"
+        data-testid="header-peers"
+        @click="openPeerDrawer"
+      >
+        <Users class="size-3.5" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        class="wv-icon-btn"
+        :aria-label="t('chat.workbench')"
+        :title="t('chat.workbench')"
+        data-testid="header-workbench"
+        @click="workbench.toggle()"
+      >
+        <PanelRight class="size-3.5" aria-hidden="true" />
       </button>
     </header>
     <main class="wv-main">
@@ -39,12 +72,17 @@
         :busy-notice="busyNotice"
         :view-mode="viewMode"
         :session-artifacts="sessionArtifacts"
+        :subagent-call-tasks="subagentCallTasks"
+        :now="subagentNow"
+        :active-agent-id="drawerVisible ? shownActive : ''"
         @choose="pickFromNotice"
         @copy-message="copyMessage"
         @rewind="openRewind"
         @retry-history="retryHistory"
         @focus-composer="focusComposer"
         @open-deliverable="openDeliverable"
+        @open-doc="openDocTab"
+        @open-agent="openSubagentTab"
       />
     </main>
     <!-- The session's todo checklist, above the composer: the chip in the
@@ -99,6 +137,7 @@
       :todo-total="todoTotal"
       :todo-unread="todoUnread.length"
       :todos-open="todosOpen"
+      :compact="drawerVisible"
       v-model:view-mode="viewMode"
       @send="handleSubmit"
       @stop="cancel()"
@@ -117,6 +156,7 @@
       @pick-target="pickTarget"
       @browse-folder="browseFolder"
       @toggle-todos="todosOpen = !todosOpen"
+      @open-context="workbench.openOn('context')"
       @peer-release="releaseHeldPeer"
       @peer-deny="denyHeldPeer"
       @peer-settled="settleHeldPeer"
@@ -131,14 +171,42 @@
       :seen="seenAgentActivity"
       :now="subagentNow"
       :overlay="true"
+      :doc-tabs="docTabs"
+      :active-doc="docActive"
+      :order="drawerOrder"
       @select="selectSubagentTab"
       @close-tab="closeSubagentTab"
       @open="openSubagentTab"
       @collapse="drawerOpen = false"
+      @select-doc="selectDocTab"
+      @close-doc="closeDocTab"
+      @escape-key="docActive ? closeDocTab(docActive) : (drawerOpen = false)"
     >
+      <!-- The documents a card head opened — a whole command, a whole title,
+           a whole output — in the same drawer, beside the subagents. -->
+      <template v-for="tab in docTabs">
+        <ToolDocCommand
+          v-if="tab.kind === 'command'"
+          v-show="tab.id === docActive"
+          :key="tab.id"
+          :command="tab.command ?? tab.text"
+        />
+        <ToolDocOutput
+          v-else-if="tab.kind === 'output' && outputSourceOf(tab)"
+          v-show="tab.id === docActive"
+          :key="tab.id"
+          :source="outputSourceOf(tab)!"
+        />
+        <ToolDocTitle
+          v-else-if="tab.kind === 'title'"
+          v-show="tab.id === docActive"
+          :key="tab.id"
+          :text="tab.text"
+        />
+      </template>
       <SubagentTab
         v-for="record in drawerRecords"
-        v-show="record.agentId === shownActive"
+        v-show="!docActive && record.agentId === shownActive"
         :key="record.agentId"
         :ref="(el: unknown) => setSubagentTabRef(record.agentId, el)"
         :record="record"
@@ -153,11 +221,13 @@
         @submit="onSubagentSubmit(record.agentId, $event)"
         @fold-change="onSubagentFold(record.agentId, $event)"
         @open-agent="openSubagentTab"
+        @open-doc="openDocTab"
         @stop="stopSubagent(record.agentId)"
         @pause="pauseSubagent(record.agentId)"
         @edit-last-queued="recallIntoTab(record.agentId)"
         @interrupt-run="interruptSubagentToSend(record.agentId)"
         @typed="cancelAutoContinue(record.agentId)"
+        @files-picked="(files: PickedFile[]) => onFilesPicked(files, record.agentId)"
         @dismiss-notice="subagentNotices[record.agentId] = null"
       />
     </SubagentDrawer>
@@ -172,10 +242,52 @@
       :page="peerDirectoryPage"
       :page-size="PEER_DIRECTORY_PAGE_SIZE"
       :now="subagentNow"
+      :overlay="true"
       @close="peerDrawerOpen = false"
       @release="releaseHeldPeer"
       @deny="denyHeldPeer"
       @page-change="changePeerPage"
+    />
+    <!-- The workbench: what is alive and what it spent, the context report,
+         the working directory's tree and the files this conversation changed.
+         The sidebar is narrow, so it overlays the thread rather than narrowing
+         it — the same overlay the web uses below its lg breakpoint. -->
+    <ChatWorkbench
+      v-if="workbench.open.value && !isFreshChat && !drawerVisible"
+      :records="runningRoster"
+      :loading="rosterLoading"
+      :error="rosterError"
+      :overlay="true"
+      :scope="workbenchScope"
+      :root-path="sessionInfo?.project?.root ?? ''"
+      :requested-tab="workbench.requested.value"
+      :hide-changes="notACodeConversation"
+      @requested-tab-shown="workbench.consumed()"
+      @close="workbench.close()"
+      @view="viewRoster"
+      @cancel="cancelRoster"
+      @cancel-all="cancelAll"
+      @insert-ref="insertWorkspaceRef"
+      @open-plan="openPlanDoc"
+    />
+    <!-- The folder the next conversation runs in: the same browser the web
+         opens from the pill, over the host's own directory listing. -->
+    <FolderDialog
+      v-if="folderOpen"
+      :projects="projects"
+      :initial-path="target?.root"
+      @select="onFolderPick"
+      @cancel="folderOpen = false"
+    />
+    <!-- An attached file is saved into the project before it is sent: the
+         same "save to" dialog the web asks, nothing uploads until confirmed. -->
+    <AttachSaveDialog
+      :open="attachOpen"
+      :project="attachProject"
+      :files="attachRows"
+      :initial-dir="attachDir"
+      @confirm="confirmAttach"
+      @cancel="closeAttach"
     />
     <!-- The language server the turn recommended: the card owns its own
          install poll and its goodbye, exactly as the web's does. -->
@@ -223,7 +335,7 @@
 // drawn here. What its steps own is not wired yet: the todo chip, the
 // approval gate, the plan dock, the deliverable group.
 import { computed, inject, onMounted, ref, watch } from 'vue'
-import { Plus, Sparkles } from 'lucide-vue-next'
+import { Bot, PanelRight, Plus, Sparkles, Users } from 'lucide-vue-next'
 import ComposerBar from './components/ComposerBar.vue'
 import ThreadView from './components/ThreadView.vue'
 import TodoPanel from './components/TodoPanel.vue'
@@ -233,6 +345,13 @@ import PeerDrawer from '@/components/chat/PeerDrawer.vue'
 import PlanApprovalDock from '@/components/chat/PlanApprovalDock.vue'
 import ProjectServersConsentDialog from '@/components/chat/ProjectServersConsentDialog.vue'
 import RewindDialog from '@/components/chat/RewindDialog.vue'
+import SessionHeartbeat from '@/components/chat/SessionHeartbeat.vue'
+import FolderDialog from '@/components/chat/FolderDialog.vue'
+import AttachSaveDialog from '@/components/chat/AttachSaveDialog.vue'
+import ChatWorkbench from '@/components/chat/ChatWorkbench.vue'
+import ToolDocCommand from '@/components/chat/ToolDocCommand.vue'
+import ToolDocOutput from '@/components/chat/ToolDocOutput.vue'
+import ToolDocTitle from '@/components/chat/ToolDocTitle.vue'
 import SubagentDrawer from '@/components/chat/SubagentDrawer.vue'
 import SubagentTab from '@/components/chat/SubagentTab.vue'
 import { TRANSPORT_KEY } from './transport'
@@ -241,11 +360,16 @@ import { useViewMode } from '@/composables/useViewMode'
 import { useChatSessions } from '@/composables/useChatSessions'
 import { usePendingActions } from '@/composables/usePendingActions'
 import { providePendingActions } from '@/composables/providePendingActions'
-import { getErrorMessage, forebrainApi, type ProjectRecord, type SessionModelOption, type SessionModelResponse, type WorkspaceScope } from '@/lib/api'
+import { providePeerDirectory } from '@/composables/providePeerDirectory'
+import { provideSurfaceNavigation } from '@/composables/provideSurfaceNavigation'
+import { useWorkbench } from '@/composables/useWorkbench'
+import { agentRosterConversationTarget, useAgentRoster } from '@/composables/useAgentRoster'
+import { type DocTab } from '@/composables/useDocTabs'
+import { getErrorMessage, forebrainApi, type AgentRosterRow, type ProjectRecord, type SessionModelOption, type SessionModelResponse, type WorkspaceScope } from '@/lib/api'
 import type { ArtifactView } from '@/lib/artifacts'
-import { targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
+import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { lastSessionIdValue } from '@/composables/useLastSession'
-import type { PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
+import { isAllowedAttachmentType, type PickedFile, type SubmittedAttachment } from '@/lib/composerSubmission'
 import type { BotOption } from '@/components/ForebrainPromptTextarea.vue'
 import { t } from '@/locales'
 
@@ -270,6 +394,33 @@ const {
   sessionArtifacts,
 } = stream
 const PEER_DIRECTORY_PAGE_SIZE = 20
+
+// The cards' "open the page that owns this" has no router here: another
+// conversation is this panel's own switch, and a settings page is the Web UI
+// in the person's browser, signed in by the host.
+provideSurfaceNavigation({
+  openConversation: (sid) => {
+    if (sid && sid !== sessionId.value) void switchToSession(sid)
+  },
+  openSettingsPage: (tab, query) => {
+    const params = new URLSearchParams({ tab, ...(query ?? {}) })
+    transport.openWebUi(`/settings?${params.toString()}`)
+  },
+})
+
+// The workbench column and the machine's running roster — the same two
+// composables the web's chat page runs.
+const workbench = useWorkbench()
+const {
+  records: rosterRecords,
+  loading: rosterLoading,
+  error: rosterError,
+  loadRoster,
+  cancelRoster,
+  cancelAll,
+} = useAgentRoster()
+const runningRoster = computed(() =>
+  rosterRecords.value.filter((row) => String(row.status ?? '').trim().toLowerCase() === 'running'))
 
 const queueVisible = computed(() => Boolean(
   pendingInputPreview.value.pendingSteers.length
@@ -362,10 +513,18 @@ function pickTarget(next: ProjectTarget) {
   pillInvalid.value = false
 }
 
+// ---- the folder the next conversation runs in ----
+const folderOpen = ref(false)
+
 function browseFolder() {
-  // The panel's folder picker is the host's (Step 9); the pill's own project
-  // list still covers the projects that exist.
-  void composerRef.value?.focusPill()
+  folderOpen.value = true
+}
+
+function onFolderPick(path: string) {
+  folderOpen.value = false
+  const existing = projects.value.find((p) => p.root === path)
+  target.value = targetFromFolder(path, existing)
+  pillInvalid.value = false
 }
 
 const composerRef = ref<InstanceType<typeof ComposerBar> | null>(null)
@@ -480,30 +639,96 @@ async function interruptAndSendPendingSteers() {
   await sendPendingSteersAfterInterrupt()
 }
 
-// ---- attachments: upload over the RPC, straight into the composer ----
+// ---- attachments: saved into the project, then uploaded over the RPC ----
+/** The files a paste, drop or pick handed up, waiting to be saved. */
+const attachPending = ref<PickedFile[]>([])
+const attachProject = ref<{ id: string; name: string } | null>(null)
+const attachDir = ref('')
+const attachOpen = ref(false)
+/** Which composer the files being saved belong to: a subagent's tab, or the
+ *  conversation's own when empty. */
+const attachTarget = ref('')
 let pendingAttachUpload: Promise<unknown> | null = null
-async function onFilesPicked(files: PickedFile[]) {
-  if (!files.length) return
+
+const attachRows = computed(() =>
+  attachPending.value.map((f) => ({
+    filename: f.filename,
+    size: f.file.size,
+    mediaType: f.mediaType,
+    fromClipboard: f.fromClipboard ?? false,
+  })))
+
+/**
+ * A file the user attached is saved into the project before the message is
+ * sent — the same flow the web runs: the conversation is opened first, then
+ * the "save to" dialog asks where. Nothing uploads until it is confirmed; a
+ * cancel simply drops the files.
+ */
+async function onFilesPicked(files: PickedFile[], agentId = '') {
+  const allowed = files.filter((f) => isAllowedAttachmentType(f.mediaType, f.filename))
+  if (!allowed.length) return
   const opened = await ensureSessionForSend()
   if (!opened) return
-  const upload = Promise.all(files.map(async (file) => {
-    if (!file.file) return null
-    try {
-      const result = await forebrainApi.filesUpload(file.file, opened)
-      const row: SubmittedAttachment = { fileId: result.fileId, filename: file.filename, mediaType: file.mediaType }
-      return row
-    } catch {
-      composerNotice.value = {
-        title: t('chat.fileNotAdded'),
-        detail: t('chat.uploadFailed', { name: file.filename }),
+  const project = await attachProjectFor(opened)
+  if (!project) return
+  attachTarget.value = String(agentId ?? '').trim()
+  attachPending.value = allowed
+  attachProject.value = { id: project.id, name: project.name }
+  attachDir.value = project.lastAttachDir ?? ''
+  attachOpen.value = true
+}
+
+async function attachProjectFor(session: string): Promise<{ id: string; name: string; lastAttachDir: string } | null> {
+  try {
+    const info = await forebrainApi.chatSession(session)
+    if (!info.project) return null
+    return { id: info.project.id, name: info.project.name, lastAttachDir: info.project.lastAttachDir ?? '' }
+  } catch {
+    return null
+  }
+}
+
+function closeAttach() {
+  attachOpen.value = false
+  attachPending.value = []
+  attachTarget.value = ''
+}
+
+/** Save the waiting files into dir and hand them to the composer they came
+ *  from. A send that lands before the upload finishes waits for it. */
+async function confirmAttach(dir: string) {
+  const session = sessionId.value
+  const pending = attachPending.value
+  if (!session || !pending.length) {
+    closeAttach()
+    return
+  }
+  const run = (async () => {
+    const uploaded: SubmittedAttachment[] = []
+    for (const item of pending) {
+      try {
+        const res = await forebrainApi.filesUpload(item.file, session, dir)
+        uploaded.push({ fileId: res.fileId, filename: item.filename, mediaType: item.mediaType })
+      } catch (cause) {
+        // The dialog stays open so the user can retry; nothing attached is lost.
+        composerNotice.value = {
+          title: t('chat.messageNotSent'),
+          detail: `${t('chat.uploadFailed', { name: item.filename })}\n${getErrorMessage(cause)}`,
+        }
+        return
       }
-      return null
     }
-  }))
-  pendingAttachUpload = upload
-  const uploaded = (await upload).filter((row): row is NonNullable<typeof row> => row !== null)
-  pendingAttachUpload = null
-  if (uploaded.length) composerRef.value?.addUploaded(uploaded)
+    const targetAgent = attachTarget.value
+    if (targetAgent) subagentComposer(targetAgent)?.addUploaded(uploaded)
+    else composerRef.value?.addUploaded(uploaded)
+  })()
+  pendingAttachUpload = run
+  try {
+    await run
+  } finally {
+    if (pendingAttachUpload === run) pendingAttachUpload = null
+  }
+  closeAttach()
 }
 
 async function waitForPendingAttachUpload() {
@@ -633,6 +858,9 @@ const pendingActions = usePendingActions({
   contextUsedPercent,
 })
 providePendingActions(pendingActions)
+// The peer directory the letters' sender labels read — the conversation's own
+// cards and a subagent's ask the same two questions of the same directory.
+providePeerDirectory(peerDirectory)
 
 /** The exit-plan approval parked where the input is (Step 8's dock). */
 const exitPlanPending = computed(() =>
@@ -834,7 +1062,9 @@ const conversationSubagents = computed(() => subagents.value)
 const drawerRecords = computed(() => drawerTabs.value
   .map((id) => subagents.value.find((record) => record.agentId === id))
   .filter((record): record is NonNullable<typeof record> => Boolean(record)))
-const drawerVisible = computed(() => drawerOpen.value && drawerRecords.value.length > 0 && !isFreshChat.value)
+const drawerVisible = computed(() => drawerOpen.value
+  && (drawerRecords.value.length > 0 || docTabs.value.length > 0)
+  && !isFreshChat.value)
 const shownActive = computed(() => (
   drawerRecords.value.some((record) => record.agentId === drawerActive.value)
     ? drawerActive.value
@@ -982,6 +1212,104 @@ function markAllTodosRead() {
   persistTodos()
 }
 
+// ---- the documents a card head opened (whole command / title / output) ----
+const docTabs = ref<DocTab[]>([])
+const docActive = ref('')
+/** The order tabs were opened in, across subagents and documents alike. */
+const drawerOrder = ref<string[]>([])
+
+function outputSourceOf(tab: DocTab): { sessionId: string; agentId?: string; retrieveId: number } | undefined {
+  const source = tab.source
+  if (!source?.sessionId || !source.retrieveId) return undefined
+  return source as { sessionId: string; agentId?: string; retrieveId: number }
+}
+
+/** The same content is the same tab: opening it again only brings it front. */
+function openDocTab(tab: DocTab) {
+  if (!docTabs.value.some((open) => open.id === tab.id)) docTabs.value = [...docTabs.value, tab]
+  if (!drawerOrder.value.includes(tab.id)) drawerOrder.value = [...drawerOrder.value, tab.id]
+  docActive.value = tab.id
+  drawerOpen.value = true
+}
+
+function selectDocTab(id: string) {
+  if (!docTabs.value.some((tab) => tab.id === id)) return
+  drawerOpen.value = true
+  docActive.value = id
+}
+
+function closeDocTab(id: string) {
+  const rest = docTabs.value.filter((tab) => tab.id !== id)
+  const index = docTabs.value.findIndex((tab) => tab.id === id)
+  docTabs.value = rest
+  drawerOrder.value = drawerOrder.value.filter((tab) => tab !== id)
+  if (docActive.value === id) docActive.value = rest[index]?.id ?? rest[index - 1]?.id ?? ''
+}
+
+// ---- the drawers' own openers (the header's buttons) ----
+function openSubagentDrawer() {
+  const first = subagents.value[0]?.agentId ?? ''
+  if (first) openSubagentTab(first)
+  else drawerOpen.value = true
+}
+
+function openPeerDrawer() {
+  peerDrawerOpen.value = true
+  void refreshPeerDirectory(peerDirectoryPage.value)
+}
+
+// ---- the workbench column ----
+/** Office creative work does not change the project's own files: its
+ *  workbench offers no 变更文件 tab (the same rule the web applies). */
+const notACodeConversation = computed(() => {
+  const type = String(sessionInfo.value?.projectType ?? '').trim().toLowerCase()
+  return type === 'office' || type === 'batch'
+})
+
+/** A roster row's "view": a subagent of this conversation opens in the drawer,
+ *  one from another conversation opens that conversation and then its tab. */
+const pendingRosterAgent = ref('')
+function viewRoster(row: AgentRosterRow) {
+  if (row.kind === 'subagent' && subagents.value.some((record) => record.agentId === row.id)) {
+    openSubagentTab(row.id)
+    return
+  }
+  const target = agentRosterConversationTarget(row)
+  const query = ((target ?? {}) as { query?: Record<string, string> }).query ?? {}
+  const sid = String(query.session ?? '').trim()
+  if (!sid) return
+  const agent = String(query.agent ?? '').trim()
+  if (sid === sessionId.value) {
+    if (agent) openSubagentTab(agent)
+    return
+  }
+  pendingRosterAgent.value = agent
+  void switchToSession(sid)
+}
+
+// The conversation a jump landed on loads its own subagents; the tab the jump
+// named opens as soon as that list carries it.
+watch(subagents, (records) => {
+  const agent = pendingRosterAgent.value
+  if (!agent) return
+  if (!records.some((record) => record.agentId === agent)) return
+  pendingRosterAgent.value = ''
+  openSubagentTab(agent)
+})
+
+function insertWorkspaceRef(path: string) {
+  void composerRef.value?.insertWorkspacePath?.(path)
+}
+
+// The roster is read when the workbench opens, and again after a turn ends —
+// the same two moments the web reads it.
+watch(() => workbench.open.value, (open) => {
+  if (open) void loadRoster()
+})
+watch(isStreaming, (streaming, wasStreaming) => {
+  if (wasStreaming && !streaming && workbench.open.value) void loadRoster()
+})
+
 // ---- the plan dock's eye, and the deliverable eye ----
 function openPlanDoc(plan: { path: string }) {
   transport.openPlanDoc(plan.path)
@@ -1035,10 +1363,11 @@ function openDeliverable(artifact: ArtifactView) {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  overflow: hidden;
 }
 .wv-thread-scroll {
   flex: 1;
+  min-height: 0;
 }
 .wv-empty {
   flex: 1;

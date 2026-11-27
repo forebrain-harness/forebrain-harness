@@ -2,7 +2,7 @@
   <div class="wv-composer" data-testid="webview-composer">
     <!-- The run's own state, where the terminal draws it: above the queue
          preview and the composer, gone the moment the run ends. -->
-    <RunStatusLine v-if="runLine" data-testid="run-status-line" class="wv-runline" :label="runLine.label" :reason="runLine.reason" :tail="runLine.tail" />
+    <RunStatusLine v-if="runLine" data-testid="run-status-line" class="wv-runline" :label="runLine.label" :reason="runLine.reason" :plan="runLine.plan" :tail="runLine.tail" />
     <div v-if="composerNotice" data-testid="composer-notice">
       <Alert variant="destructive">
         <CircleAlert class="size-4" />
@@ -90,12 +90,13 @@
               </button>
             </div>
             <div class="flex items-center gap-2">
-              <ContextRing v-if="contextUsedPercent != null" :percent="contextUsedPercent ?? 0" />
+              <ContextRing v-if="contextUsedPercent != null" :percent="contextUsedPercent ?? 0" @open="emit('open-context')" />
               <ModelChip
                 :session-id="sessionId ?? ''"
                 :selection="sessionModelData"
                 :options="sessionModelData?.options ?? []"
                 :disabled="composerLocked || !sessionModelData"
+                :compact="compact"
                 @saved="emit('model-saved')"
                 @pick="(option: SessionModelOption) => emit('pick-model', option)"
               />
@@ -211,6 +212,8 @@ const props = withDefaults(defineProps<{
   todoTotal?: number
   todoUnread?: number
   todosOpen?: boolean
+  /** A drawer is open beside the thread: the chips read compact. */
+  compact?: boolean
 }>(), {
   autoContinue: null,
   heldPeer: null,
@@ -218,6 +221,7 @@ const props = withDefaults(defineProps<{
   todoTotal: 0,
   todoUnread: 0,
   todosOpen: false,
+  compact: false,
 })
 
 const emit = defineEmits<{
@@ -238,6 +242,7 @@ const emit = defineEmits<{
   (e: 'pick-target', target: ProjectTarget): void
   (e: 'browse-folder'): void
   (e: 'toggle-todos'): void
+  (e: 'open-context'): void
   (e: 'peer-release', held: PeerHeldRow): void
   (e: 'peer-deny', held: PeerHeldRow): void
   (e: 'peer-settled', held: PeerHeldRow): void
@@ -300,6 +305,9 @@ defineExpose({
     promptRef.value?.addUploaded(attachments),
   focus: () => promptRef.value?.focus(),
   focusPill: () => pillRef.value?.focus(),
+  /** A workspace path the workbench's tree handed over: the shared engine
+   *  attaches an image and names anything else, exactly as the @ menu does. */
+  insertWorkspacePath: (path: string) => promptRef.value?.insertWorkspacePath(path),
   /** What a new chat's approval preset was set to, so its first send can
    *  write it onto the conversation it opens. Taking it clears the draft. */
   takeDraftPreset: () => approvalPickerRef.value?.takeDraft() ?? null,

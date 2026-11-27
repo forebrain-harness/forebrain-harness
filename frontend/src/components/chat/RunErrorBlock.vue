@@ -38,9 +38,9 @@
  * there is no conversation to narrow to, so the card keeps just its words.
  */
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
 import { CircleAlert, List } from 'lucide-vue-next'
 import { formatProviderError, type ProviderErrorDetail } from '@/lib/providerError'
+import { useSurfaceNavigation } from '@/composables/provideSurfaceNavigation'
 import { useI18n } from '@/locales'
 
 const props = defineProps<{
@@ -55,7 +55,7 @@ const props = defineProps<{
 }>()
 
 const { locale, t } = useI18n()
-const router = useRouter()
+const navigation = useSurfaceNavigation()
 
 // The classified fact is a second line under the runtime's own sentence, not a
 // replacement for it: the reader gets both what happened and what it means.
@@ -74,14 +74,10 @@ const window = computed(() => {
 })
 
 function openLogs(): void {
-  void router.push({
-    path: '/settings',
-    query: {
-      tab: 'logs',
-      session: props.session ?? '',
-      from: new Date(window.value.from).toISOString(),
-      to: new Date(window.value.to).toISOString(),
-    },
+  navigation.openSettingsPage('logs', {
+    session: props.session ?? '',
+    from: new Date(window.value.from).toISOString(),
+    to: new Date(window.value.to).toISOString(),
   })
 }
 </script>

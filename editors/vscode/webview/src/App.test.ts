@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { enableAutoUnmount, mount } from '@vue/test-utils'
 import App from './App.vue'
 import ComposerBar from './components/ComposerBar.vue'
 import { installWebviewTransport, TRANSPORT_KEY, type WebviewTransport } from './transport'
 import { setForebrainChatSocketTransport, setForebrainFetchTransport, setForebrainHttpAdapter } from '@/lib/api'
+import { useWorkbench } from '@/composables/useWorkbench'
 
 /**
  * The workbench against a scripted host: HTTP answers routed by path, chat
@@ -53,6 +54,11 @@ const fakeHost = {
   },
 }
 
+// The workbench's open state is the module's own, so a wrapper left mounted
+// from an earlier test would react to the next test's open and consume its
+// requested tab first. Every wrapper goes down with its test.
+enableAutoUnmount(afterEach)
+
 let transport: WebviewTransport
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0))
@@ -68,6 +74,13 @@ beforeEach(() => {
   routes.length = 0
   socketSeq = 0
   fakeHost.posted.length = 0
+  // The workbench remembers the tab a conversation last read in localStorage,
+  // and its open/requested state is the module's own (one tab session); one
+  // test's memory is not the next test's starting state.
+  localStorage.clear()
+  const bench = useWorkbench()
+  bench.close()
+  bench.consumed()
   routes.push(
     // The messages read answers an array, the list routes answer pages.
     { prefix: '/api/chat/sessions/s-9/messages', body: [] },
@@ -251,6 +264,183 @@ describe('the webview chat workbench', () => {
     await wrapper.findComponent({ name: 'TodoPanel' }).vm.$emit('read-all')
     await settle()
     expect(wrapper.findComponent({ name: 'TodoPanel' }).props('unread')).toEqual([])
+  })
+})
+
+/**
+ * The faces the panel owed the web's conversation page (owner 2026-11-27:
+ * everything that is not a background batch project gets filled in). Each one
+ * is the web's own component, driven here over the same transport.
+ */
+describe('the webview chat workbench — the faces it owed', () => {
+  const sessionRoute = { prefix: '/api/chat/sessions/s-9', body: { id: 's-9', title: '面板', project: { id: 'p-1', name: 'repo', root: '/ws/repo', lastAttachDir: 'shots' } } }
+
+  it('opens the peer drawer and the workbench from the header, and the context ring lands on the context tab', async () => {
+    routes.push({ prefix: '/api/agents/roster', body: { records: [] } })
+    const wrapper = mountApp()
+    await settle()
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+
+    expect(wrapper.findComponent({ name: 'PeerDrawer' }).exists()).toBe(false)
+    await wrapper.get('[data-testid="header-peers"]').trigger('click')
+    await settle()
+    expect(wrapper.findComponent({ name: 'PeerDrawer' }).exists(), 'the header opens the peers').toBe(true)
+    await wrapper.findComponent({ name: 'PeerDrawer' }).vm.$emit('close')
+    await settle()
+
+    expect(wrapper.findComponent({ name: 'ChatWorkbench' }).exists()).toBe(false)
+    await wrapper.get('[data-testid="header-workbench"]').trigger('click')
+    await settle()
+    const bench = wrapper.findComponent({ name: 'ChatWorkbench' })
+    expect(bench.exists(), 'the header opens the workbench').toBe(true)
+    expect(bench.props('overlay'), 'the narrow sidebar overlays rather than narrows').toBe(true)
+
+    void wrapper
+  })
+
+  it('the context ring opens the workbench on the context tab, whatever was read last', async () => {
+    routes.push({ prefix: '/api/agents/roster', body: { records: [] } })
+    const wrapper = mountApp()
+    await settle()
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+    expect(wrapper.findComponent({ name: 'ChatWorkbench' }).exists()).toBe(false)
+
+    await wrapper.findComponent(ComposerBar).vm.$emit('open-context')
+    await settle()
+    const bench = wrapper.findComponent({ name: 'ChatWorkbench' })
+    expect(bench.exists(), 'the ring opens the workbench').toBe(true)
+    expect(wrapper.get('[data-testid="bench-tab-context"]').attributes('aria-selected'), 'it lands on the context').toBe('true')
+  })
+
+  it('carries this conversation’s heartbeat in the header, read from the gateway', async () => {
+    routes.push({
+      prefix: '/api/heartbeats',
+      body: { records: [{ sessionId: 's-9', intervalSeconds: 900, prompt: '看一眼进度', paused: false }] },
+    })
+    const wrapper = mountApp()
+    await settle()
+    expect(wrapper.findComponent({ name: 'SessionHeartbeat' }).exists(), 'a fresh chat has no heartbeat of its own').toBe(false)
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+
+    const beat = wrapper.findComponent({ name: 'SessionHeartbeat' })
+    expect(beat.exists(), 'the conversation’s own heartbeat sits in its header').toBe(true)
+    expect(beat.props('sessionId')).toBe('s-9')
+    expect(lastFrame<HttpFrame>((frame) => String(frame.params?.path ?? '').startsWith('/api/heartbeats')), 'the rows come over the transport').toBeTruthy()
+  })
+
+  it('browses the host’s folders from the pill and takes the pick as the target', async () => {
+    routes.push({
+      prefix: '/api/host/dirs',
+      body: { path: '/ws', parent: '/', ancestors: ['/ws', '/'], places: [], entries: [{ name: 'repo', mtime: 1, blocked: false, project: { id: 'p-1', name: 'repo' } }] },
+    })
+    const wrapper = mountApp()
+    await settle()
+    expect(wrapper.findComponent({ name: 'FolderDialog' }).exists()).toBe(false)
+
+    await wrapper.findComponent(ComposerBar).vm.$emit('browse-folder')
+    await settle()
+    const dialog = wrapper.findComponent({ name: 'FolderDialog' })
+    expect(dialog.exists(), 'the pill’s browse opens the same folder browser the web uses').toBe(true)
+
+    await dialog.vm.$emit('select', '/ws/repo')
+    await settle()
+    expect(wrapper.findComponent(ComposerBar).props('target')).toMatchObject({ root: '/ws/repo' })
+    expect(wrapper.findComponent({ name: 'FolderDialog' }).exists()).toBe(false)
+  })
+
+  it('saves an attached file into the project before it uploads, and only on confirm', async () => {
+    routes.push(sessionRoute, { prefix: '/api/v1/projects/p-1/dirs', body: { path: '', entries: [] } }, { prefix: '/api/files', body: { fileId: 'f-1' } })
+    const wrapper = mountApp()
+    await settle()
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+
+    const file = new File(['bytes'], 'paste.png', { type: 'image/png' })
+    await wrapper.findComponent(ComposerBar).vm.$emit('files-picked', [{ file, filename: 'paste.png', mediaType: 'image/png', fromClipboard: true }])
+    await settle()
+
+    const dialog = wrapper.findComponent({ name: 'AttachSaveDialog' })
+    expect(dialog.props('open'), 'the save-to dialog asks before anything uploads').toBe(true)
+    expect(dialog.props('initialDir'), 'it opens on the project’s last attach directory').toBe('shots')
+    expect(lastFrame<HttpFrame>((frame) => String(frame.params?.path ?? '') === '/api/files'), 'nothing uploaded yet').toBeFalsy()
+
+    await dialog.vm.$emit('confirm', 'shots')
+    await settle()
+    const upload = lastFrame<HttpFrame>((frame) => String(frame.params?.path ?? '') === '/api/files')
+    expect(upload, 'the confirm uploads over the transport').toBeTruthy()
+    expect(upload!.params.method.toUpperCase()).toBe('POST')
+    const body = (upload!.params as { body?: unknown }).body
+    const text = body instanceof ArrayBuffer ? new TextDecoder().decode(body) : String(body ?? '')
+    expect(text, 'the chosen directory rides the upload').toContain('shots')
+    expect(text).toContain('paste.png')
+    expect(wrapper.findComponent({ name: 'AttachSaveDialog' }).props('open')).toBe(false)
+  })
+
+  it('opens a whole command as a document tab of the drawer, and closes it again', async () => {
+    const wrapper = mountApp()
+    await settle()
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+
+    const tab = { id: 'doc:command:abc', kind: 'command' as const, label: '命令 ls', text: 'ls -la', command: 'ls -la' }
+    await wrapper.findComponent({ name: 'ThreadView' }).vm.$emit('open-doc', tab)
+    await settle()
+
+    const drawer = wrapper.findComponent({ name: 'SubagentDrawer' })
+    expect(drawer.exists(), 'a document opens the drawer even with no subagent tab').toBe(true)
+    expect(drawer.props('docTabs')).toEqual([tab])
+    expect(drawer.props('activeDoc')).toBe('doc:command:abc')
+    expect(wrapper.findComponent({ name: 'ToolDocCommand' }).exists(), 'the whole command is the tab’s body').toBe(true)
+
+    await drawer.vm.$emit('close-doc', 'doc:command:abc')
+    await settle()
+    expect(wrapper.findComponent({ name: 'SubagentDrawer' }).exists()).toBe(false)
+  })
+
+  it('opens the subagent a call card names, from the thread', async () => {
+    const wrapper = mountApp()
+    await settle()
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+    routes.push({ prefix: '/api/chat/sessions/s-9/subagents/agent-1/budget', body: { percentLeft: 70 } })
+    await wrapper.findComponent({ name: 'ThreadView' }).vm.$emit('open-agent', 'agent-1')
+    await settle()
+    const drawer = wrapper.findComponent({ name: 'SubagentDrawer' })
+    expect(drawer.exists(), 'a call card opens that subagent’s tab').toBe(true)
+    expect(drawer.props('active')).toBe('agent-1')
+    expect(wrapper.findComponent({ name: 'ThreadView' }).props('activeAgentId'), 'the thread marks the row as here').toBe('agent-1')
+  })
+
+  it('sends a settings page to the host’s browser, not to a router that is not here', async () => {
+    routes.push(sessionRoute)
+    const wrapper = mountApp()
+    await settle()
+    transport.onHostMessage({ type: 'openSession', sessionId: 's-9' })
+    await settle()
+
+    // A failed turn draws the same error card the web draws; its log button is
+    // the settings page the panel has no native surface for.
+    await wrapper.findComponent(ComposerBar).vm.$emit('send', { text: 'go' })
+    await settle()
+    const start = lastFrame<WsSendFrame>((frame) => frame.method === 'ws.send')
+    const requestId = (JSON.parse(start!.params.data) as { request_id: string }).request_id
+    transport.onHostMessage({
+      type: 'wsFrame',
+      socket: 2,
+      frames: [JSON.stringify({ op: 'run_error', request_id: requestId, runId: 'r-1', error: '网关断了' })],
+    })
+    await settle()
+    await wrapper.get('[data-testid="run-error-logs"]').trigger('click')
+    await settle()
+
+    const frame = lastFrame<{ type?: string; method?: string; params?: { path?: string } }>(
+      (f) => f.method === 'openWebUi',
+    )
+    expect(frame, 'the page goes to the host, not to a router').toBeTruthy()
+    expect(frame!.params!.path).toMatch(/^\/settings\?tab=logs&session=s-9&from=/)
   })
 })
 

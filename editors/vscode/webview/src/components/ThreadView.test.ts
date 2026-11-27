@@ -26,6 +26,8 @@ const base = {
   scope: {},
   viewMode: 'default' as const,
   sessionArtifacts: [] as import('@/lib/artifacts').ArtifactView[],
+  subagentCallTasks: new Map<string, Map<number, import('@/composables/useChatStream').SubagentCallTaskLive>>(),
+  now: 0,
 }
 
 function threadOf(...messages: ChatMessage[]) {

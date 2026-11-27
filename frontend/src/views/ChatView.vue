@@ -945,7 +945,7 @@ import { usePrimaryAgents } from '@/composables/usePrimaryAgents'
 import { getErrorMessage, forebrainApi, type AgentRosterRow, type PeerHeldRow, type ProjectRecord, type ProjectServerPendingRow, type RewindPreview, type SessionContextDebug, type SessionModelOption, type SessionModelResponse, type SlashCommandRecord, type WorkspaceScope } from '@/lib/api'
 import { targetFromFolder, targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { formatProviderError } from '@/lib/providerError'
-import type { ComposerSubmission, PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
+import { isAllowedAttachmentType, type ComposerSubmission, type PickedFile, type SubmittedAttachment } from '@/lib/composerSubmission'
 import AttachSaveDialog, { type AttachFileRow } from '@/components/chat/AttachSaveDialog.vue'
 import tip from '@/directives/tip'
 import { sessionTitleFromContent } from '@/lib/sessionTitle'
@@ -2936,12 +2936,6 @@ watch(sessionId, (sid) => {
   closePeerDrawer()
   if (sid) void refreshPeerDirectory()
 }, { immediate: true })
-
-function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
-  const t = (mediaType ?? '').toLowerCase()
-  const name = (filename ?? '').toLowerCase()
-  return t.startsWith('image/') || t === 'application/pdf' || /\.(png|jpe?g|gif|webp|pdf)$/i.test(name)
-}
 
 /**
  * Sends what the composer submitted in a subagent's own view to that subagent.

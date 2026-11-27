@@ -50,6 +50,15 @@ export interface PickedFile {
   fromClipboard?: boolean
 }
 
+/** What a message may carry: an image or a PDF, by media type or by extension
+ *  (a paste often names no type). Every surface that takes a pick filters with
+ *  this one rule. */
+export function isAllowedAttachmentType(mediaType: string, filename: string): boolean {
+  const t = (mediaType ?? '').toLowerCase()
+  const name = (filename ?? '').toLowerCase()
+  return t.startsWith('image/') || t === 'application/pdf' || /\.(png|jpe?g|gif|webp|pdf)$/i.test(name)
+}
+
 export interface UploadedSubmission {
   submission: ComposerSubmission
   /** Picked files that were not uploaded, in the order they were picked. */

@@ -60,6 +60,7 @@ function makeHarness(overrides: Partial<WebviewRpcDeps> = {}): Harness {
     reportActiveSession: async () => {},
     openDeliverable: async () => {},
     openPlanDoc: async () => {},
+    openWebUi: async () => {},
     openFileRange: async () => {},
     socketFactory: () => {
       throw new Error('the tests inject their own sockets');
@@ -331,6 +332,30 @@ test('openFileRange reuses the host opener behind the shape check', async () => 
 
   await rpc.handleRpc(13, 'openFileRange', { path: 'pkg/a.go', startLine: 7, endLine: 3 });
   assert.equal(replies(posted)[1].ok, false, 'an inverted range is refused before anything opens');
+});
+
+test('openWebUi takes a same-origin page to the browser, and refuses anything that would leave the origin', async () => {
+  const opened: string[] = [];
+  const { rpc, posted } = makeHarness({
+    openWebUi: async (path) => {
+      opened.push(path);
+    },
+  });
+  await rpc.handleRpc(40, 'openWebUi', { path: '/settings?tab=logs&session=s-9' });
+  assert.deepEqual(opened, ['/settings?tab=logs&session=s-9']);
+  assert.equal(replies(posted)[0].ok, true);
+
+  // The sign-in redirect the Web UI enforces is the same rule: a path of this
+  // origin only. A protocol-relative or absolute URL would send the browser —
+  // and the token in the fragment — somewhere else.
+  await rpc.handleRpc(41, 'openWebUi', { path: '//evil.example/settings' });
+  await rpc.handleRpc(42, 'openWebUi', { path: 'https://evil.example/settings' });
+  await rpc.handleRpc(43, 'openWebUi', { path: 'settings' });
+  await rpc.handleRpc(44, 'openWebUi', {});
+  for (const id of [41, 42, 43, 44]) {
+    assert.equal(replies(posted).find((r) => r.rpc === id)?.ok, false, `rpc ${id} is refused`);
+  }
+  assert.deepEqual(opened, ['/settings?tab=logs&session=s-9'], 'nothing else reached the opener');
 });
 
 test('trust branch one: inside the workspace writes the record and resolves yes', async () => {

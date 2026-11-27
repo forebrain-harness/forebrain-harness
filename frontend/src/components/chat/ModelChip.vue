@@ -111,10 +111,10 @@
  */
 import { computed, defineAsyncComponent, onMounted, onUnmounted, ref } from 'vue'
 import { Check, ChevronDown, Cpu, Pencil, Search, SlidersHorizontal } from 'lucide-vue-next'
-import { useRouter } from 'vue-router'
 
 import ModelSignature from '@/components/models/ModelSignature.vue'
 import { forebrainApi, getErrorMessage, type SessionModelOption, type SessionModelSelection } from '@/lib/api'
+import { useSurfaceNavigation } from '@/composables/provideSurfaceNavigation'
 import { useI18n } from '@/locales'
 
 // The drawer carries CodeMirror through its params editor: it loads when the
@@ -137,7 +137,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const router = useRouter()
+const navigation = useSurfaceNavigation()
 const open = ref(false)
 const switching = ref(false)
 const error = ref('')
@@ -260,7 +260,7 @@ function onModelAdded(): void {
 
 function manage(): void {
   open.value = false
-  void router.push({ path: '/settings', query: { tab: 'models' } })
+  navigation.openSettingsPage('models')
 }
 
 function onDocPointerDown(event: PointerEvent) {

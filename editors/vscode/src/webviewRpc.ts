@@ -75,6 +75,9 @@ export interface WebviewRpcDeps {
   readonly openDeliverable: (path: string) => Promise<void>;
   /** Opens the plan document in the editor area. */
   readonly openPlanDoc: (path: string) => Promise<void>;
+  /** Opens one page of the gateway's own Web UI in the person's browser —
+   *  the settings pages the panel has no native surface for (logs, models). */
+  readonly openWebUi: (path: string) => Promise<void>;
   /** The proxied gateway call's ceiling; the default is 60s and the tests
    *  shrink it. */
   readonly httpTimeoutMs?: number;
@@ -186,6 +189,8 @@ export class WebviewRpc {
         return this.deliverable(params);
       case 'openPlanDoc':
         return this.planDoc(params);
+      case 'openWebUi':
+        return this.webUi(params);
       case 'trust.ask':
         return this.askTrust(params);
       case 'openFileRange':
@@ -354,6 +359,19 @@ export class WebviewRpc {
     const path = String((params as { path?: unknown }).path ?? '').trim();
     if (!path) throw new Error('openPlanDoc: a path is required');
     return this.deps.openPlanDoc(path);
+  }
+
+  /**
+   * A settings page the panel has no native surface for. Only a same-origin
+   * path is taken — the same rule the Web UI's own sign-in redirect enforces
+   * (`/`-prefixed, never `//`) — so the browser is never sent to another host
+   * with this install's token in the fragment.
+   */
+  private webUi(params: unknown): Promise<void> {
+    if (typeof params !== 'object' || params === null) throw new Error('openWebUi: params required');
+    const path = String((params as { path?: unknown }).path ?? '').trim();
+    if (!path.startsWith('/') || path.startsWith('//')) throw new Error('openWebUi: a same-origin path is required');
+    return this.deps.openWebUi(path);
   }
 
   /**

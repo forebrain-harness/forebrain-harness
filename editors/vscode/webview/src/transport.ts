@@ -276,6 +276,12 @@ export class WebviewTransport {
     void this.request('openPlanDoc', { path })
   }
 
+  /** A settings page the panel has no native surface for (logs, models): the
+   *  host opens it in the person's browser, signed in. Fire and forget. */
+  openWebUi(path: string): void {
+    void this.request('openWebUi', { path })
+  }
+
   /** The host pushes the editor theme; dark is the one class the web app's
    *  stylesheet answers to (main.css `html.dark`, the frozen prototype's family). */
   private applyTheme(frame: { dark?: unknown }): void {

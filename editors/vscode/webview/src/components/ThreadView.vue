@@ -1,5 +1,9 @@
 <template>
-  <div class="wv-thread" data-testid="webview-thread">
+  <!-- The thread follows the turn the way the web's does: the same
+       stick-to-bottom conversation, and the same way back to the latest line
+       once the reader has scrolled away from it. -->
+  <Conversation class="wv-thread" :aria-label="t('chat.threadAria')" data-testid="webview-thread">
+    <ConversationContent class="wv-thread-col">
     <!-- The history the gateway still owes: a quiet pulse, and its refusal
          with the same way out the web gives — try again. -->
     <div v-if="historyLoading" class="wv-thread-pulse" data-testid="thread-history-loading" aria-label="…" />
@@ -53,6 +57,8 @@
           :tone="msg.peerTone"
           :body="msg.peerBody"
           :content="msg.content"
+          :kind="peerKindOf(peerDirectory, msg.peerFromName)"
+          :same-tree="peerSameTreeOf(peerDirectory, msg.peerFromName)"
           :created-at="msg.createdAt"
         />
         <PeerDeliveryCard v-else-if="msg.role === 'user' && msg.origin === 'peer_status'" :receipts="msg.peerReceipts ?? []" />
@@ -81,21 +87,35 @@
                         :scope="scope"
                         :default-open="false"
                         :pending-action="gatePendingOf(msg, block.step.stepId)"
+                        @open-doc="(tab: DocTab) => emit('open-doc', tab)"
+                        @open-agent="(agentId: string) => emit('open-agent', agentId)"
                       />
                     </ActivityStep>
                     <ActivityStep v-else-if="block.kind === 'tool'" node="subagent">
-                      <SubagentCallCard :step="block.step" />
+                      <SubagentCallCard
+                        :step="block.step"
+                        :live="subagentCallTasks.get(block.step.stepId)"
+                        :now="now"
+                        :active-agent-id="activeAgentId"
+                        @open="(agentId: string) => emit('open-agent', agentId)"
+                      />
                     </ActivityStep>
                     <ActivityStep v-else-if="block.kind === 'subagent'" node="subagent">
-                      <SubagentCallCard :step="block.step" />
+                      <SubagentCallCard
+                        :step="block.step"
+                        :live="subagentCallTasks.get(block.stepId)"
+                        :now="now"
+                        :active-agent-id="activeAgentId"
+                        @open="(agentId: string) => emit('open-agent', agentId)"
+                      />
                     </ActivityStep>
                     <ActivityStep v-else-if="block.kind === 'approval'" :node="null">
-                      <ApprovalCard :block="block" />
+                      <ApprovalCard :block="block" @open-agent="(agentId: string) => emit('open-agent', agentId)" />
                     </ActivityStep>
                   </template>
                 </ActivityLine>
                 <CompactionCard v-else-if="run.item.kind === 'compaction'" :data="run.item.compaction" />
-                <GoalLine v-else-if="run.item.kind === 'goal'" :goal="run.item.goal" />
+                <GoalLine v-else-if="run.item.kind === 'goal'" :goal="run.item.goal" @open-check="(agentId: string) => emit('open-agent', agentId)" />
                 <RunErrorBlock
                   v-else-if="run.item.kind === 'error'"
                   :text="run.item.text"
@@ -183,6 +203,7 @@
     <ApprovalCard
       :anchored-action-ids="anchoredActionIds"
       @focus-composer="emit('focus-composer')"
+      @open-agent="(agentId: string) => emit('open-agent', agentId)"
     />
     <!-- A send the gateway refused because the conversation runs somewhere
          else: the thread says why, the words wait in the composer. -->
@@ -195,7 +216,9 @@
       <AlertTitle>{{ t('chat.requestFailed') }}</AlertTitle>
       <AlertDescription class="whitespace-pre-line">{{ error }}</AlertDescription>
     </Alert>
-  </div>
+    </ConversationContent>
+    <ConversationScrollButton :label="t('chat.scrollToLatest')" />
+  </Conversation>
 </template>
 
 <script setup lang="ts">
@@ -208,6 +231,7 @@ import { computed } from 'vue'
 import { CircleAlert, Copy, History, ImageOff } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Message, MessageContent, MessageResponse } from '@repo/elements/message'
+import { Conversation, ConversationContent, ConversationScrollButton } from '@repo/elements/conversation'
 import ActivityLine from '@/components/chat/ActivityLine.vue'
 import ActivityStep from '@/components/chat/ActivityStep.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
@@ -239,8 +263,11 @@ import {
   timelineBlockKey,
   workedLineOf,
   type ChatMessage,
+  type SubagentCallTaskLive,
   type TimelineBlock,
 } from '@/composables/useChatStream'
+import type { DocTab } from '@/composables/useDocTabs'
+import { injectPeerDirectory, peerKindOf, peerSameTreeOf } from '@/composables/providePeerDirectory'
 import { blockOnActivityLine, groupActivityRuns } from '@/lib/activityRuns'
 import { blockVisibleIn } from '@/lib/viewMode'
 import { formatProviderError } from '@/lib/providerError'
@@ -264,6 +291,12 @@ const props = defineProps<{
   viewMode: ViewMode
   /** This conversation's delivered files, as the gateway listed them. */
   sessionArtifacts: ArtifactView[]
+  /** The live task bindings of the subagent calls on the line. */
+  subagentCallTasks: ReadonlyMap<string, ReadonlyMap<number, SubagentCallTaskLive>>
+  /** The stream's shared clock, for a running call's elapsed. */
+  now: number
+  /** The subagent the drawer has in front, so its row reads as here. */
+  activeAgentId?: string
 }>()
 
 const emit = defineEmits<{
@@ -273,7 +306,12 @@ const emit = defineEmits<{
   (e: 'retry-history'): void
   (e: 'focus-composer'): void
   (e: 'open-deliverable', artifact: ArtifactView): void
+  (e: 'open-doc', tab: DocTab): void
+  (e: 'open-agent', agentId: string): void
 }>()
+
+// The sender labels a letter carries come from the conversation's directory.
+const peerDirectory = injectPeerDirectory()
 
 const drawnBlocks = (blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> => {
   return (blocks ?? []).filter((block) => blockVisibleIn(props.viewMode, block.kind)
@@ -416,11 +454,13 @@ const busyNoticeText = computed(() =>
 
 <style scoped>
 .wv-thread {
+  min-height: 0;
+}
+.wv-thread-col {
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 12px 14px 8px;
-  min-height: 0;
 }
 .wv-thread-list {
   display: flex;
