@@ -125,8 +125,23 @@ export class Deliverables {
         await vscode.env.openExternal(uri);
         return;
       default:
+        // A code file the agent changed: its own diff editor beside the SCM
+        // entry — unchanged regions collapse there by default — and the
+        // source itself in front. No git, nothing changed, or the command
+        // missing just means the plain editor, which is still the file.
+        try {
+          await vscode.commands.executeCommand('git.openChange', uri);
+        } catch {
+          // fall through to the plain editor
+        }
         await vscode.window.showTextDocument(uri, { preview: false });
     }
+  }
+
+  /** The thread's deliverable eye: open one delivered path by its kind. The
+   *  outside-the-workspace refusal is the same gate every route here uses. */
+  async openArtifact(path: string): Promise<void> {
+    await this.open(path);
   }
 
   /**

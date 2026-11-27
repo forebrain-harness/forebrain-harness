@@ -264,6 +264,18 @@ export class WebviewTransport {
     void this.request('reportActiveSession', { sessionId })
   }
 
+  /** The deliverable eye: the host opens the file by its kind — code in its
+   *  diff and editor, non-code to the OS. Fire and forget. */
+  openDeliverable(path: string): void {
+    void this.request('openDeliverable', { path })
+  }
+
+  /** The plan card's eye: the plan .md opens in the editor area. Fire and
+   *  forget. */
+  openPlanDoc(path: string): void {
+    void this.request('openPlanDoc', { path })
+  }
+
   /** The host pushes the editor theme; dark is the one class the web app's
    *  stylesheet answers to (main.css `html.dark`, the frozen prototype's family). */
   private applyTheme(frame: { dark?: unknown }): void {

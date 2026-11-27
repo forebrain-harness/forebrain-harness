@@ -10,6 +10,18 @@
         <AlertDescription class="whitespace-pre-line">{{ composerNoticeDetail }}</AlertDescription>
       </Alert>
     </div>
+    <!-- A peer message waiting for the person: the one thing above the
+         composer that is a question rather than a notice. -->
+    <PeerHeldBanner
+      v-if="heldPeer"
+      :held="heldPeer"
+      @release="(row: PeerHeldRow) => emit('peer-release', row)"
+      @deny="(row: PeerHeldRow) => emit('peer-deny', row)"
+      @settled="(row: PeerHeldRow) => emit('peer-settled', row)"
+    />
+    <!-- A spent usage limit the runtime will clear on its own: the wait is
+         said, and typing in the composer cancels it. -->
+    <AutoContinueBanner :state="autoContinue" @cancel="emit('escape')" />
     <div class="wv-composer-relative">
       <PendingInputQueuePopover
         :preview="pendingInputPreview"
@@ -59,6 +71,23 @@
               <ModeChip :mode="mode" :disabled="isStreaming || composerLocked" @select="(next: string) => emit('select-mode', next)" />
               <ApprovalPresetPicker ref="approvalPickerRef" :session-id="sessionId" />
               <ViewModeChip v-model="viewMode" />
+              <!-- The session's todos, toggled in place: the panel's own
+                   checklist, not a native tree. An unacknowledged update
+                   hangs an unread badge on the chip. -->
+              <button
+                v-if="todoTotal > 0"
+                type="button"
+                class="wv-todo-chip"
+                :class="{ 'wv-todo-chip--on': todosOpen }"
+                data-testid="todos-toggle"
+                :aria-expanded="todosOpen"
+                aria-controls="forebrain-todos"
+                :aria-label="todoUnread ? `待办，${todoUnread} 项未读` : '待办'"
+                @click="emit('toggle-todos')"
+              >
+                待办<span class="wv-todo-chip-n">{{ todoCountText }}</span>
+                <span v-if="todoUnread" class="wv-todo-chip-badge" data-testid="todos-badge">{{ todoUnread }}</span>
+              </button>
             </div>
             <div class="flex items-center gap-2">
               <ContextRing v-if="contextUsedPercent != null" :percent="contextUsedPercent ?? 0" />
@@ -127,7 +156,11 @@ import {
   type RuntimeStatus,
 } from '@/composables/useChatStream'
 import ApprovalPresetPicker from '@/components/chat/ApprovalPresetPicker.vue'
+import AutoContinueBanner from '@/components/chat/AutoContinueBanner.vue'
 import ComposerPlusMenu from '@/components/chat/ComposerPlusMenu.vue'
+import PeerHeldBanner from '@/components/chat/PeerHeldBanner.vue'
+import type { PeerHeldRow } from '@/lib/api'
+import type { AutoContinueState } from '@/lib/autoContinue'
 import ContextRing from '@/components/chat/ContextRing.vue'
 import EffortChip from '@/components/chat/EffortChip.vue'
 import ModeChip from '@/components/chat/ModeChip.vue'
@@ -145,7 +178,7 @@ import { useI18n, type I18nKey } from '@/locales'
 
 const { t } = useI18n()
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   sessionId: string | null
   mode: string
   isStreaming: boolean
@@ -169,7 +202,23 @@ const props = defineProps<{
   target: ProjectTarget | null
   pillInvalid: boolean
   runtimeStatus: RuntimeStatus
-}>()
+  /** The usage-limit continuation the composer's typing cancels. */
+  autoContinue?: AutoContinueState | null
+  /** The oldest peer letter waiting to be released, if one is. */
+  heldPeer?: PeerHeldRow | null
+  /** The session's todo chip: the counts and the unacknowledged updates. */
+  todoCountText?: string
+  todoTotal?: number
+  todoUnread?: number
+  todosOpen?: boolean
+}>(), {
+  autoContinue: null,
+  heldPeer: null,
+  todoCountText: '0/0',
+  todoTotal: 0,
+  todoUnread: 0,
+  todosOpen: false,
+})
 
 const emit = defineEmits<{
   (e: 'send', message: { text: string }): void
@@ -188,6 +237,10 @@ const emit = defineEmits<{
   (e: 'insert-plus', text: string): void
   (e: 'pick-target', target: ProjectTarget): void
   (e: 'browse-folder'): void
+  (e: 'toggle-todos'): void
+  (e: 'peer-release', held: PeerHeldRow): void
+  (e: 'peer-deny', held: PeerHeldRow): void
+  (e: 'peer-settled', held: PeerHeldRow): void
 }>()
 
 const promptRef = ref<InstanceType<typeof ForebrainPromptTextarea> | null>(null)
@@ -297,5 +350,47 @@ defineExpose({
 .wv-composer-locked {
   opacity: 0.6;
   pointer-events: none;
+}
+.wv-todo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--forebrain-divider);
+  border-radius: 999px;
+  background: var(--forebrain-surface);
+  color: var(--forebrain-text-2);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+  position: relative;
+}
+.wv-todo-chip--on {
+  border-color: var(--forebrain-brand-1);
+  color: var(--forebrain-brand-1);
+}
+.wv-todo-chip-n {
+  font-family: var(--forebrain-mono-font);
+  font-size: 10px;
+}
+.wv-todo-chip-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 14px;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--forebrain-brand-1);
+  color: var(--forebrain-on-brand);
+  font-size: 9px;
+  line-height: 14px;
+  text-align: center;
+  padding: 0 3px;
+  animation: wv-badge-pulse 1.6s ease-in-out infinite;
+}
+@keyframes wv-badge-pulse {
+  50% { transform: scale(1.12); opacity: 0.85; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wv-todo-chip-badge { animation: none; }
 }
 </style>

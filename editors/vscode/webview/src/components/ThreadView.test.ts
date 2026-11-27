@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computed } from 'vue'
 import { mount } from '@vue/test-utils'
 import ThreadView from './ThreadView.vue'
 import ApprovalCard from '@/components/chat/ApprovalCard.vue'
@@ -10,6 +11,10 @@ import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
 import ToolCallCard from '@/components/chat/ToolCallCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import { PendingActionsKey } from '@/composables/providePendingActions'
+import { usePendingActions } from '@/composables/usePendingActions'
+import { setForebrainFetchTransport } from '@/lib/api'
+import { flush } from '../test-helpers'
 import type { ChatMessage, TimelineBlock } from '@/composables/useChatStream'
 
 const base = {
@@ -20,6 +25,7 @@ const base = {
   historyError: null as string | null,
   scope: {},
   viewMode: 'default' as const,
+  sessionArtifacts: [] as import('@/lib/artifacts').ArtifactView[],
 }
 
 function threadOf(...messages: ChatMessage[]) {
@@ -157,5 +163,51 @@ describe('the webview thread', () => {
   it('says why nothing went when the conversation runs somewhere else', () => {
     const wrapper = mount(ThreadView, { props: { ...base, messages: [], busyNotice: 'session_running_elsewhere' } })
     expect(wrapper.get('[data-testid="busy-notice"]').text()).toContain('另一端运行')
+  })
+
+  it('draws the gate on the call it parks, from the same pending store the tail reads', async () => {
+    // The pending-actions store reads /api/actions through gatewayFetch, so the
+    // stub sits on the fetch seam and answers the array the gateway sends.
+    const requests: string[] = []
+    setForebrainFetchTransport(async (input) => {
+      const url = String(input)
+      requests.push(url)
+      if (url.includes('/api/actions')) {
+        return new Response(JSON.stringify([
+          {
+            id: 'act-1',
+            kind: 'approve_action',
+            status: 'pending',
+            tool_step_id: 's1',
+            payload_json: JSON.stringify({ command: 'rm -rf /tmp/x' }),
+          },
+        ]), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    })
+    const store = usePendingActions({
+      sessionId: computed(() => 's-1'),
+      version: computed(() => 1),
+      contextUsedPercent: computed(() => 40),
+    })
+    void store.load()
+
+    const wrapper = mount(ThreadView, {
+      props: { ...base, messages: [messageWith([
+        { kind: 'approval', id: 'ap0', actionId: 'act-1', toolStepId: 's1', actionKind: 'approve_action', status: 'pending' },
+        { kind: 'tool', id: 'to1', step: { stepId: 's1', toolName: 'shell', summary: 'rm -rf /tmp/x', header: 'Ran rm', status: 'awaiting_approval' } },
+      ])] },
+      global: { provide: { [PendingActionsKey as symbol]: store } },
+    })
+    await flush()
+    await flush()
+
+    // The parked call's card carries the gate: the question and the answers.
+    const card = wrapper.findComponent(ToolCallCard)
+    expect(card.exists()).toBe(true)
+    expect(card.props('pendingAction')).not.toBeNull()
+    expect(card.props('pendingAction')?.id).toBe('act-1')
+    expect(requests.some((line) => line.includes('/api/actions'))).toBe(true)
+    setForebrainFetchTransport(null)
   })
 })

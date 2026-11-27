@@ -274,13 +274,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         pendingSession.sessions = sessionId;
         openDevWebview('sessions');
       },
+      openDeliverable: async (path) => {
+        await deliverables.openArtifact(path);
+      },
+      openPlanDoc: async (path) => {
+        // The plan card's eye: the plan .md opens in the editor area, the way
+        // the web's drawer tab opens it in the drawer.
+        const uri = vscode.Uri.file(path);
+        if (path.toLowerCase().endsWith('.md')) {
+          await vscode.commands.executeCommand('markdown.showPreview', uri);
+        } else {
+          await vscode.window.showTextDocument(uri, { preview: false });
+        }
+      },
       openFileRange: (request) => deliverables.openRange(request),
     });
     panel.webview.onDidReceiveMessage((m: unknown) => {
       // The app announces itself once its transport is installed; anything a
-      // view asked for while it loaded goes out now.
+      // view asked for while it loaded goes out now — and the chat view that
+      // comes back after a rebuild lands on the conversation it had, so the
+      // re-bind and the history reload replay the snapshot.
       if ((m as { type?: unknown })?.type === 'ready') {
-        const sessionId = view === 'chat' ? pendingSession.chat : pendingSession.sessions;
+        const sessionId = view === 'chat'
+          ? (pendingSession.chat ?? observed)
+          : (pendingSession.sessions ?? observed);
         if (sessionId) {
           pendingSession[view] = undefined;
           void panel.webview.postMessage(

@@ -58,6 +58,8 @@ function makeHarness(overrides: Partial<WebviewRpcDeps> = {}): Harness {
     bindSession: async () => {},
     openChatSession: async () => {},
     reportActiveSession: async () => {},
+    openDeliverable: async () => {},
+    openPlanDoc: async () => {},
     openFileRange: async () => {},
     socketFactory: () => {
       throw new Error('the tests inject their own sockets');
@@ -275,6 +277,8 @@ test('bind follows the webview to the conversation it bound', async () => {
 test('openSession hands the pick to the host; reportActiveSession records the screen', async () => {
   const opened: string[] = [];
   const reported: string[] = [];
+  const openedFiles: string[] = [];
+  const openedPlans: string[] = [];
   const { rpc, posted } = makeHarness({
     openChatSession: async (sessionId) => {
       opened.push(sessionId);
@@ -282,21 +286,37 @@ test('openSession hands the pick to the host; reportActiveSession records the sc
     reportActiveSession: async (sessionId) => {
       reported.push(sessionId);
     },
+    openDeliverable: async (path) => {
+      openedFiles.push(path);
+    },
+    openPlanDoc: async (path) => {
+      openedPlans.push(path);
+    },
   });
   await rpc.handleRpc(22, 'openSession', { sessionId: 's-7' });
   await rpc.handleRpc(23, 'reportActiveSession', { sessionId: 's-7' });
+  await rpc.handleRpc(26, 'openDeliverable', { path: '/ws/repo/out/a.go' });
+  await rpc.handleRpc(27, 'openPlanDoc', { path: '/ws/repo/plans/391.md' });
   assert.deepEqual(opened, ['s-7']);
   assert.deepEqual(reported, ['s-7']);
-  assert.equal(replies(posted)[0].ok, true);
-  assert.equal(replies(posted)[1].ok, true);
+  assert.deepEqual(openedFiles, ['/ws/repo/out/a.go']);
+  assert.deepEqual(openedPlans, ['/ws/repo/plans/391.md']);
+  // Answers are matched by the call's own id, never by arrival position.
+  const answer = (id: number) => replies(posted).find((r) => r.rpc === id);
+  assert.equal(answer(22)?.ok, true);
+  assert.equal(answer(23)?.ok, true);
+  assert.equal(answer(26)?.ok, true);
+  assert.equal(answer(27)?.ok, true);
 
   // An empty pick is the "new chat" button: open chat, steer nothing.
   await rpc.handleRpc(24, 'openSession', { sessionId: '  ' });
-  assert.equal(replies(posted)[2].ok, true);
+  assert.equal(answer(24)?.ok, true);
   assert.deepEqual(opened, ['s-7', '']);
 
-  await rpc.handleRpc(25, 'reportActiveSession', { sessionId: '  ' });
-  assert.equal(replies(posted)[3].ok, false, 'an empty active session is refused');
+  await rpc.handleRpc(28, 'reportActiveSession', { sessionId: '  ' });
+  assert.equal(answer(28)?.ok, false, 'an empty active session is refused');
+  await rpc.handleRpc(29, 'openDeliverable', { path: '   ' });
+  assert.equal(answer(29)?.ok, false, 'an empty path is refused');
 });
 
 test('openFileRange reuses the host opener behind the shape check', async () => {

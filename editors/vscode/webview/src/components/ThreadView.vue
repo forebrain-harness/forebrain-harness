@@ -80,6 +80,7 @@
                         :step="block.step"
                         :scope="scope"
                         :default-open="false"
+                        :pending-action="gatePendingOf(msg, block.step.stepId)"
                       />
                     </ActivityStep>
                     <ActivityStep v-else-if="block.kind === 'tool'" node="subagent">
@@ -124,6 +125,17 @@
                 <button
                   type="button"
                   class="wv-icon-btn"
+                  :title="isStreaming ? t('chat.rewindBusy') : t('chat.rewind')"
+                  :aria-label="t('chat.rewindAria')"
+                  :disabled="isStreaming"
+                  data-testid="message-rewind"
+                  @click="emit('rewind', msg)"
+                >
+                  <History class="size-3.5" aria-hidden="true" />
+                </button>
+                <button
+                  type="button"
+                  class="wv-icon-btn"
                   :aria-label="t('chat.copyMessage')"
                   data-testid="message-copy"
                   @click="emit('copy-message', msg)"
@@ -148,10 +160,27 @@
                 :total-lines="msg.turnDiffs.reduce((s, d) => s + (d.added ?? 0) + (d.deleted ?? 0), 0)"
               />
             </div>
+            <!-- 本轮交付物: every file the turn handed back, in one group after
+                 the turn's last words. The eye opens it in the editor/OS by
+                 its kind — the host decides the route. -->
+            <ArtifactList
+              v-if="deliverablesOf(msg).length"
+              :artifacts="deliverablesOf(msg)"
+              :label="deliverableLabelOf(msg)"
+              @preview="(artifact: ArtifactView) => emit('open-deliverable', artifact)"
+            />
           </MessageContent>
         </Message>
       </template>
     </div>
+    <!-- The thread's tail still holds what no card of this conversation
+         carries — the agent's questions, and the requests with no card of
+         their own (an old session's rows, a gate with no card). The gates
+         that belong to calls hang on their cards above. -->
+    <ApprovalCard
+      :anchored-action-ids="anchoredActionIds"
+      @focus-composer="emit('focus-composer')"
+    />
     <!-- A send the gateway refused because the conversation runs somewhere
          else: the thread says why, the words wait in the composer. -->
     <div v-if="busyNotice" class="forebrain-err-block" role="alert" data-testid="busy-notice">
@@ -173,7 +202,7 @@
 // draw here is what its steps own: the todo card, the deliverable group and
 // the rewind affordances arrive with their steps.
 import { computed } from 'vue'
-import { CircleAlert, Copy, ImageOff } from 'lucide-vue-next'
+import { CircleAlert, Copy, History, ImageOff } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
 import { Message, MessageContent, MessageResponse } from '@repo/elements/message'
 import ActivityLine from '@/components/chat/ActivityLine.vue'
@@ -185,6 +214,15 @@ import GoalLine from '@/components/chat/GoalLine.vue'
 import PeerDeliveryCard from '@/components/chat/PeerDeliveryCard.vue'
 import PeerMessageCard from '@/components/chat/PeerMessageCard.vue'
 import RunErrorBlock from '@/components/chat/RunErrorBlock.vue'
+import ArtifactList from '@/components/chat/ArtifactList.vue'
+import type { ArtifactView } from '@/lib/artifacts'
+import {
+  artifactsOfPresentFiles,
+  displayPathOf,
+  planArtifactOf,
+  turnDeliverables,
+  turnDiffTotals,
+} from '@/lib/artifacts'
 import SlashPickerCard from '@/components/chat/SlashPickerCard.vue'
 import SubagentCallCard from '@/components/chat/SubagentCallCard.vue'
 import ThinkingCard from '@/components/chat/ThinkingCard.vue'
@@ -196,10 +234,12 @@ import {
   stoppedCardSaysNothing,
   timelineBlockKey,
   type ChatMessage,
+  type TimelineBlock,
 } from '@/composables/useChatStream'
 import { blockOnActivityLine, groupActivityRuns } from '@/lib/activityRuns'
 import { blockVisibleIn } from '@/lib/viewMode'
 import { formatProviderError } from '@/lib/providerError'
+import { injectPendingActions } from '@/composables/providePendingActions'
 import type { WorkspaceScope } from '@/lib/api'
 import type { ViewMode } from '@/composables/useViewMode'
 import { currentLocale, t } from '@/locales'
@@ -217,12 +257,17 @@ const props = defineProps<{
   /** The reading mode of this view — the same per-session choice the web
    *  thread keeps (useViewMode), wired through by the shell. */
   viewMode: ViewMode
+  /** This conversation's delivered files, as the gateway listed them. */
+  sessionArtifacts: ArtifactView[]
 }>()
 
 const emit = defineEmits<{
   (e: 'choose', message: ChatMessage, value: string): void
   (e: 'copy-message', message: ChatMessage): void
+  (e: 'rewind', message: ChatMessage): void
   (e: 'retry-history'): void
+  (e: 'focus-composer'): void
+  (e: 'open-deliverable', artifact: ArtifactView): void
 }>()
 
 const drawnBlocks = (blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['blocks']> => {
@@ -231,6 +276,91 @@ const drawnBlocks = (blocks?: ChatMessage['blocks']): NonNullable<ChatMessage['b
 }
 
 const activityRunsOf = (msg: ChatMessage) => groupActivityRuns(drawnBlocks(msg.blocks), blockOnActivityLine)
+
+// The conversation's one pending-actions store: gates decide through the same
+// loaded requests the tail surface reads (plan 138). A thread mounted outside
+// a provider — a bare test harness — simply carries no gates.
+const pendingActions = injectPendingActions()
+
+/** The request a tool card is parked on: the timeline's approval block names
+ *  the call the gate holds, and the store's pending list says whether it is
+ *  still asking. Null on every settled call. */
+function gatePendingOf(msg: ChatMessage, stepId: string) {
+  if (!pendingActions) return null
+  const blocks = (msg.blocks ?? []).filter((block): block is Extract<TimelineBlock, { kind: 'approval' }> => block.kind === 'approval')
+  return pendingActions.pendingForStep(stepId, blocks)
+}
+
+/** The ids whose gates hang on a tool card here, so the tail's own fallback
+ *  list holds every request that is not one of them. */
+const anchoredActionIds = computed(() => {
+  const ids = new Set<string>()
+  if (!pendingActions) return ids
+  for (const message of props.messages) {
+    for (const block of message.blocks ?? []) {
+      if (block.kind !== 'tool') continue
+      const found = gatePendingOf(message, block.step.stepId)
+      if (found) ids.add(found.id)
+    }
+  }
+  return ids
+})
+
+// ---- 本轮交付物 (plan 153 A7): the files the turn handed back ----
+const artifactsByRun = computed(() => {
+  const byRun = new Map<string, ArtifactView[]>()
+  for (const artifact of props.sessionArtifacts) {
+    const runId = String(artifact.runId ?? '').trim()
+    if (!runId) continue
+    const rows = byRun.get(runId) ?? []
+    rows.push(artifact)
+    byRun.set(runId, rows)
+  }
+  return byRun
+})
+
+function deliverablesOf(msg: ChatMessage): ArtifactView[] {
+  if (msg.role !== 'assistant') return []
+  if (msg.completedNormally === false) return []
+  const sid = String(props.sessionId ?? '').trim()
+  const presented: ArtifactView[] = []
+  const plan: ArtifactView[] = []
+  for (const block of msg.blocks ?? []) {
+    if (block.kind !== 'tool') continue
+    const name = String(block.step.toolName ?? '').trim()
+    if (name === 'present_files') {
+      presented.push(...artifactsOfPresentFiles(block.step.result, sid))
+      continue
+    }
+    if (name === 'exit_plan_mode') {
+      const kept = planArtifactOf(block.step.result, sid)
+      if (kept) plan.push(kept)
+    }
+  }
+  const runId = String(msg.runId ?? '').trim()
+  const fallback = runId ? artifactsByRun.value.get(runId) ?? [] : []
+  const totals = turnDiffTotals(msg.turnDiffs, undefined)
+  return turnDeliverables({
+    presented,
+    plan,
+    frame: msg.artifacts ?? [],
+    fallback,
+  }, undefined).map((row) => {
+    const displayPath = displayPathOf(row, undefined)
+    const counts = totals.get(displayPath)
+    return {
+      ...row,
+      displayPath,
+      ...(counts ? { added: counts.added, deleted: counts.deleted } : {}),
+    }
+  })
+}
+
+function deliverableLabelOf(msg: ChatMessage): string {
+  const rows = deliverablesOf(msg)
+  const onlyPlan = rows.length > 0 && rows.every((row) => row.origin === 'plan')
+  return onlyPlan ? t('chat.artifactPlanGroup') : t('chat.artifactGroup')
+}
 
 function failedAtOf(msg: ChatMessage): number {
   const finished = msg.runFinishedAt ? Date.parse(msg.runFinishedAt) : Number.NaN

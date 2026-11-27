@@ -24,6 +24,8 @@
           <p>{{ t('chat.panelEmptyBody', { project: target?.name || projectNameOfLast || t('chatDrawer.untitled') }) }}</p>
         </div>
       </div>
+      <!-- The MCP servers that failed to start, named where the thread begins. -->
+      <McpNotice v-if="mcpFailures.length" :failures="mcpFailures" />
       <ThreadView
         v-show="!isFreshChat"
         class="wv-thread-scroll"
@@ -36,12 +38,37 @@
         :scope="workbenchScope"
         :busy-notice="busyNotice"
         :view-mode="viewMode"
+        :session-artifacts="sessionArtifacts"
         @choose="pickFromNotice"
         @copy-message="copyMessage"
+        @rewind="openRewind"
         @retry-history="retryHistory"
+        @focus-composer="focusComposer"
+        @open-deliverable="openDeliverable"
       />
     </main>
+    <!-- The session's todo checklist, above the composer: the chip in the
+         bar toggles it. -->
+    <TodoPanel
+      v-if="todosOpen && latestTodo"
+      :todo="latestTodo"
+      :unread="todoUnread"
+      :flash="todoFlash"
+      @read="markTodoRead"
+      @read-all="markAllTodosRead"
+      @close="todosOpen = false"
+    />
+    <!-- The plan approval takes the input's place while the planner waits:
+         no card in the thread, the dock here, the composer underneath. -->
+    <PlanApprovalDock
+      v-if="exitPlanPending"
+      :action="exitPlanPending"
+      :session-id="sessionId ?? ''"
+      :session-type="sessionInfo?.project?.projectType ?? ''"
+      :on-open-plan="openPlanDoc"
+    />
     <ComposerBar
+      v-show="!exitPlanPending"
       ref="composerRef"
       :session-id="sessionId"
       :mode="mode"
@@ -66,6 +93,12 @@
       :target="target"
       :pill-invalid="pillInvalid"
       :runtime-status="runtimeStatus"
+      :auto-continue="autoContinueForView('')"
+      :held-peer="heldPeer"
+      :todo-count-text="todoCountText"
+      :todo-total="todoTotal"
+      :todo-unread="todoUnread.length"
+      :todos-open="todosOpen"
       v-model:view-mode="viewMode"
       @send="handleSubmit"
       @stop="cancel()"
@@ -83,7 +116,92 @@
       @insert-plus="insertPlusCommand"
       @pick-target="pickTarget"
       @browse-folder="browseFolder"
+      @toggle-todos="todosOpen = !todosOpen"
+      @peer-release="releaseHeldPeer"
+      @peer-deny="denyHeldPeer"
+      @peer-settled="settleHeldPeer"
     />
+    <!-- The subagents this conversation dispatched, beside the thread: one
+         tab each, its own composer, its own queue. -->
+    <SubagentDrawer
+      v-if="drawerVisible"
+      :tabs="drawerRecords"
+      :active="shownActive"
+      :records="conversationSubagents"
+      :seen="seenAgentActivity"
+      :now="subagentNow"
+      @select="selectSubagentTab"
+      @close-tab="closeSubagentTab"
+      @open="openSubagentTab"
+      @collapse="drawerOpen = false"
+    >
+      <SubagentTab
+        v-for="record in drawerRecords"
+        v-show="record.agentId === shownActive"
+        :key="record.agentId"
+        :ref="(el: unknown) => setSubagentTabRef(record.agentId, el)"
+        :record="record"
+        :fold-state="agentFolds[record.agentId] ?? {}"
+        :call-tasks="subagentCallTasks"
+        :now="subagentNow"
+        :scope="workbenchScope"
+        :active-agent-id="shownActive"
+        :pending-input="subagentPendingInput[record.agentId] ?? emptyPendingInputPreview()"
+        :auto-continue="autoContinueForView(record.agentId)"
+        :notice="subagentNotices[record.agentId] ?? null"
+        @submit="onSubagentSubmit(record.agentId, $event)"
+        @fold-change="onSubagentFold(record.agentId, $event)"
+        @open-agent="openSubagentTab"
+        @stop="stopSubagent(record.agentId)"
+        @pause="pauseSubagent(record.agentId)"
+        @edit-last-queued="recallIntoTab(record.agentId)"
+        @interrupt-run="interruptSubagentToSend(record.agentId)"
+        @typed="cancelAutoContinue(record.agentId)"
+        @dismiss-notice="subagentNotices[record.agentId] = null"
+      />
+    </SubagentDrawer>
+    <!-- The peers this conversation knows, and the held letters waiting. -->
+    <PeerDrawer
+      v-if="peerDrawerOpen"
+      :held="heldPeers"
+      :files="peerDirectory.files"
+      :same-tree="peerDirectory.sameTree"
+      :other="peerDirectory.other"
+      :other-total="peerDirectory.otherTotal"
+      :page="peerDirectoryPage"
+      :page-size="PEER_DIRECTORY_PAGE_SIZE"
+      @close="peerDrawerOpen = false"
+      @release="releaseHeldPeer"
+      @deny="denyHeldPeer"
+      @page-change="changePeerPage"
+    />
+    <!-- The project's servers that still want an answer, asked in the panel
+         the way the web asks them, and recorded the same way. -->
+    <ProjectServersConsentDialog
+      :open="projectServersOpen"
+      :mcp="projectServersMcp"
+      :lsp="projectServersLsp"
+      :busy="projectServersBusy"
+      :error="projectServersError"
+      @confirm="confirmProjectServers"
+      @decline-all="declineAllProjectServers"
+      @close="declineAllProjectServers"
+    />
+    <!-- Rewinding to a message: the preview says what it takes back. -->
+    <RewindDialog
+      v-if="rewindOpen"
+      :message="rewindTarget?.content ?? ''"
+      :preview="rewindPreview"
+      :busy="rewindBusy"
+      :error="rewindError"
+      @restore="restoreRewind"
+      @cancel="rewindOpen = false"
+    />
+    <!-- The rewind undo line: after a rewind it offers to put it all back. -->
+    <div v-if="rewindLine" class="wv-undo-line" data-testid="rewind-undo-line">
+      <span>{{ rewindLine }}</span>
+      <button type="button" class="wv-retry" data-testid="rewind-undo" @click="undoRewind">{{ t('chat.rewindUndo') }}</button>
+    </div>
   </div>
 </template>
 
@@ -99,10 +217,13 @@ import { Plus, Sparkles } from 'lucide-vue-next'
 import ComposerBar from './components/ComposerBar.vue'
 import ThreadView from './components/ThreadView.vue'
 import { TRANSPORT_KEY } from './transport'
-import { useChatStream, type ChatMessage } from '@/composables/useChatStream'
+import { useChatStream, emptyPendingInputPreview, type ChatMessage, type PlanUpdateData } from '@/composables/useChatStream'
 import { useViewMode } from '@/composables/useViewMode'
 import { useChatSessions } from '@/composables/useChatSessions'
+import { usePendingActions } from '@/composables/usePendingActions'
+import { providePendingActions } from '@/composables/providePendingActions'
 import { getErrorMessage, forebrainApi, type ProjectRecord, type SessionModelOption, type SessionModelResponse, type WorkspaceScope } from '@/lib/api'
+import type { ArtifactView } from '@/lib/artifacts'
 import { targetFromProject, type ProjectTarget } from '@/lib/projectTarget'
 import { lastSessionIdValue } from '@/composables/useLastSession'
 import type { PickedFile, SubmittedAttachment } from '@/lib/composerSubmission'
@@ -116,13 +237,20 @@ const transport: NonNullable<typeof injectedTransport> = injectedTransport
   ?? (() => { throw new Error('the chat workbench needs the webview transport provided') })()
 
 const stream = useChatStream()
-const { sessionId, mode, isStreaming, error, messages, historyLoading, historyError } = stream
 const {
+  sessionId, mode, isStreaming, error, messages, historyLoading, historyError,
+  mcpStatus,
   suggestion, acceptSuggestion, dismissSuggestion,
-  cancelAutoContinue,
+  cancelAutoContinue, autoContinueForView,
   pendingInputPreview, editLastQueuedMessage, sendPendingSteersAfterInterrupt,
   runtimeStatus, send, cancel, switchMode, switchToSession, resetForNewChat,
+  subagents, subagentCallTasks, subagentNow, subagentPendingInput,
+  sendToSubagent, recallSubagentInput, pauseSubagent, interruptSubagentToSend,
+  loadSubagentBudget, heldPeers, answerPeerHeld, peerDirectory,
+  peerDirectoryPage, refreshPeerDirectory,
+  sessionArtifacts,
 } = stream
+const PEER_DIRECTORY_PAGE_SIZE = 20
 
 const queueVisible = computed(() => Boolean(
   pendingInputPreview.value.pendingSteers.length
@@ -468,6 +596,378 @@ function retryHistory() {
 watch(isStreaming, (streaming, wasStreaming) => {
   if (wasStreaming && !streaming) void fetchSessions()
 })
+
+// ============================================================================
+// Steps 7-9. The gates decide through the same pending store the tail
+// surface reads; the runtime cards, the drawers and the consent dialog are
+// the web's own components, driven by the same composable state.
+// ============================================================================
+
+// ---- pending actions: the gates decide through approvals.decide ----
+const pendingActions = usePendingActions({
+  sessionId: computed(() => sessionId.value),
+  version: computed(() => stream.pendingActionsVersion.value),
+  contextUsedPercent,
+})
+providePendingActions(pendingActions)
+
+/** The exit-plan approval parked where the input is (Step 8's dock). */
+const exitPlanPending = computed(() =>
+  pendingActions.pendingApprovals.value.find((row) => pendingActions.isExitPlan(row)) ?? null)
+
+// ---- the session's own facts: project, kind ----
+const sessionInfo = ref<import('@/lib/api').ChatSessionInfo | null>(null)
+watch(sessionId, (sid) => {
+  sessionInfo.value = null
+  if (!sid) return
+  void forebrainApi.chatSession(sid).then((info) => {
+    sessionInfo.value = info
+  }).catch(() => undefined)
+}, { immediate: true })
+
+// ---- the project's servers that still want an answer ----
+const projectServersScopeId = computed(() => {
+  const sid = String(sessionId.value ?? '').trim()
+  if (sid) return String(sessionInfo.value?.project?.id ?? '').trim()
+  return String(target.value?.projectId ?? '').trim()
+})
+const projectServersMcp = ref<import('@/lib/api').ProjectServerPendingRow[]>([])
+const projectServersLsp = ref<import('@/lib/api').ProjectServerPendingRow[]>([])
+const projectServersOpen = ref(false)
+const projectServersBusy = ref(false)
+const projectServersError = ref('')
+let projectServersGeneration = 0
+
+async function loadProjectServers(projectId: string): Promise<void> {
+  const generation = ++projectServersGeneration
+  try {
+    const answer = await forebrainApi.projectServersPending(projectId)
+    if (generation !== projectServersGeneration) return
+    projectServersMcp.value = answer.mcp
+    projectServersLsp.value = answer.lsp
+    projectServersOpen.value = answer.mcp.length > 0 || answer.lsp.length > 0
+  } catch (cause) {
+    if (generation !== projectServersGeneration) return
+    projectServersError.value = getErrorMessage(cause)
+  }
+}
+
+async function answerProjectServers(payload: { allowed: Record<string, boolean>; alwaysAllow?: boolean }): Promise<void> {
+  const projectId = projectServersScopeId.value
+  if (!projectId || projectServersBusy.value) return
+  projectServersBusy.value = true
+  projectServersError.value = ''
+  const choice = (rows: import('@/lib/api').ProjectServerPendingRow[]) =>
+    rows.map((row) => ({ name: row.name, fingerprint: row.fingerprint, allow: payload.allowed[row.name] === true }))
+  try {
+    await forebrainApi.projectServersConsent(projectId, {
+      mcp: choice(projectServersMcp.value),
+      lsp: choice(projectServersLsp.value),
+      alwaysAllow: payload.alwaysAllow === true,
+    })
+    await loadProjectServers(projectId)
+    // The answer is what this session's own MCP reconcile will find, so the
+    // conversation is bound again.
+    stream.rebindSessionObserver()
+  } catch (cause) {
+    projectServersError.value = getErrorMessage(cause)
+    await loadProjectServers(projectId)
+  } finally {
+    projectServersBusy.value = false
+  }
+}
+
+function confirmProjectServers(payload: { allowed: Record<string, boolean>; alwaysAllow: boolean }): void {
+  void answerProjectServers({ ...payload, alwaysAllow: payload.alwaysAllow })
+}
+function declineAllProjectServers(): void {
+  void answerProjectServers({ allowed: {} })
+}
+
+// A conversation that opens (or a project the pill picks) re-reads what it
+// would ask about; nothing pending keeps the dialog closed.
+watch(projectServersScopeId, (projectId) => {
+  if (projectId) void loadProjectServers(projectId)
+}, { immediate: true })
+
+// ---- MCP servers that failed to start ----
+const mcpFailures = computed(() =>
+  (mcpStatus.value?.servers ?? [])
+    .filter((row) => row.connStatus === 'error' && (row.error ?? '').trim())
+    .map((row) => ({ name: row.name, error: (row.error ?? '').trim })),
+)
+
+// ---- the peer letters and the directory ----
+const peerDrawerOpen = ref(false)
+const heldPeer = computed(() => heldPeers.value[0] ?? null)
+
+async function releaseHeldPeer(held: import('@/lib/api').PeerHeldRow) {
+  if (await answerPeerHeld(held.msgId, true)) settleHeldPeer(held)
+}
+async function denyHeldPeer(held: import('@/lib/api').PeerHeldRow) {
+  if (await answerPeerHeld(held.msgId, false)) settleHeldPeer(held)
+}
+function settleHeldPeer(held: import('@/lib/api').PeerHeldRow) {
+  // answerPeerHeld already dropped it from heldPeers; the banner/drawer read
+  // the same list, so nothing else to clear here.
+  void held
+}
+function changePeerPage(page: number) {
+  void refreshPeerDirectory(page)
+}
+
+// ---- rewind ----
+const rewindOpen = ref(false)
+const rewindTarget = ref<ChatMessage | null>(null)
+const rewindPreview = ref<import('@/lib/api').RewindPreview | null>(null)
+const rewindBusy = ref(false)
+const rewindError = ref('')
+const rewindLine = ref<string | null>(null)
+
+async function openRewind(msg: ChatMessage) {
+  if (isStreaming.value) return
+  const sid = String(sessionId.value ?? '').trim()
+  if (!sid) return
+  const rowId = Number(msg.rowId ?? 0)
+  if (!rowId) {
+    // A message sent live has no row id yet: read the transcript back and
+    // find it by its ordinal among the user messages.
+    const ordinal = messages.value.filter((m) => m.role === 'user').findIndex((m) => m.id === msg.id)
+    await stream.loadMessages(sid)
+    const users = messages.value.filter((m) => m.role === 'user')
+    const match = ordinal >= 0 ? users[ordinal] : undefined
+    if (!match?.rowId) return
+    rewindTarget.value = match
+  } else {
+    rewindTarget.value = msg
+  }
+  rewindOpen.value = true
+  rewindError.value = ''
+  rewindBusy.value = true
+  try {
+    rewindPreview.value = await forebrainApi.rewindPreview(sid, Number(rewindTarget.value?.rowId ?? 0))
+  } catch (cause) {
+    rewindError.value = getErrorMessage(cause)
+  } finally {
+    rewindBusy.value = false
+  }
+}
+
+async function restoreRewind(payload: { mode: 'both' | 'chat' | 'code'; keepPaths: string[] }) {
+  const sid = String(sessionId.value ?? '').trim()
+  const messageId = Number(rewindTarget.value?.rowId ?? 0)
+  if (!sid || !messageId) return
+  rewindBusy.value = true
+  try {
+    const res = await forebrainApi.rewind(sid, { messageId, mode: payload.mode, keepPaths: payload.keepPaths })
+    rewindOpen.value = false
+    rewindLine.value = payload.mode === 'code'
+      ? t('chat.rewindDoneCode', { n: res.restored.length, text: (rewindTarget.value?.content ?? '').split('\n')[0] ?? '' })
+      : t('chat.rewindDoneBoth', { n: res.restored.length })
+    composerRef.value?.restoreSubmission({ text: res.anchorText, attachments: [], mentionImages: [] })
+    await stream.loadMessages(sid)
+  } catch (cause) {
+    rewindError.value = getErrorMessage(cause)
+  } finally {
+    rewindBusy.value = false
+  }
+}
+
+async function undoRewind() {
+  const sid = String(sessionId.value ?? '').trim()
+  if (!sid) return
+  try {
+    await forebrainApi.rewindUndo(sid)
+    rewindLine.value = null
+    await stream.loadMessages(sid)
+  } catch (cause) {
+    error.value = getErrorMessage(cause)
+  }
+}
+
+// ---- the subagent drawer ----
+const drawerOpen = ref(false)
+const drawerTabs = ref<string[]>([])
+const drawerActive = ref('')
+const seenAgentActivity = ref<Record<string, number>>({})
+const agentFolds = ref<Record<string, Record<string, boolean>>>({})
+const subagentTabRefs: Record<string, {
+  takeAttached: () => Pick<import('@/lib/composerSubmission').ComposerSubmission, 'attachments' | 'mentionImages'>
+  hasAttached: () => boolean
+  restoreSubmission: (submission: import('@/lib/composerSubmission').ComposerSubmission, unsent?: File[]) => void
+  addUploaded: (attachments: SubmittedAttachment[]) => void
+}> = {}
+
+function setSubagentTabRef(agentId: string, el: unknown) {
+  const id = String(agentId ?? '').trim()
+  if (el) subagentTabRefs[id] = el as (typeof subagentTabRefs)[string]
+  else delete subagentTabRefs[id]
+}
+function subagentComposer(agentId: string) {
+  return subagentTabRefs[String(agentId ?? '').trim()] ?? null
+}
+
+const conversationSubagents = computed(() => subagents.value)
+const drawerRecords = computed(() => drawerTabs.value
+  .map((id) => subagents.value.find((record) => record.agentId === id))
+  .filter((record): record is NonNullable<typeof record> => Boolean(record)))
+const drawerVisible = computed(() => drawerOpen.value && drawerRecords.value.length > 0 && !isFreshChat.value)
+const shownActive = computed(() => (
+  drawerRecords.value.some((record) => record.agentId === drawerActive.value)
+    ? drawerActive.value
+    : (drawerRecords.value[0]?.agentId ?? '')
+))
+
+function markAgentSeen(agentId: string) {
+  const entry = subagents.value.find((row) => row.agentId === agentId)
+  if (!entry) return
+  seenAgentActivity.value = { ...seenAgentActivity.value, [agentId]: entry.updatedSeq }
+}
+
+function openSubagentTab(agentId: string) {
+  const id = String(agentId ?? '').trim()
+  if (!id) return
+  if (!drawerTabs.value.includes(id)) drawerTabs.value = [...drawerTabs.value, id]
+  drawerActive.value = id
+  drawerOpen.value = true
+  markAgentSeen(id)
+  void loadSubagentBudget(id)
+}
+
+function selectSubagentTab(agentId: string) {
+  const id = String(agentId ?? '').trim()
+  if (!id) return
+  drawerOpen.value = true
+  drawerActive.value = id
+  markAgentSeen(id)
+  void loadSubagentBudget(id)
+}
+
+function closeSubagentTab(agentId: string) {
+  const rest = drawerTabs.value.filter((tab) => tab !== agentId)
+  const index = drawerTabs.value.indexOf(agentId)
+  drawerTabs.value = rest
+  if (drawerActive.value === agentId) drawerActive.value = rest[index] ?? rest[index - 1] ?? ''
+}
+
+function updateAgentFold(agentId: string, value: { id: string; open: boolean }) {
+  const foldID = String(value?.id ?? '').trim()
+  if (!agentId || !foldID) return
+  const prior = agentFolds.value[agentId] ?? {}
+  agentFolds.value = { ...agentFolds.value, [agentId]: { ...prior, [foldID]: Boolean(value.open) } }
+}
+
+const subagentNotices = ref<Record<string, { title: string; detail: string } | null>>({})
+
+function onSubagentSubmit(agentId: string, message: { text: string }) {
+  void handleSubagentSubmit(agentId, message)
+}
+
+function onSubagentFold(agentId: string, value: { id: string; open: boolean }) {
+  updateAgentFold(agentId, value)
+}
+
+async function handleSubagentSubmit(agentId: string, message: { text: string }) {  const id = String(agentId ?? '').trim()
+  const text = (message.text ?? '').trim()
+  const composer = subagentComposer(id)
+  const attachedByComposer = composer?.hasAttached() ?? false
+  if (!text && !attachedByComposer) return
+  const refuse = (detail: string) => {
+    subagentNotices.value = { ...subagentNotices.value, [id]: { title: t('chat.messageNotSent'), detail } }
+  }
+  // A shell line is the conversation's, never the subagent's.
+  if (text.startsWith('!') || text.startsWith('/')) {
+    refuse(t('chat.subagentViewCommand'))
+    return
+  }
+  const attached = composer?.takeAttached() ?? { attachments: [], mentionImages: [] }
+  subagentNotices.value = { ...subagentNotices.value, [id]: null }
+  await sendToSubagent(id, { text, attachments: attached.attachments, mentionImages: attached.mentionImages })
+}
+
+function stopSubagent(agentId: string) {
+  void forebrainApi.subagentCancel(agentId).catch((cause) => {
+    subagentNotices.value = {
+      ...subagentNotices.value,
+      [agentId]: { title: t('chat.requestFailed'), detail: getErrorMessage(cause) },
+    }
+  })
+}
+
+async function recallIntoTab(agentId: string) {
+  const submission = await recallSubagentInput(agentId)
+  if (!submission) return
+  subagentComposer(agentId)?.restoreSubmission(submission)
+}
+
+// ---- the session's todos: chip counts, unread, flash ----
+const todosOpen = ref(false)
+const todoUnread = ref<number[]>([])
+const todoFlash = ref<number[]>([])
+let todoFlashTimer: ReturnType<typeof setTimeout> | null = null
+const TODO_UNREAD_KEY = 'forebrain.todos.unread'
+
+const latestTodo = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    const updates = messages.value[i]?.planUpdates
+    if (updates?.length) return updates[updates.length - 1]
+  }
+  return null
+})
+const todoTotal = computed(() => latestTodo.value?.items.length ?? 0)
+const todoCountText = computed(() => {
+  const items = latestTodo.value?.items ?? []
+  const done = items.filter((item) => ['completed', 'done'].includes(String(item.status ?? '').trim().toLowerCase())).length
+  return `${done}/${items.length}`
+})
+
+function persistTodos() {
+  const sid = String(sessionId.value ?? '').trim()
+  if (!sid) return
+  try { localStorage.setItem(`${TODO_UNREAD_KEY}.${sid}`, JSON.stringify(todoUnread.value)) } catch { /* storage refused: unread stays in memory */ }
+}
+
+watch(latestTodo, (todo) => {
+  const sid = String(sessionId.value ?? '').trim()
+  if (!todo || !sid) return
+  let previous: PlanUpdateData['items'] = []
+  try { previous = JSON.parse(localStorage.getItem(`${TODO_UNREAD_KEY}.snapshot.${sid}`) ?? '[]') as PlanUpdateData['items'] } catch { previous = [] }
+  const changed = todo.items
+    .map((item, index) => (!previous[index] || JSON.stringify(previous[index]) !== JSON.stringify(item) ? index : -1))
+    .filter((index) => index >= 0)
+  if (changed.length === 0) return
+  const merged = [...new Set([...todoUnread.value, ...changed])].sort((a, b) => a - b)
+  todoUnread.value = merged
+  todoFlash.value = changed
+  if (todoFlashTimer) clearTimeout(todoFlashTimer)
+  todoFlashTimer = setTimeout(() => { todoFlash.value = [] }, 1500)
+  persistTodos()
+  try { localStorage.setItem(`${TODO_UNREAD_KEY}.snapshot.${sid}`, JSON.stringify(todo.items)) } catch { /* as above */ }
+}, { deep: true })
+
+watch(sessionId, (sid) => {
+  const key = `${TODO_UNREAD_KEY}.${String(sid ?? '').trim()}`
+  try { todoUnread.value = JSON.parse(localStorage.getItem(key) ?? '[]') as number[] } catch { todoUnread.value = [] }
+})
+
+function markTodoRead(index: number) {
+  todoUnread.value = todoUnread.value.filter((unread) => unread !== index)
+  persistTodos()
+}
+function markAllTodosRead() {
+  todoUnread.value = []
+  persistTodos()
+}
+
+// ---- the plan dock's eye, and the deliverable eye ----
+function openPlanDoc(plan: { path: string }) {
+  transport.openPlanDoc(plan.path)
+}
+function openDeliverable(artifact: ArtifactView) {
+  // displayPath is the path the file is located by (rel_path under the
+  // project, or the row's own absolute path).
+  transport.openDeliverable(artifact.displayPath ?? artifact.path ?? artifact.relPath ?? '')
+}
 </script>
 
 <style scoped>

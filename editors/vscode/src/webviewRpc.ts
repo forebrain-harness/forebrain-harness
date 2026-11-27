@@ -70,6 +70,11 @@ export interface WebviewRpcDeps {
   /** Records which conversation the chat view is on, so the Sessions view can
    *  mark the row. */
   readonly reportActiveSession: (sessionId: string) => Promise<void>;
+  /** Opens one delivered file by its kind — code in its diff and editor,
+   *  non-code to the OS. */
+  readonly openDeliverable: (path: string) => Promise<void>;
+  /** Opens the plan document in the editor area. */
+  readonly openPlanDoc: (path: string) => Promise<void>;
   /** The proxied gateway call's ceiling; the default is 60s and the tests
    *  shrink it. */
   readonly httpTimeoutMs?: number;
@@ -177,6 +182,10 @@ export class WebviewRpc {
         return this.openChatSession(params);
       case 'reportActiveSession':
         return this.reportActiveSession(params);
+      case 'openDeliverable':
+        return this.deliverable(params);
+      case 'openPlanDoc':
+        return this.planDoc(params);
       case 'trust.ask':
         return this.askTrust(params);
       case 'openFileRange':
@@ -329,6 +338,22 @@ export class WebviewRpc {
     const sessionId = String((params as { sessionId?: unknown }).sessionId ?? '').trim();
     if (!sessionId) throw new Error('reportActiveSession: a session id is required');
     return this.deps.reportActiveSession(sessionId);
+  }
+
+  /** The deliverable eye: open one delivered path by its kind. */
+  private deliverable(params: unknown): Promise<void> {
+    if (typeof params !== 'object' || params === null) throw new Error('openDeliverable: params required');
+    const path = String((params as { path?: unknown }).path ?? '').trim();
+    if (!path) throw new Error('openDeliverable: a path is required');
+    return this.deps.openDeliverable(path);
+  }
+
+  /** The plan card's eye: the plan document opens in the editor area. */
+  private planDoc(params: unknown): Promise<void> {
+    if (typeof params !== 'object' || params === null) throw new Error('openPlanDoc: params required');
+    const path = String((params as { path?: unknown }).path ?? '').trim();
+    if (!path) throw new Error('openPlanDoc: a path is required');
+    return this.deps.openPlanDoc(path);
   }
 
   /**
