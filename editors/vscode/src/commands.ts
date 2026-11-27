@@ -58,15 +58,15 @@ export class ForebrainCommands {
     if (!this.guard()) return;
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-      void vscode.window.showWarningMessage('Forebrain: open a file first.');
+      void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: open a file first.'));
       return;
     }
     const { document, selection } = editor;
     if (selection.isEmpty) {
-      void vscode.window.showWarningMessage('Forebrain: select some code first.');
+      void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: select some code first.'));
       return;
     }
-    const question = await this.ask('Ask Forebrain about the selection');
+    const question = await this.ask(vscode.l10n.t('Ask Forebrain about the selection'));
     if (question === undefined) return;
     const context = {
       fsPath: document.uri.fsPath,
@@ -84,14 +84,14 @@ export class ForebrainCommands {
     if (!this.guard()) return;
     const target = uri instanceof vscode.Uri ? uri : vscode.window.activeTextEditor?.document.uri;
     if (!target) {
-      void vscode.window.showWarningMessage('Forebrain: open a file first.');
+      void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: open a file first.'));
       return;
     }
     if (target.scheme !== 'file') {
-      void vscode.window.showWarningMessage('Forebrain: that is not a file on disk.');
+      void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: that is not a file on disk.'));
       return;
     }
-    const question = await this.ask('Ask Forebrain about this file');
+    const question = await this.ask(vscode.l10n.t('Ask Forebrain about this file'));
     if (question === undefined) return;
     const bytes = await vscode.workspace.fs.readFile(target);
     const content = Buffer.from(bytes).toString('utf8');
@@ -108,14 +108,14 @@ export class ForebrainCommands {
   /** True when the panel is connected; a warning names what is missing otherwise. */
   private guard(): boolean {
     if (this.deps.connected()) return true;
-    void vscode.window.showWarningMessage('Forebrain is not connected. Open the Forebrain panel and connect first.');
+    void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain is not connected. Open the Forebrain panel and connect first.'));
     return false;
   }
 
   private async ask(what: string): Promise<string | undefined> {
     const answer = await vscode.window.showInputBox({
       prompt: what,
-      placeHolder: 'e.g. There is a bug here — fix it',
+      placeHolder: vscode.l10n.t('e.g. There is a bug here — fix it'),
       ignoreFocusOut: true,
     });
     if (answer === undefined) return undefined; // Esc: nothing is created, the panel does not move
@@ -131,7 +131,7 @@ export class ForebrainCommands {
   private async send(uri: vscode.Uri, prompt: string): Promise<void> {
     const folder = vscode.workspace.getWorkspaceFolder(uri);
     if (!folder) {
-      void vscode.window.showWarningMessage('Forebrain: that file is not inside a workspace folder.');
+      void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: that file is not inside a workspace folder.'));
       return;
     }
     const setting = vscode.workspace.getConfiguration('forebrain').get<SelectionTarget>('selectionTarget', 'current');
@@ -158,7 +158,7 @@ export class ForebrainCommands {
         return;
       }
       void vscode.window.showErrorMessage(
-        `Forebrain did not start the turn: ${err instanceof Error ? err.message : String(err)}`,
+        vscode.l10n.t('Forebrain did not start the turn: {0}', err instanceof Error ? err.message : String(err)),
       );
       this.deps.log(`command: ${err instanceof Error ? err.message : String(err)}`);
     }

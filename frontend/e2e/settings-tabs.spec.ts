@@ -183,7 +183,7 @@ test('the approval preset is one vertical radio group saved from its group bar',
   for (const index of [0, 1]) boxes.push(await options.nth(index).boundingBox())
   expect(boxes.map((box) => Math.round(box?.y ?? 0))).toEqual([...new Set(boxes.map((box) => Math.round(box?.y ?? 0)))])
   expect(boxes[1]!.y).toBeGreaterThan(boxes[0]!.y + 1)
-  await expect(options.nth(0)).toContainText('Workspace write')
+  await expect(options.nth(0)).toContainText('工作区写入')
   await expect(options.nth(1)).toContainText('完全访问')
 
   // The sandbox group unfolds only while workspace_write is the choice.

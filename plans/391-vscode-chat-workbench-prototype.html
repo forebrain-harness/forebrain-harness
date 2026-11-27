@@ -1,0 +1,2063 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Forebrain Harness 的 VS Code chat 工作台 原型 391</title>
+<style>
+/* ============================================================================
+   Token set. Light values are frontend/src/assets/main.css verbatim; the dark
+   set is this plan's proposal (webview only, html.dark on activeColorTheme).
+   ========================================================================== */
+:root{
+  --bg:#FFFFFF; --alt:#F7F8FA; --soft:#F2F4F7; --soft-2:#EAECF0;
+  --line:#E4E7EC; --line-2:#D0D5DD; --hair:#EEF0F3;
+  --ink:#101828; --ink-2:#475467; --muted:#667085; --quiet:#98A2B3;
+  --brand:#1F4A9E; --brand-hover:#173B80; --brand-soft:#EBF0F9; --brand-line:#C3D2EC; --brand-strong:#8FA9DA;
+  --ok:#067647; --ok-soft:#ECFDF3; --ok-line:#ABEFC6;
+  --warn:#B54708; --warn-soft:#FFFAEB; --warn-line:#FEDF89;
+  --danger:#B42318; --danger-soft:#FEF3F2; --danger-line:#FECDCA;
+  --code-bg:#FAFAFA; --code-soft:#F2F4F7; --code-ink:#111111;
+  --shadow:0 1px 2px rgba(16,24,40,.05);
+  --ui:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Segoe UI","Microsoft YaHei","Noto Sans SC",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+  --r:0.5rem;
+  /* VS Code chrome (scenery, not the design surface) */
+  --ch-tb:#DDDDDD; --ch-tb-ink:#333333; --ch-ab:#2C2C32; --ch-ab-ink:#C8C8C8; --ch-ab-ink-2:#868A90;
+  --ch-side:#F8F8F8; --ch-ed:#FFFFFF; --ch-ed-ink:#3B3B3B; --ch-ed-line:#E7E7E7; --ch-status:#F8F8F8; --ch-status-ink:#616161;
+}
+#vsc.dark{
+  --bg:#13151A; --alt:#181B21; --soft:#1D222A; --soft-2:#232A33;
+  --line:#282E37; --line-2:#3A424D; --hair:#1E232A;
+  --ink:#E8EBF0; --ink-2:#B4BCC7; --muted:#8B95A3; --quiet:#6C7684;
+  --brand:#7EA2EA; --brand-hover:#9BB8F0; --brand-soft:#1B2A46; --brand-line:#2C4573; --brand-strong:#4C6DA8;
+  --ok:#4BD59B; --ok-soft:#10241B; --ok-line:#1E4A38;
+  --warn:#F0B44E; --warn-soft:#241C0F; --warn-line:#5A4420;
+  --danger:#FF8C82; --danger-soft:#251416; --danger-line:#5A2A28;
+  --code-bg:#0E1116; --code-soft:#1A1E25; --code-ink:#E6E9ED;
+  --shadow:0 1px 2px rgba(0,0,0,.4);
+  --ch-tb:#3C3C3C; --ch-tb-ink:#CCCCCC; --ch-ab:#333333; --ch-ab-ink:#D7D7D7; --ch-ab-ink-2:#8A8A8A;
+  --ch-side:#252526; --ch-ed:#1E1E1E; --ch-ed-ink:#D4D4D4; --ch-ed-line:#2B2B2B; --ch-status:#007ACC; --ch-status-ink:#FFFFFF;
+}
+*{box-sizing:border-box}
+/* A scrolling column must not squeeze its cards: every child keeps its own
+   height and the column overflows instead. */
+.thread>*, .sess-list>*, .drawer-b>*, .dlg-b>*, .art-list>*, .batch-b>*, .todo-b>*, .picker-b>*, .events>*, .rows>*{flex:0 0 auto}
+html,body{margin:0;background:#F3F4F6;color:var(--ink);font:14px/1.6 var(--ui);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer}
+input,textarea{font:inherit;color:inherit}
+code,pre,.mono{font-family:var(--mono)}
+.ic{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+
+/* ---------- 稿纸外框 ---------- */
+.frame{max-width:1520px;margin:0 auto;padding:30px 24px 56px}
+.frame h1{font-size:22px;line-height:1.3;margin:0;font-weight:650;letter-spacing:-.01em}
+.frame .sub{margin:6px 0 0;color:var(--muted);font-size:13px;max-width:112ch}
+.frame .sub code{font-size:12px;background:var(--soft);border-radius:4px;padding:0 4px;color:var(--ink-2)}
+.pbadge{display:inline-block;border:1px solid var(--warn-line);color:var(--warn);background:var(--warn-soft);border-radius:4px;font-size:11px;padding:2px 7px;margin-left:10px;vertical-align:3px;font-weight:500}
+.toolbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 12px}
+.toolbar button{border:1px solid var(--line);background:#fff;color:var(--ink-2);font:500 12.5px/1 var(--ui);padding:8px 11px;border-radius:8px;transition:background .15s,color .15s,border-color .15s}
+.toolbar button:hover{color:var(--ink);border-color:var(--line-2)}
+.toolbar button[aria-pressed="true"]{background:var(--brand-soft);border-color:var(--brand-line);color:var(--brand)}
+.toolbar .sep{width:1px;height:20px;background:var(--line);margin:0 6px}
+.toolbar .tlabel{font-size:12px;color:var(--muted);margin-right:2px}
+.swatch{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:6px;vertical-align:-1px;border:1px solid rgba(16,24,40,.16)}
+.caption{margin:12px 2px 0;color:var(--muted);font-size:13px;max-width:112ch;min-height:44px}
+.caption b{color:var(--ink-2);font-weight:600}
+.stage-wrap{overflow-x:auto;padding:2px 2px 6px}
+.stage{display:flex;justify-content:center}
+.chrome-note{max-width:1180px;margin:0 auto 6px;display:flex;gap:8px;align-items:center;color:var(--quiet);font-size:11.5px;letter-spacing:.01em}
+.chrome-note i{display:block;width:14px;height:1px;background:var(--line-2)}
+
+/* ---------- VS Code 窗口（外壳＝scenery） ---------- */
+.vsc{width:1180px;height:840px;display:flex;flex-direction:column;background:var(--ch-ed);border:1px solid #CFD3D9;
+  border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(16,24,40,.08);font-size:12px}
+#vsc.dark{border-color:#111}
+.vsc-tb{height:30px;flex:none;display:flex;align-items:center;gap:10px;padding:0 10px;background:var(--ch-tb);color:var(--ch-tb-ink);font-size:11.5px}
+.vsc-tb .cc{flex:1;display:flex;justify-content:center}
+.vsc-tb .cc span{display:inline-flex;align-items:center;height:19px;padding:0 40px;border-radius:5px;background:rgba(127,127,127,.16);color:inherit;font-size:11px}
+.vsc-tb .lights{display:flex;gap:6px;align-items:center}
+.vsc-tb .lights i{width:9px;height:9px;border-radius:50%;background:rgba(127,127,127,.5);display:block}
+.vsc-body{flex:1;min-height:0;display:flex}
+.ab{width:44px;flex:none;background:var(--ch-ab);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px;color:var(--ch-ab-ink-2)}
+.ab .i{width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px;position:relative}
+.ab .i.on{color:var(--ch-ab-ink)}
+.ab .i.on::before{content:"";position:absolute;left:-8px;top:6px;bottom:6px;width:2px;background:var(--ab-accent,var(--brand));border-radius:2px}
+.ab .i .ic{width:18px;height:18px}
+.ab .grow{flex:1}
+.ab .i.brand{color:#fff;background:var(--ab-accent,var(--brand));border-radius:7px;width:30px;height:30px}
+.ab .i.brand .ic{width:17px;height:17px}
+.side{width:266px;flex:none;background:var(--bg);border-right:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.ed{flex:1;min-width:0;background:var(--ch-ed);color:var(--ch-ed-ink);display:flex;flex-direction:column;border-right:1px solid var(--ch-ed-line);position:relative}
+.ed-tabs{height:30px;flex:none;display:flex;align-items:stretch;border-bottom:1px solid var(--ch-ed-line);background:var(--ch-side);overflow:hidden}
+.ed-tab{display:flex;align-items:center;gap:5px;padding:0 8px;font-size:11.5px;color:var(--ch-ed-ink);opacity:.72;border-right:1px solid var(--ch-ed-line);white-space:nowrap;flex:none;max-width:186px;min-width:0;overflow:hidden}
+.ed-tab .tl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-tab.on{background:var(--ch-ed);opacity:1}
+.ed-tab .dot{width:7px;height:7px;border-radius:50%;background:#3A67C6}
+.ed-code{padding:10px 0 0;font-family:var(--mono);font-size:11.5px;line-height:1.85;overflow:hidden;flex:1;opacity:.85}
+.ed-code .ln{display:flex;padding:0 14px}
+.ed-code .ln span{width:30px;flex:none;text-align:right;padding-right:14px;opacity:.45}
+.ed-code .ln code{white-space:pre;color:inherit}
+.ed-code .k{color:#A626A4}
+#vsc.dark .ed-code .k{color:#C586C0}
+.ed-code .s{color:#4078F2}
+body.dark .ed-code .s{color:#CE9178}
+.ed-code .c{opacity:.5;font-style:italic}
+.sec{width:474px;flex:none;background:var(--bg);display:flex;flex-direction:column;min-height:0;position:relative}
+/* 编辑区（VS Code 中间栏，非 webview）：代码页与计划文件的 markdown 预览页 */
+.ed-tab[data-act]{cursor:pointer}
+.ed-tab[data-act]:hover{background:var(--ch-ed);opacity:.85}
+.ed-tab.md{font-style:italic}
+.ed-tab .prev{font-style:normal;font-size:9.5px;letter-spacing:.02em;border:1px solid var(--ch-ed-line);border-radius:3px;padding:0 2px;opacity:.75}
+.ed-md{flex:1;min-height:0;overflow:auto;padding:20px 30px 44px;background:var(--ch-ed);color:var(--ch-ed-ink);font-size:13.5px;line-height:1.8}
+.ed-md-inner{max-width:720px}
+.ed-md h1{font-size:21px;margin:0 0 6px;font-weight:650;letter-spacing:-.01em}
+.ed-md .meta{display:flex;gap:10px;align-items:center;font-size:11.5px;color:#8A8A8A;margin:0 0 14px;padding-bottom:10px;border-bottom:1px solid var(--ch-ed-line)}
+.ed-md .meta .path{font-family:var(--mono);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-md h2{font-size:15px;margin:18px 0 6px;font-weight:600}
+.ed-md p{margin:0 0 8px}
+.ed-md ol,.ed-md ul{margin:0 0 8px;padding-left:22px}
+.ed-md li{margin:2px 0}
+.ed-md code{font-family:var(--mono);font-size:12px;background:rgba(127,127,127,.16);border-radius:4px;padding:0 4px}
+.vsc-status{height:22px;flex:none;background:var(--ch-status);color:var(--ch-status-ink);display:flex;align-items:center;gap:12px;padding:0 10px;font-size:11px}
+.vsc-status .grow{flex:1}
+
+/* ---------- webview 公共 ---------- */
+.wv{display:flex;flex-direction:column;flex:1;min-height:0;background:var(--bg);color:var(--ink)}
+.wv-h{height:34px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;border-bottom:1px solid var(--line)}
+.wv-h .t{font-size:12.5px;font-weight:600;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wv-h .grow{flex:1}
+.iconbtn{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;border:0;background:transparent;color:var(--muted);border-radius:6px}
+.iconbtn:hover{background:var(--soft);color:var(--ink)}
+.iconbtn[aria-pressed="true"]{background:var(--brand-soft);color:var(--brand)}
+.thread{flex:1;min-height:0;overflow-y:auto;padding:12px 12px 4px;display:flex;flex-direction:column;gap:10px}
+.thread>:not(style){flex:0 0 auto}
+.thread::-webkit-scrollbar{width:10px}
+.thread::-webkit-scrollbar-thumb{background:var(--line-2);border-radius:6px;border:3px solid var(--bg)}
+.muted{color:var(--muted)}
+.small{font-size:11.5px}
+.cap{font-size:11px;letter-spacing:.02em;color:var(--muted);text-transform:none}
+
+/* 消息 */
+.msg-u{display:flex;flex-direction:column;gap:6px;align-items:flex-end}
+.bubble{max-width:100%;background:var(--alt);border:1px solid var(--line);border-radius:var(--r);padding:8px 10px;font-size:12.5px;line-height:1.7;color:var(--ink)}
+.bubble .mention{color:var(--brand);background:var(--brand-soft);border-radius:4px;padding:0 4px;font-family:var(--mono);font-size:11.5px}
+.att-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.att{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:6px;background:var(--surface,var(--bg));padding:3px 7px;font-size:11px;color:var(--ink-2);max-width:210px}
+.att .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att .x{color:var(--quiet)}
+.att .ic{width:12px;height:12px}
+.md{font-size:12.5px;line-height:1.75;color:var(--ink)}
+.md p{margin:0 0 7px}
+.md p:last-child{margin-bottom:0}
+.md strong{font-weight:600}
+.md ul{margin:0 0 7px;padding-left:18px}
+.md li{margin:1px 0}
+.md code{background:var(--code-soft);border-radius:4px;padding:1px 4px;font-size:11.5px;color:var(--code-ink)}
+.md pre{margin:0 0 7px;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;overflow-x:auto;font-size:11.5px;line-height:1.7;color:var(--code-ink)}
+
+/* 思考卡 */
+.think{padding:2px 0;font-size:11.5px;color:var(--muted)}
+.think-h{display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--muted)}
+.think-h .ic{width:13px;height:13px;color:var(--muted);flex:none}
+.think-h .tchev{width:12px;height:12px;color:var(--quiet);transition:transform .15s}
+.think.open .think-h .tchev{transform:rotate(180deg)}
+.think-b{margin:3px 0 4px 6px;padding:2px 0 2px 12px;border-left:2px solid var(--line);color:var(--muted);line-height:1.7}
+.think-b code{background:var(--code-soft);border-radius:3px;padding:0 4px;font-family:var(--mono);font-size:10.5px}
+
+/* 活动行 + 步骤 */
+.act{display:flex;flex-direction:column;gap:0}
+.act-step{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:11.5px;color:var(--muted)}
+.act-step .ic{width:13px;height:13px;flex:none;color:var(--muted)}
+.act-step.ok .ic{color:var(--muted)}
+.act-step.run .ic{color:var(--brand)}
+.act-step.fail .ic{color:var(--danger)}
+.act-step .lbl{color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.act-step .lbl .link{color:var(--brand)}
+.act-step .tm{margin-left:auto;color:var(--quiet);font-size:10.5px;font-family:var(--mono)}
+
+/* 工具卡 */
+.tool{border:0;background:none;overflow:visible}
+.tool-h{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:11.5px;min-width:0;cursor:pointer;color:var(--muted)}
+.tool-h .tlead{width:13px;height:13px;flex:none;color:var(--muted)}
+.tool-h .verb{color:var(--muted);flex:none;white-space:nowrap}
+.tool-h .tgt{color:var(--muted);font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.tool-h .tgt.link{color:var(--brand)}
+.tool-h .grow{flex:1}
+.tool.run .tool-h .tlead{color:var(--brand);animation:todoSpin 1s linear infinite}
+.tool-h .tchev{width:12px;height:12px;flex:none;color:var(--quiet);transition:transform .15s}
+.tool.open .tool-h .tchev{transform:rotate(180deg)}
+.tool.fail .tool-h .tlead{color:var(--danger)}
+.tool-b{display:none;padding:2px 0 4px 20px;font-size:11.5px}
+.tool.open .tool-b{display:block}
+.doc-out{margin:0;padding:8px 10px;background:var(--code-bg);font-family:var(--mono);font-size:11px;line-height:1.7;color:var(--code-ink);max-height:132px;overflow:auto;white-space:pre-wrap}
+.doc-cmd{display:flex;align-items:center;gap:6px;padding:5px 9px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:11px;color:var(--ink-2);background:var(--bg)}
+.doc-cmd b{color:var(--ink);font-weight:500}
+.badge{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:999px;padding:0 6px;font-size:10.5px;color:var(--muted);background:var(--bg);white-space:nowrap;flex:none}
+
+/* diff */
+.diff{border:0;background:none;overflow:visible}
+.diff-h{display:flex;align-items:center;gap:7px;padding:3px 0;font-size:11.5px;cursor:pointer;color:var(--muted)}
+.diff-h .tlead{width:13px;height:13px;flex:none;color:var(--muted)}
+.diff-h .p{font-family:var(--mono);color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.diff-h .n{margin-left:auto;font-family:var(--mono);font-size:10.5px;flex:none}
+.diff-h .n .a{color:var(--ok)}
+.diff-h .n .d{color:var(--danger)}
+.diff-h .tchev{width:12px;height:12px;flex:none;color:var(--quiet);transition:transform .15s}
+.diff.open .diff-h .tchev{transform:rotate(180deg)}
+.diff-b{display:none;font-family:var(--mono);font-size:11px;line-height:1.75;background:var(--code-bg);color:var(--code-ink);overflow-x:auto;border-radius:6px;margin:2px 0 4px 20px}
+.diff.open .diff-b{display:block}
+.scm{display:flex;flex-direction:column;height:100%;padding:8px 0}
+.scm-h{font-size:11px;font-weight:600;color:var(--ink-2);padding:0 12px 6px;letter-spacing:.03em}
+.scm-msg{margin:0 10px 6px}
+.scm-msg input{width:100%;border:1px solid var(--line);border-radius:6px;background:var(--alt);padding:5px 7px;font:inherit;font-size:11.5px;color:var(--ink);outline:0}
+.scm-commit{margin:0 10px 8px}
+.scm-grp{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;color:var(--ink-2);padding:4px 12px}
+.scm-n{margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--muted)}
+.scm-list{display:flex;flex-direction:column;overflow:auto}
+.scm-row{display:flex;align-items:center;gap:7px;padding:4px 12px;font-size:11.5px;cursor:pointer;color:var(--ink-2)}
+.scm-row:hover{background:var(--alt)}
+.scm-row.on{background:var(--brand-soft);color:var(--brand)}
+.scm-row .n{font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scm-row .k{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--warn)}
+.ed-diff{display:flex;flex-direction:column;flex:1;overflow:hidden}
+.ed-diff-h{display:flex;align-items:center;gap:7px;padding:6px 12px;border-bottom:1px solid var(--line);font-size:11.5px;color:var(--muted)}
+.ed-diff-h .p{font-family:var(--mono);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ed-diff-h .grow{flex:1}
+.ed-diff-tools{display:flex;align-items:center;gap:2px}
+.ed-diff-tools .iconbtn.on{background:var(--brand-soft);color:var(--brand)}
+.ed-diff-b{display:block;flex:1;margin:0;border-radius:0;overflow:auto}
+.diff-fold{display:flex;align-items:center;gap:6px;padding:3px 10px;background:var(--alt);color:var(--muted);font-size:10.5px;cursor:pointer;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.diff-fold .ic{width:12px;height:12px}
+.diff-fold:hover{color:var(--brand)}
+.diff-b .l{display:flex;gap:0}
+.diff-b .l .no{width:26px;flex:none;text-align:right;padding-right:8px;color:var(--quiet)}
+.diff-b .l code{white-space:pre;padding-right:10px}
+.diff-b .add{background:var(--ok-soft)}
+.diff-b .add code{color:var(--ok)}
+.diff-b .del{background:var(--danger-soft)}
+.diff-b .del code{color:var(--danger)}
+
+/* 交付物 */
+.art-group{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.art-h{display:flex;align-items:center;gap:8px;padding:6px 9px;background:var(--alt);border-bottom:1px solid var(--line);font-size:11.5px;color:var(--ink-2)}
+.art-h b{color:var(--ink);font-weight:600}
+.art-list{display:flex;flex-direction:column}
+.art-row{display:flex;align-items:center;gap:8px;padding:6px 9px;font-size:11.5px;border-bottom:1px solid var(--hair)}
+.art-row:last-child{border-bottom:0}
+.art-row .k{color:var(--quiet);flex:none;font-size:10.5px;border:1px solid var(--line);border-radius:4px;padding:0 4px}
+.art-row .n{font-family:var(--mono);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.art-row .dc{flex:none;font-family:var(--mono);font-size:10.5px}
+.art-row .dc .a{color:var(--ok)}
+.art-row .dc .d{color:var(--danger)}
+.art-row .sz{margin-left:auto;color:var(--quiet);font-size:10.5px;flex:none}
+.art-eye{flex:none;color:var(--muted)}
+.art-eye:hover{color:var(--brand)}
+
+/* 内联审批（gate） */
+.gate{border:1px solid var(--brand-line);border-radius:10px;overflow:hidden;background:var(--bg)}
+.gate-h{display:flex;align-items:center;gap:7px;padding:7px 9px;font-size:12px;color:var(--ink);background:var(--brand-soft);border-bottom:1px solid var(--brand-line)}
+.gate-h .ic{color:var(--brand)}
+.gate-facts{padding:6px 9px;display:flex;flex-direction:column;gap:3px;font-size:11.5px;color:var(--ink-2);border-bottom:1px solid var(--line)}
+.gate-facts .f{display:flex;gap:8px}
+.gate-facts .f .k{width:52px;flex:none;color:var(--muted)}
+.gate-facts .f .v{font-family:var(--mono);font-size:11px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gate-f{display:flex;align-items:center;gap:6px;padding:7px 9px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink-2);font-size:11.5px;white-space:nowrap}
+.btn:hover{border-color:var(--line-2);color:var(--ink)}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.btn.primary:hover{background:var(--brand-hover);border-color:var(--brand-hover);color:#fff}
+.btn.ghost{background:transparent}
+.btn.danger{color:var(--danger);border-color:var(--danger-line)}
+.btn.sm{height:22px;padding:0 7px;font-size:11px}
+.btn .ic{width:12px;height:12px}
+.gate-f .grow{flex:1}
+.gate-f .words{flex:1 1 100%;order:3;margin-top:2px}
+.gate-f .words input{width:100%;height:26px;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:0 8px;font-size:11.5px;color:var(--ink)}
+.decided{display:flex;align-items:flex-start;gap:6px;font-size:11.5px;padding:2px 2px;color:var(--ok)}
+.decided.no{color:var(--danger)}
+.decided .ic{width:12px;height:12px;position:relative;top:2px}
+
+/* 排队输入 */
+.queue{position:relative}
+.queue-pop{border:1px solid var(--line);border-radius:10px;background:var(--bg);box-shadow:var(--shadow);padding:7px 9px;font-size:11.5px}
+.queue-row{display:flex;gap:6px;align-items:baseline;padding:3px 0;color:var(--ink-2)}
+.queue-row .n{width:14px;color:var(--quiet);flex:none}
+.queue-row .txt{over:visible;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.queue-row .when{margin-left:auto;flex:none;color:var(--brand);font-size:10.5px}
+
+/* 运行态 */
+.status-line{display:flex;align-items:center;gap:7px;padding:2px 2px 6px;font-size:11.5px;color:var(--ink-2)}
+.spin{width:11px;height:11px;border:1.5px solid var(--brand-line);border-top-color:var(--brand);border-radius:50%;animation:sp 900ms linear infinite;flex:none}
+@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.status-line>.muted{margin-left:auto;flex:none}
+.worked{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);padding:2px 0}
+.hb{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--quiet);padding:1px 0}
+.compact{border:1px solid var(--line);border-radius:10px;background:var(--alt);padding:7px 9px;font-size:11.5px;color:var(--ink-2)}
+.compact .h{display:flex;align-items:center;gap:6px;margin-bottom:3px;color:var(--ink)}
+.compact .h b{font-weight:600;font-size:12px}
+.goal{border:1px solid var(--line);border-left:2px solid var(--brand);border-radius:8px;background:var(--bg);padding:7px 9px;font-size:11.5px}
+.goal .h{display:flex;align-items:center;gap:6px;color:var(--ink);font-weight:600;font-size:12px}
+.goal .h .r{margin-left:auto;color:var(--muted);font-weight:400;font-size:10.5px;font-family:var(--mono)}
+.goal .d{color:var(--ink-2);margin-top:2px}
+.acb{display:flex;align-items:center;gap:8px;border:1px solid var(--warn-line);background:var(--warn-soft);border-radius:8px;padding:6px 9px;font-size:11.5px;color:var(--ink)}
+.acb .ic{color:var(--warn)}
+.acb .grow{flex:1}
+.acb .cnt{font-family:var(--mono);font-size:10.5px;color:var(--warn)}
+.notice{border:1px solid var(--line);border-radius:8px;background:var(--alt);padding:7px 9px;font-size:11.5px;color:var(--ink-2)}
+.notice .h{display:flex;align-items:center;gap:6px;color:var(--ink);font-weight:600;font-size:12px;margin-bottom:2px}
+.notice .h .ic{color:var(--brand)}
+.notice.warn{border-color:var(--warn-line);background:var(--warn-soft)}
+.notice.warn .h .ic{color:var(--warn)}
+.notice .rows{margin-top:4px;display:flex;flex-direction:column;gap:2px}
+.notice .rows .r{display:flex;gap:8px;font-size:11px}
+.notice .rows .r .k{width:66px;flex:none;color:var(--muted)}
+.notice .rows .r .v{font-family:var(--mono);color:var(--ink)}
+.err-block{border:1px solid var(--danger-line);border-radius:10px;background:var(--danger-soft);padding:8px 9px;font-size:11.5px;color:var(--ink)}
+.err-block .h{display:flex;align-items:center;gap:6px;font-weight:600;font-size:12px;color:var(--danger);margin-bottom:2px}
+.err-block .h .ic{color:var(--danger)}
+.err-block .d{color:var(--ink-2);line-height:1.65}
+.err-block .f{display:flex;gap:6px;margin-top:6px}
+.batch{display:flex;flex-direction:column;gap:6px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.batch-h{display:flex;align-items:center;gap:8px;padding:6px 9px;background:var(--alt);border-bottom:1px solid var(--line);font-size:11.5px;color:var(--ink-2)}
+.batch-h b{color:var(--ink)}
+.batch-h .grow{flex:1}
+.batch-b{padding:7px 9px;display:flex;flex-direction:column;gap:5px}
+.batch-row{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--ink-2)}
+.batch-row .no{width:16px;color:var(--quiet);flex:none;font-family:var(--mono)}
+.batch-row .st{margin-left:auto;flex:none;font-size:10.5px;color:var(--muted)}
+.batch-row.run .st{color:var(--brand)}
+.batch-row.done .st{color:var(--ok)}
+
+/* plan dock */
+.xp{border:1px solid var(--brand-line);border-radius:10px;background:var(--bg);overflow:hidden}
+.xp-h{display:flex;align-items:center;gap:7px;padding:6px 9px;background:var(--brand-soft);border-bottom:1px solid var(--brand-line);font-size:11.5px}
+.xp-h b{font-weight:600;color:var(--ink)}
+.xp-h .p{font-family:var(--mono);font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xp-h .grow{flex:1}
+.xp-doc{border-bottom:1px solid var(--line);max-height:196px;overflow:auto;padding:8px 10px;font-size:11.5px;line-height:1.7;color:var(--ink);-webkit-mask-image:linear-gradient(to bottom,#000 84%,transparent);mask-image:linear-gradient(to bottom,#000 84%,transparent)}
+.xp-doc h3{font-size:12px;margin:0 0 4px;font-weight:600}
+.xp-doc .h4{font-size:11.5px;font-weight:600;margin:6px 0 2px}
+.xp-doc ol,.xp-doc ul{margin:0;padding-left:16px}
+.xp-doc li{margin:1px 0}
+.xp-doc code{background:var(--code-soft);border-radius:3px;padding:0 3px;font-size:10.5px}
+.xp-verdict{padding:6px 9px;border-bottom:1px solid var(--line);background:var(--alt);font-size:11px;color:var(--ink-2)}
+.xp-verdict .cap{display:block;font-size:10.5px;color:var(--muted);margin-bottom:1px}
+.xp-f{display:flex;align-items:center;gap:6px;padding:7px 9px;flex-wrap:wrap}
+.xp-f .q{width:100%;font-size:12px;color:var(--ink);margin-bottom:2px;font-weight:600}
+.xp-pick{display:flex;flex-direction:column;gap:4px;width:100%}
+.xp-pick .hint{font-size:10.5px;color:var(--muted)}
+.xp-model{display:flex;align-items:center;gap:7px;width:100%;padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:var(--alt);font:inherit;font-size:11.5px;color:var(--ink);cursor:pointer;text-align:left}
+.xp-model.is-on{background:var(--brand-soft);border-color:var(--brand-line)}
+.xp-model .ml{display:flex;align-items:center;gap:6px;min-width:0;flex:1}
+.xp-model .m{font-family:var(--mono);color:var(--ink);flex:none}
+.xp-model .ep{font-family:var(--mono);font-size:10px;color:var(--muted);min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.xp-back{display:inline-flex;align-items:center;gap:5px;align-self:flex-start;background:none;border:0;padding:0;font:inherit;font-size:11px;color:var(--muted);cursor:pointer}
+.xp-effort .eleft{display:flex;align-items:center;gap:6px;min-width:0}
+.xp-effort .elabel{font-weight:500}
+.xp-effort .ev{font-family:var(--mono);font-size:10px;color:var(--muted)}
+.xp-effort .etag{color:var(--muted);display:inline-flex;flex:none}
+/* 待办 = 会话里的一张卡，样式沿用之前那张「任务清单」卡并做了收尾：品牌发丝线、
+   10px 圆角、头部（图标 + 标题 + 计数）在 --alt 底上、行内小状态图标 + 正文 + 步骤标签，
+   完成行划线变淡、进行中行加粗、取消行变淡，全部是 forebrain web 的令牌。
+   标题用 web 自己的那个词：OverviewTab 的待办卡 `chat.benchTodos` = 待办，计数写作 done/total。 */
+.todoCard{flex:none;margin:0 10px 6px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--bg);display:flex;flex-direction:column;max-height:42%}
+.todoCardHead{display:flex;align-items:center;gap:7px;padding:6px 9px;background:var(--alt);border-bottom:1px solid var(--line);font-size:11.5px;color:var(--ink-2)}
+.todoCardHead .ic{width:13px;height:13px;color:var(--brand);flex:none}
+.todoCardTitle{font-size:12px;font-weight:600;color:var(--ink);white-space:nowrap}
+.todoCardHead .grow{flex:1}
+.todoCardCount{font-family:var(--mono);font-size:10.5px;color:var(--muted);flex:none}
+.todoCardBody{padding:5px 7px 7px;display:flex;flex-direction:column;gap:2px;overflow:auto}
+.todoRow{display:flex;align-items:flex-start;gap:7px;padding:3px 4px;border-radius:6px;font-size:11.5px;line-height:1.55;color:var(--ink-2)}
+.todoRow:hover{background:var(--alt)}
+.todoRow .ic{width:13px;height:13px;flex:none;position:relative;top:2px}
+.todoRow .todoState{flex:none;display:inline-flex;align-items:center}
+.todoRow .todoText{min-width:0}
+.todoRow.done{color:var(--muted)}
+.todoRow.done .ic{color:var(--ok)}
+.todoRow.done .todoText{text-decoration:line-through}
+.todoRow.run{color:var(--ink);font-weight:500}
+.todoRow.run .ic{color:var(--brand);animation:todoSpin 1s linear infinite}
+@keyframes todoSpin{to{transform:rotate(360deg)}}
+.todoRow.todo .ic{color:var(--quiet)}
+.todoRow.cancel{color:var(--muted)}
+.todoRow.cancel .ic{color:var(--danger)}
+.todoRow.cancel .todoText{text-decoration:line-through}
+.todoRow.flash{animation:todoFlash 2.6s ease-out forwards}
+@keyframes todoFlash{0%{background:var(--brand-soft);box-shadow:inset 2px 0 0 var(--brand)}70%{background:var(--brand-soft)}100%{background:transparent;box-shadow:inset 2px 0 0 transparent}}
+.todoRow.unread{background:var(--brand-soft);color:var(--ink);cursor:pointer}
+.todoRow.unread .todoText{font-weight:600}
+.todoRow.unread .unread-dot{width:6px;height:6px;border-radius:50%;background:var(--brand);flex:none;align-self:center}
+.todo-read-all{border:0;background:none;padding:0;font:inherit;font-size:10.5px;color:var(--brand);cursor:pointer;white-space:nowrap}
+.todo-read-all:hover{text-decoration:underline}
+.chip .chip-badge{margin-left:2px;min-width:14px;height:14px;border-radius:999px;background:var(--brand);color:#fff;font-family:var(--mono);font-size:9.5px;display:inline-flex;align-items:center;justify-content:center;padding:0 3px;animation:badgePulse 1.6s ease-in-out infinite}
+@keyframes badgePulse{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+@media (prefers-reduced-motion:reduce){.chip .chip-badge{animation:none}.todoRow.run .ic{animation:none}.tool.run .tool-h .tlead{animation:none}.todoRow.flash{animation:none;background:var(--brand-soft);box-shadow:inset 2px 0 0 var(--brand)}}
+.chip .chip-n{font-family:var(--mono);font-size:10px;opacity:.75}
+
+/* composer */
+.composer-wrap{flex:none;padding:6px 10px 10px;border-top:1px solid var(--line);background:var(--bg)}
+.composer{border:1px solid var(--line-2);border-radius:12px;background:var(--bg);display:flex;flex-direction:column}
+.composer.focus{border-color:var(--brand);box-shadow:0 0 0 3px color-mix(in srgb,var(--brand) 18%,transparent)}
+.ctop{display:flex;align-items:center;gap:6px;padding:6px 8px 0}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--alt);font-size:11px;color:var(--ink-2);max-width:100%}
+.pill .ic{width:12px;height:12px}
+.pill .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pill .caret{color:var(--quiet);margin-left:2px}
+.pill.warn{border-color:var(--warn-line);background:var(--warn-soft);color:var(--warn)}
+.ctext{padding:8px 10px 2px;font-size:12.5px;line-height:1.65;color:var(--ink);min-height:44px;white-space:pre-wrap;word-break:break-word}
+.ctext .ph{color:var(--quiet)}
+.ctext .mention{color:var(--brand);background:var(--brand-soft);border-radius:4px;padding:0 4px;font-family:var(--mono);font-size:11.5px}
+.ctext .slash{color:var(--brand);background:var(--brand-soft);border-radius:4px;padding:0 4px;font-family:var(--mono);font-size:11.5px}
+.cbar{display:flex;align-items:center;gap:6px;padding:6px 8px;flex-wrap:wrap}
+.cbar .grow{flex:1}
+.chip{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);font-size:11px;color:var(--ink-2);white-space:nowrap}
+.chip:hover{border-color:var(--line-2);color:var(--ink)}
+.chip .ic{width:12px;height:12px}
+.chip .caret{color:var(--quiet);margin-left:1px}
+.chip.plain{border-color:transparent;background:transparent}
+.chip.on{border-color:var(--brand-line);background:var(--brand-soft);color:var(--brand)}
+.ring{width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;position:relative;border:0;background:transparent;color:var(--muted)}
+.ring svg{width:22px;height:22px}
+.send{width:26px;height:26px;border-radius:6px;border:1px solid var(--brand);background:var(--brand);color:#fff;display:inline-flex;align-items:center;justify-content:center}
+.send.stop{background:var(--bg);border-color:var(--line-2);color:var(--ink-2)}
+.send .ic{width:13px;height:13px}
+
+/* 选择器 / 弹层 */
+.picker{border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);background:var(--bg);overflow:hidden;margin:0 0 6px}
+.picker-h{display:flex;align-items:center;gap:6px;padding:5px 9px;background:var(--alt);border-bottom:1px solid var(--line);font-size:10.5px;color:var(--muted)}
+.picker-b{max-height:170px;overflow:auto;padding:3px}
+.picker-search{display:flex;align-items:center;gap:6px;height:26px;margin:6px 3px 0;padding:0 7px;border:1px solid var(--line);border-radius:6px;background:var(--alt);color:var(--muted);font-size:11.5px}
+.xp-pick .picker-search{margin:0}
+.picker-search input{flex:1;min-width:0;border:0;background:transparent;outline:0;font-size:11.5px;color:var(--ink)}
+.picker-search .ic{width:13px;height:13px;flex:none}
+.pk-empty{padding:8px 7px;font-size:11px;color:var(--muted);text-align:center}
+.xp-list{display:flex;flex-direction:column;gap:4px;max-height:180px;overflow:auto}
+.pk-row{display:flex;align-items:baseline;gap:8px;padding:4px 7px;border-radius:6px;font-size:11.5px;color:var(--ink-2)}
+.pk-row.on{background:var(--brand-soft);color:var(--ink)}
+.pk-row .n{font-family:var(--mono);color:var(--ink);flex:none}
+.pk-row .d{color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pk-row .k{margin-left:auto;flex:none;font-size:10px;color:var(--quiet);font-family:var(--mono)}
+
+/* 抽屉 */
+.drawer-mask{position:absolute;inset:0;background:rgba(16,24,40,.18);display:flex;justify-content:flex-end}
+.drawer{width:322px;background:var(--bg);border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0}
+.drawer-h{height:32px;flex:none;display:flex;align-items:center;gap:8px;padding:0 8px;border-bottom:1px solid var(--line)}
+.tabs{display:flex;gap:2px;padding:5px 6px 0;border-bottom:1px solid var(--line);overflow-x:auto}
+.tab{display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border:1px solid transparent;border-bottom:0;border-radius:6px 6px 0 0;font-size:11px;color:var(--muted);white-space:nowrap}
+.tab.on{background:var(--alt);border-color:var(--line);color:var(--ink);position:relative;top:1px}
+.tab .pdot{width:5px;height:5px;border-radius:50%;background:var(--ok)}
+.drawer-b{flex:1;min-height:0;overflow-y:auto;padding:8px 9px;display:flex;flex-direction:column;gap:8px}
+.drawer-f{flex:none;border-top:1px solid var(--line);padding:6px 8px;display:flex;gap:6px;align-items:center}
+.drawer-f .inp{flex:1;height:26px;border:1px solid var(--line);border-radius:6px;background:var(--bg);padding:0 8px;font-size:11.5px;color:var(--ink)}
+.sub-h{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--ink-2)}
+.sub-h .nm{font-weight:600;color:var(--ink)}
+.pillrun{margin-left:auto;border:1px solid var(--line);border-radius:999px;padding:0 7px;font-size:10.5px;color:var(--muted);display:inline-flex;gap:5px;align-items:center}
+.pillrun .d{width:5px;height:5px;border-radius:50%;background:var(--brand)}
+.kv-mini{display:flex;gap:8px;font-size:10.5px;color:var(--muted);flex-wrap:wrap}
+.kv-mini b{color:var(--ink-2);font-weight:500}
+
+/* 弹窗 */
+.dlg-mask{position:absolute;inset:0;background:rgba(16,24,40,.28);display:flex;align-items:center;justify-content:center;padding:14px}
+.dlg{width:100%;max-width:392px;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);display:flex;flex-direction:column;max-height:100%}
+.dlg-h{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--line);font-size:12.5px;font-weight:600}
+.dlg-h .grow{flex:1}
+.dlg-b{padding:10px 12px;font-size:12px;color:var(--ink-2);overflow-y:auto;display:flex;flex-direction:column;gap:8px}
+.dlg-f{display:flex;justify-content:flex-end;gap:6px;padding:9px 12px;border-top:1px solid var(--line)}
+.grp{font-size:11.5px;font-weight:600;color:var(--ink);margin-bottom:2px}
+.row{display:grid;grid-template-columns:16px minmax(0,1fr);gap:9px;align-items:center;padding:5px 0;border-bottom:1px solid var(--hair)}
+.row:last-child{border-bottom:0}
+.cbx{width:14px;height:14px;border:1px solid var(--line-2);border-radius:4px;background:var(--bg);display:inline-flex;align-items:center;justify-content:center;color:#fff;flex:none;padding:0}
+.cbx.on{background:var(--brand);border-color:var(--brand)}
+.cbx .ic{width:10px;height:10px;stroke-width:3}
+.row .nm{font-size:11.5px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.row .dt{font-family:var(--mono);font-size:10.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.row .two{display:flex;gap:10px;align-items:baseline;min-width:0}
+.row .two .nm{flex:none}
+.row .two .dt{flex:1}
+.switch-row{display:flex;align-items:center;gap:9px;border-top:1px solid var(--line);padding-top:8px;margin-top:2px;font-size:11.5px;color:var(--ink)}
+.hintline{font-size:11px;color:var(--muted)}
+.tree{display:flex;flex-direction:column;gap:1px;font-size:11.5px;max-height:160px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px}
+.tree-row{display:flex;align-items:center;gap:6px;padding:2px 5px;border-radius:4px;color:var(--ink-2)}
+.tree-row.on{background:var(--brand-soft);color:var(--brand)}
+.tree-row .ic{width:11px;height:11px;color:var(--quiet)}
+.tree-row .r{margin-left:auto;font-size:10px;color:var(--quiet)}
+
+/* Sessions 独立视图 */
+.sess{display:flex;flex-direction:column;flex:1;min-height:0}
+.sess-h{display:flex;align-items:center;gap:6px;padding:8px 10px 6px}
+.sess-h .t{font-size:12px;font-weight:600;letter-spacing:.02em;text-transform:uppercase;color:var(--muted)}
+.sess-h .grow{flex:1}
+.sess-search{margin:0 10px 6px;display:flex;align-items:center;gap:6px;height:26px;border:1px solid var(--line);border-radius:6px;padding:0 7px;background:var(--alt);color:var(--muted);font-size:11.5px}
+.sess-search input{flex:1;border:0;background:transparent;outline:0;font-size:11.5px;color:var(--ink)}
+.sess-list{flex:1;min-height:0;overflow-y:auto;padding:0 6px 8px;display:flex;flex-direction:column;gap:1px}
+.sess-row{display:flex;flex-direction:column;gap:1px;padding:6px 8px;border-radius:6px;border:1px solid transparent;text-align:left;background:transparent;width:100%}
+.sess-row:hover{background:var(--alt)}
+.sess-row.on{background:var(--brand-soft);border-color:var(--brand-line)}
+.sess-row .ttl{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink);min-width:0}
+.sess-row .ttl .n{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess-row .ttl .dot{width:5px;height:5px;border-radius:50%;background:var(--brand);flex:none}
+.sess-row .meta{display:flex;gap:6px;font-size:10.5px;color:var(--muted);min-width:0}
+.sess-row .meta .p{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess-row .meta .tm{margin-left:auto;flex:none;color:var(--quiet);font-family:var(--mono)}
+.sess-empty{padding:16px 12px;font-size:11.5px;color:var(--muted);line-height:1.75}
+.sess-f{flex:none;border-top:1px solid var(--line);padding:6px 10px;font-size:10.5px;color:var(--quiet);display:flex;align-items:center;gap:6px}
+
+/* 宿主侧状态（loader）与未信任占位 */
+.hoststates{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.hostcard{border:1px solid var(--line);border-radius:10px;background:var(--bg);padding:12px;display:flex;flex-direction:column;gap:8px;min-height:200px;justify-content:center}
+.hostcard h4{margin:0;font-size:12px;font-weight:600;color:var(--ink)}
+.hostcard p{margin:0;font-size:11.5px;color:var(--muted);line-height:1.7}
+.hostcard .btn{align-self:flex-start}
+.untrusted{border:1px solid var(--line);border-radius:10px;overflow:hidden;display:grid;grid-template-columns:266px minmax(0,1fr) 300px;gap:0;background:var(--bg)}
+.untrusted .ph{display:flex;flex-direction:column;gap:6px;align-items:center;justify-content:center;padding:16px 10px;text-align:center;border-right:1px solid var(--line);min-height:190px}
+.untrusted .ph:last-child{border-right:0}
+.untrusted .ph .ic{width:18px;height:18px;color:var(--quiet)}
+.untrusted .ph b{font-size:11.5px;color:var(--ink-2);font-weight:600}
+.untrusted .ph span{font-size:11px;color:var(--muted);line-height:1.6}
+.rpc{display:flex;flex-direction:column;gap:0;border:1px solid var(--line);border-radius:10px;overflow:hidden;font-size:11.5px;background:var(--bg)}
+.rpc-row{display:grid;grid-template-columns:132px 196px minmax(0,1fr);gap:10px;padding:5px 9px;border-bottom:1px solid var(--hair);align-items:baseline}
+.rpc-row .k{overflow-wrap:anywhere}
+.rpc-row:last-child{border-bottom:0}
+.rpc-row.hd{background:var(--alt);font-size:10.5px;color:var(--muted)}
+.rpc-row .m{font-family:var(--mono);color:var(--ink)}
+.rpc-row .k{font-family:var(--mono);font-size:10.5px;color:var(--brand)}
+.rpc-row .d{color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scene-grid{display:flex;flex-direction:column;gap:10px}
+.starters{display:flex;flex-wrap:wrap;gap:6px}
+.starter{border:1px solid var(--line);border-radius:999px;background:var(--bg);padding:4px 10px;font-size:11.5px;color:var(--ink-2)}
+.starter:hover{border-color:var(--brand-line);color:var(--brand);background:var(--brand-soft)}
+.empty-hero{display:flex;flex-direction:column;gap:8px;padding:10px 2px}
+.empty-hero .bm{width:26px;height:26px;border-radius:7px;background:var(--brand);display:flex;align-items:center;justify-content:center;color:#fff}
+.empty-hero h3{margin:0;font-size:13px;font-weight:650;color:var(--ink)}
+.empty-hero p{margin:0;font-size:11.5px;color:var(--muted);line-height:1.7}
+
+/* 观测器 */
+.inspection{margin-top:26px;border:1px solid var(--line);border-radius:12px;background:#fff;padding:14px 16px}
+.inspect-head{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.inspect-head strong{font-size:13px}
+.inspect-head span{color:var(--muted);font-size:11.5px}
+.inspect-head .btn{margin-left:auto}
+.inspect-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px}
+.inspect-title{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:3px 12px;margin:0;font-size:11.5px}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;color:var(--ink);font-family:var(--mono);font-size:11px;overflow:hidden;text-overflow:ellipsis}
+.events{display:flex;flex-direction:column;gap:3px;font-size:11.5px;max-height:168px;overflow:auto}
+.events .e{display:flex;gap:8px;color:var(--ink-2)}
+.events .e .tm{color:var(--quiet);font-family:var(--mono);font-size:10.5px;flex:none}
+.events .e.ok{color:var(--ok)}
+.events .e.warn{color:var(--warn)}
+.events .e.err{color:var(--danger)}
+details{margin-top:10px}
+summary{cursor:pointer;font-size:11.5px;color:var(--muted)}
+pre.db{margin:8px 0 0;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:10px;font-size:11px;line-height:1.6;max-height:220px;overflow:auto;color:var(--code-ink)}
+
+/* 说明 */
+.notes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}
+.note{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 13px}
+.note h2{margin:0 0 5px;font-size:12px;font-weight:650;color:var(--ink)}
+.note p{margin:0;font-size:11.5px;line-height:1.75;color:var(--muted)}
+.note code{font-size:10.5px;background:var(--soft);border-radius:3px;padding:0 3px;color:var(--ink-2)}
+</style>
+</head><body>
+<div class="frame">
+  <h1>VS Code chat 工作台<span class="pbadge">待 owner 确认 未实施</span></h1>
+  <p class="sub">计划 391 的视觉定稿稿。结构严格对齐 Claude Code 2.1.332（三个 webview 与三个 provider：<code>forebrain.chatSidebar</code> / <code>forebrain.chatSecondary</code> / <code>forebrain.sessionsList</code>），视觉按 forebrain web 主题全新设计：<code>frontend/src/assets/main.css</code> 的平面白、发丝线、墨色与品牌三 scheme。Dark 只在 webview 跟随 VS Code 主题（宿主 <code>activeColorTheme</code> 触发 <code>html.dark</code>），web 整站本期仍亮色。三 scheme 改的是**全应用的强调色族**：内容区强调（按钮、衬线、选中态、链接、上下文环）与活动栏和侧栏标一起换，与 <code>main.css</code> 那句 “switching recolours everything in unison” 一致。零网络：所有交互都是页内模拟，没有真实数据库、网关调用或密钥。</p>
+
+  <div class="toolbar" id="scenes" role="group" aria-label="原型场景"><span class="tlabel">场景</span></div>
+  <div class="toolbar" id="opts" role="group" aria-label="主题">
+    <span class="tlabel">主题</span>
+    <button type="button" data-theme="light" aria-pressed="true">Light</button>
+    <button type="button" data-theme="dark" aria-pressed="false">Dark（仅 webview）</button>
+    <span class="sep"></span>
+    <span class="tlabel">品牌 scheme</span>
+    <button type="button" data-brand="navy" aria-pressed="true"><span class="swatch" style="background:#1F4A9E"></span>Navy</button>
+    <button type="button" data-brand="teal" aria-pressed="false"><span class="swatch" style="background:#0E6E7E"></span>Teal</button>
+    <button type="button" data-brand="graphite" aria-pressed="false"><span class="swatch" style="background:#1C1C1F"></span>Graphite</button>
+    <span class="sep"></span>
+    <button type="button" id="reset">重置当前场景</button>
+  </div>
+
+  <div class="chrome-note"><i></i>窗口外壳按 VS Code 默认主题着色，只作取景；设计面是两块 webview（左侧 Sessions、右侧聊天），它们用 forebrain 令牌，不读 <code>--vscode-*</code>。</div>
+
+  <div class="stage-wrap"><div class="stage"><div class="vsc" id="vsc"></div></div></div>
+  <p class="caption" id="cap"></p>
+
+  <section class="inspection" aria-label="模拟观察器">
+    <div class="inspect-head">
+      <strong>webview 观察器</strong><span>原型辅助区，不属于产品界面</span>
+      <button type="button" class="btn sm" id="sim-update" data-testid="simulate-todo-update">模拟一次 session_todo 更新</button>
+    </div>
+    <div class="inspect-body">
+      <div>
+        <div class="inspect-title">当前状态</div>
+        <dl class="kv" id="facts"></dl>
+      </div>
+      <div>
+        <div class="inspect-title">交互记录</div>
+        <div class="events" id="events"></div>
+      </div>
+    </div>
+    <details>
+      <summary>查看拟提交的项目服务同意体（逐行 allow 与 alwaysAllow，与 projectServersConsent 同形）</summary>
+      <pre class="db" id="consent-body"></pre>
+    </details>
+  </section>
+
+  <div class="notes">
+    <div class="note">
+      <h2>结构照厂商，不照旧表面</h2>
+      <p>三个 webview 与三个 provider：会话在 secondarySidebar（<code>when: !forebrain.doesNotSupportSecondarySidebar</code>），旧版 VS Code 回退到活动栏容器；Sessions 是独立容器的独立 webview。旧的 iframe 嵌整站在 Step 10 拆掉。</p>
+    </div>
+    <div class="note">
+      <h2>token 不进 webview</h2>
+      <p>webview 只发白名单 RPC，宿主带着 Bearer 转发。面板里没有 <code>login#token=</code>，也没有可读的凭据；断线由宿主重连并回放快照。</p>
+    </div>
+    <div class="note">
+      <h2>同一套主题，两种明暗</h2>
+      <p>webview 直接引入 <code>main.css</code>，暗色只加一段 <code>html.dark</code>；宿主把 <code>activeColorTheme.kind</code> 推下来，webview 加/撤类名。web 整站不设 dark 类。三 scheme 由同一族 token 驱动，内容区与侧栏一起换，不做局部染色。</p>
+    </div>
+    <div class="note">
+      <h2>信任走 VS Code</h2>
+      <p>面板内不画 TrustDialog。扩展声明 <code>untrustedWorkspaces supported: false</code>；选目录时按三分支：落在受信任工作区内自动写记录、之外走宿主原生模态、工作区未信任则受限不发。</p>
+    </div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ============================== 图标（lucide 轮廓） ============================== */
+const I={
+  plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+  x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  chev:'<path d="m6 9 6 6 6-6"/>',
+  chevUp:'<path d="m18 15-6-6-6 6"/>',
+  chevR:'<path d="m9 18 6-6-6-6"/>',
+  cpu:'<rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9z"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>',
+  search:'<circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/>',
+  file:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
+  folder:'<path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2z"/>',
+  term:'<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
+  msg:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  spark:'<path d="M12 3l1.9 4.6L18.5 9.5 13.9 11.4 12 16l-1.9-4.6L5.5 9.5l4.6-1.9z"/><path d="M18 15.5l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/>',
+  warn:'<path d="m10.3 3.9-8.5 14.1A2 2 0 0 0 3.5 21h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  err:'<circle cx="12" cy="12" r="9"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+  okc:'<circle cx="12" cy="12" r="9"/><path d="m8.5 12 2.5 2.5 4.5-5"/>',
+  info:'<circle cx="12" cy="12" r="9"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  users:'<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>',
+  up:'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  sq:'<rect x="4" y="4" width="16" height="16" rx="2"/>',
+  copy:'<rect x="8" y="8" width="13" height="13" rx="2"/><path d="M5 15a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2"/>',
+  ext:'<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  map:'<path d="M14.1 6.4 9 4 3.6 6.2A1 1 0 0 0 3 7.1V20a1 1 0 0 0 1.4.9L9 18.6l5.1 2.4a1 1 0 0 0 .8 0l4.5-2.3a1 1 0 0 0 .6-.9V5a1 1 0 0 0-1.4-.9z"/><path d="M9 4v14.6"/><path d="M15 6.4V21"/>',
+  eye:'<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>',
+  list:'<path d="m3 17 2 2 4-4"/><path d="m3 7 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/>',
+  at:'<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-3.9 7.9"/>',
+  clip:'<path d="m21.4 11.1-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/>',
+  play:'<path d="m6 3 14 9-14 9z"/>',
+  back:'<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  code:'<path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/>',
+  branch:'<path d="M6 3v12"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+  panel:'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M15 3v18"/>',
+  bot:'<path d="M12 8V4"/><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M9 13h.01"/><path d="M15 13h.01"/>',
+  ring:'<circle cx="12" cy="12" r="9"/>',
+  load:'<path d="M21 12a9 9 0 1 1-6.219-8.56"/>',
+  gauge:'<path d="m12 14 4-4"/><path d="M3.4 19a10 10 0 1 1 17.2 0"/>',
+  target:'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/>',
+  lock:'<rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  history:'<path d="M3 3v5h5"/><path d="M3.1 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l4 2"/>',
+  image:'<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/>',
+  plug:'<path d="M12 22v-5"/><path d="M9 7V2"/><path d="M15 7V2"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/>',
+  zap:'<path d="m13 2-9 12h7l-1 8 9-12h-7z"/>',
+  trash:'<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+  layers:'<path d="m12 2 9 5-9 5-9-5z"/><path d="m3 12 9 5 9-5"/><path d="m3 17 9 5 9-5"/>',
+  dots:'<circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/>',
+  arrowL:'<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+  arrowR:'<path d="m12 5 7 7-7 7"/><path d="M5 12h14"/>',
+  send:'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  gear:'<path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.9-1.2l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.5-2.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 11.8 4a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.9 1.2l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4z"/>'
+};
+const ic=(n,cls)=>`<svg class="ic ${cls||''}" viewBox="0 0 24 24" aria-hidden="true">${I[n]||''}</svg>`;
+const esc=(s)=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const q=(id)=>document.getElementById(id);
+const on=(id,ev,fn)=>q(id).addEventListener(ev,fn);
+
+/* ============================== 数据（真实形状的模拟内容） ============================== */
+const SESSIONS=[
+  {id:'s-383',title:'secondarySidebar 在 1.105 上不生效',project:'forebrain-harness',time:'12:04',live:true},
+  {id:'s-382',title:'把 exit-plan 的评审结论显示在 plan dock',project:'forebrain-harness',time:'11:20'},
+  {id:'s-379',title:'VS Code 原生集成：选区送会话与交付物打开',project:'forebrain-harness',time:'昨天'},
+  {id:'s-374',title:'订阅账号显示与退出登录',project:'forebrain-harness',time:'昨天'},
+  {id:'s-601',title:'季度报表模板里的公式对不上',project:'finance-deck',time:'11月24日'},
+  {id:'s-588',title:'批量任务卡片头部要写命令名',project:'forebrain-harness',time:'11月23日'}
+];
+const SESSION_TITLES=Object.fromEntries(SESSIONS.map(s=>[s.id,s.title]));
+
+/* The plan as the card and the editor both read it: one source, so the eye's
+   preview cannot say something the dock does not. */
+const PLAN_DOC={
+  file:'plans/391-vscode-chat-workbench.md',
+  tab:'391-vscode-chat-workbench.md',
+  title:'把 VS Code 表面切成三个 webview',
+  status:'P1，规模 L，风险 HIGH，原型待 owner 确认',
+  goal:'聊天面复用前端归约，Step 10 拆掉 iframe；网关后端零改动。',
+  steps:[
+    '传输抽象：<code>lib/api</code> 与 WS 抽接口，浏览器默认不变',
+    '宿主 RPC：REST 代理、WS 合帧、bind 探测、信任三分支',
+    'webview 脚手架与 <code>html.dark</code>',
+    'Sessions 独立视图与线程渲染',
+    '贡献结构切换，relay 退场'
+  ],
+  gates:[
+    '完整原型经 owner 确认并冻结 SHA 之后才实施',
+    'drift 不符即停；<code>relay.ts</code> 冻结不调用'
+  ]
+};
+
+/* 计划两种去向的模型来源（modelLabel = provider/model，与 usePendingActions 一致）。
+   efforts 是这个模型真正提供的档位；defaultEffort 是模型行自己配的那档，它就是强度屏
+   打开时选中的那一行并带齿轮（planEffortOptions）。 */
+const EXIT_MODELS=[
+  {provider:'anthropic',model:'claude-sonnet-4-6',endpoint:'https://api.anthropic.com/v1',preferred:true,current:true,efforts:['low','medium','high','xhigh'],defaultEffort:'high'},
+  {provider:'openai',model:'gpt-5.5',endpoint:'https://api.openai.com/v1',efforts:['low','medium','high'],defaultEffort:''},
+  {provider:'zcode',model:'glm-5.3',endpoint:'https://open.bigmodel.cn/api/paas/v4',efforts:['medium','high'],defaultEffort:'medium'}
+];
+const modelLabel=(m)=>[m.provider,m.model].filter(Boolean).join('/');
+const EFFORT_LABEL={minimal:'极低',low:'低',medium:'中',high:'高',xhigh:'最高',max:'极致'};
+const EFFORT_ORDER=['minimal','low','medium','high','xhigh','max'];
+function effortOptionsFor(model){
+  const known=EFFORT_ORDER.filter((level)=>(model.efforts||[]).includes(level));
+  const configured=String(model.defaultEffort||'');
+  const ids=configured===''?['',...known]:known;
+  return ids.map((id)=>({id,fromSetting:id!==''&&id===configured,label:id===''?'默认':(EFFORT_LABEL[id]||id)}));
+}
+/* The session_todo payload the plan card renders. The title is the one the web
+   shows in Chinese: the engine sends the constant 'Updated Plan', and
+   useChatStream's ENGINE_TITLES maps it through translate('chat.updatedPlan')
+   = 更新待办 for the web's message card; this card titles itself with the web's
+   list word instead (chat.benchTodos = 待办). The statuses are the engine's own vocabulary;
+   the glyph table below is PlanUpdateCard.vue's. */
+const SESSION_TODO={
+  // No title and no explanation line: those belonged to the web's PlanUpdateCard
+  // message form, and the extension does not render that card at all. What is
+  // left is what the todo card shows: the item and its status, nothing else —
+  // no step column, no second label to read.
+  items:[
+    {content:'传输抽象：lib/api 与 WS 抽接口，浏览器默认不变',status:'completed'},
+    {content:'宿主 RPC：REST 代理、WS 合帧、bind 探测、信任三分支',status:'completed'},
+    {content:'webview 脚手架与 html.dark',status:'in_progress'},
+    {content:'Sessions 独立视图与线程渲染',status:'pending'},
+    {content:'贡献结构切换，relay 退场',status:'pending'},
+    {content:'编辑区 WebviewPanel',status:'cancelled'}
+  ]
+};
+const todoDanger=(status)=>['cancelled','canceled'].includes(String(status||'').trim().toLowerCase());
+const todoNow=(status)=>['in_progress','in-progress','active'].includes(String(status||'').trim().toLowerCase());
+function todoGlyph(status){
+  const s=String(status||'').trim().toLowerCase();
+  if(s==='completed'||s==='done') return '✓';
+  if(todoNow(s)) return '▣';
+  if(s==='cancelled'||s==='canceled') return '✕';
+  return '□';
+}
+const REVIEW_VERDICT='Approve with changes：唯一必改是计划号撞号，已改成落地取下一个空闲号；信任分支 1 复用 deliverableGate 边界并补兄弟前缀单测。改完可以直接执行。';
+
+const CONSENT_MCP=[
+  {name:'filesystem',detail:'npx -y @modelcontextprotocol/server-filesystem .'},
+  {name:'postgres-local',detail:'http://127.0.0.1:8790/mcp (stdio)'}
+];
+const CONSENT_LSP=[
+  {name:'gopls',detail:'go install golang.org/x/tools/gopls@latest'},
+  {name:'vue-language-server',detail:'@vue/language-server 3.0.5'}
+];
+
+const SLASH_ROWS=[
+  {n:'/new',d:'在当前项目里开一个新对话',k:'内置'},
+  {n:'/plan',d:'切换到计划模式，先出计划',k:'内置'},
+  {n:'/project',d:'切换这个对话的项目类型',k:'内置'},
+  {n:'/skills',d:'查看与启用技能',k:'内置'},
+  {n:'/compact',d:'压缩上下文并保留检查点',k:'内置'},
+  {n:'plan-gated-bugfix',d:'bug 报告到真机验收的修复流程',k:'项目技能'}
+];
+const AT_ROWS=[
+  {n:'editors/vscode/src/extension.ts',d:'目录 editors/vscode/src',k:'文件'},
+  {n:'editors/vscode/src/panel.ts',d:'目录 editors/vscode/src',k:'文件'},
+  {n:'editors/vscode/package.json',d:'目录 editors/vscode',k:'文件'},
+  {n:'plans/391-vscode-chat-workbench-prototype.html',d:'目录 plans',k:'文件'}
+];
+const PLUS_ROWS=[
+  {n:'附件',d:'图片或 PDF，最多 5 个',i:'clip'},
+  {n:'目标',d:'按轮推进，直到确认达成',i:'target'},
+  {n:'技能',d:'把技能当命令插进输入框',i:'spark'}
+];
+// The approval presets as the Chinese locale names them (locales/index.ts:
+// approval.default 「工作区写入」, approval.fullAccess 「完全访问」). The menu
+// lists concrete presets only: whichever the default is, that row is the
+// selected one and the chip reads its name back (owner 2026-11-26). English is
+// the other locale's business; this prototype speaks Chinese.
+const PRESETS=[
+  {value:'workspace_write',label:'工作区写入',desc:'可以读写当前工作区的文件并运行命令；修改工作区外的文件需要审批。'},
+  {value:'full_access',label:'完全访问',desc:'可以修改工作区外的文件并访问互联网，无需审批。谨慎使用。'}
+];
+/** The preset a new conversation starts under (the agent default). */
+const DEFAULT_PRESET='workspace_write';
+const presetLabel=(v)=>(PRESETS.find(p=>p.value===v)||PRESETS[0]).label;
+/* The composer's own model menu: the session's configured models. Every model
+   dropdown carries a search box and scrolls, so a long roster stays pickable. */
+const SESSION_MODELS=[
+  {n:'claude-sonnet-4-6',d:'Anthropic 支持图片'},
+  {n:'gpt-5.5',d:'OpenAI 支持图片'},
+  {n:'glm-5.3',d:'ZCode'}
+];
+const matchQ=(q,s)=>!q||s.toLowerCase().includes(q.toLowerCase());
+/* forebrain's own per-tool glyphs (file/search/term/code), not a uniform circle:
+   the icon names the kind of work the row did. */
+const toolIcon=(verb,st)=>st==='fail'?'err':st==='run'?'load':/^已读取/.test(verb)?'file':/^已搜索/.test(verb)?'search':/^已运行/.test(verb)?'term':/^已编辑|^已改动/.test(verb)?'code':'okc';
+const EVENTS=[];
+
+const SCENES=[
+  {id:'thread',title:'主对话线程'},
+  {id:'fail',title:'失败与拒绝'},
+  {id:'runtime',title:'运行态卡片'},
+  {id:'plan',title:'计划与检查点'},
+  {id:'todos-unread',title:'待办未读/已读'},
+  {id:'handoff-models',title:'交给模型：选模型'},
+  {id:'handoff-effort',title:'交给模型：选强度'},
+  {id:'review-models',title:'请模型评审：选模型'},
+  {id:'review-running',title:'评审进行中'},
+  {id:'review-verdict',title:'评审结论'},
+  {id:'subagent',title:'子代理抽屉'},
+  {id:'peer',title:'peer 消息'},
+  {id:'consent',title:'项目服务同意'},
+  {id:'slash',title:'composer 展开'},
+  {id:'sessions',title:'Sessions 视图'},
+  {id:'empty',title:'新会话空态'},
+  {id:'api',title:'宿主边界与三态'},
+  {id:'fallback',title:'活动栏回退'}
+];
+
+function fresh(){
+  return {
+    scene:'thread',theme:'light',brand:'navy',selected:'s-383',search:'',
+    consent:null,consentAnswer:null,approval:'waiting',queueOpen:true,
+    drawer:null,dialog:null,picker:null,slash:0,plus:false,model:false,effort:false,modelFilter:'',dockFilter:'',modelName:'claude-sonnet-4-6',openTool:null,openThink:null,scmOpen:false,diffFile:null,collapseUnchanged:true,
+    planDock:'waiting',planDecision:null,verdict:true,dockPick:null,handoffModel:modelLabel(EXIT_MODELS[0]),handoffEffort:'',reviewModel:modelLabel(EXIT_MODELS[0]),batchState:'paused',rewound:false,
+    composer:'',composerFocus:false,atOpen:false,preset:DEFAULT_PRESET,presetMenu:false,editorTab:'code',planTabOpen:false,todosOpen:false,todoItems:SESSION_TODO.items.map((item)=>({...item})),todoChanged:[],todoFlash:false,todoUnread:[],todoTimer:null,events:[]
+  };
+}
+let S=fresh();
+function log(text,tone){S.events.push({text,tone:tone||'',at:new Date().toISOString().slice(11,19)});if(S.events.length>26)S.events.shift();}
+
+/* ============================== 线程积木 ============================== */
+function uMsg(text,atts){
+  const chips=(atts||[]).map(a=>`<span class="att" data-comp="UserAttachments">${ic(a.ic||'file')}<span class="n">${esc(a.n)}</span><span class="x">${esc(a.sz||'')}</span></span>`).join('');
+  return `<div class="msg-u">${chips?`<div class="att-row">${chips}</div>`:''}<div class="bubble">${text}</div></div>`;
+}
+function think(id,text){
+  const open=S.openThink===id;
+  return `<div class="think ${open?'open':''}" data-comp="ThinkingCard"><div class="think-h" data-act="think-toggle" data-v="${id}">${ic('spark')}<span>深度思考</span>${ic('chev','tchev')}</div>${open?`<div class="think-b">${text}</div>`:''}</div>`;
+}
+function md(html){return `<div class="md">${html}</div>`;}
+function act(steps){
+  const rows=steps.map(s=>{
+    const read=/^已读取 /.test(s.l);
+    const icon=toolIcon(s.l,s.st);
+    const lbl=read?`<span class="lbl">已读取 <span class="link">${esc(s.l.replace(/^已读取 /,''))}</span></span>`:`<span class="lbl">${s.l}</span>`;
+    return `<div class="act-step ${s.st||'ok'}" data-comp="ActivityStep">${ic(icon)}${lbl}<span class="tm">${esc(s.t||'')}</span></div>`;
+  }).join('');
+  return `<div class="act" data-comp="ActivityLine">${rows}</div>`;
+}
+function badge(text,tone){return `<span class="badge" data-comp="BadgeComponent">${text}</span>`;}
+function toolHead(verb,target,tone,tid){
+  const lead=toolIcon(verb,tone);
+  const tgt=verb==='已读取'?`<span class="tgt link">${esc(target)}</span>`:`<span class="tgt">${esc(target)}</span>`;
+  return `<div class="tool-h" data-act="tool-toggle" data-v="${esc(tid)}">${ic(lead,'tlead')}<span class="verb">${verb}</span>${tgt}<span class="grow"></span>${ic('chev','tchev')}</div>`;
+}
+function toolOk(verb,target,body){
+  const tid=verb+' '+target;
+  return `<div class="tool ok ${S.openTool===tid?'open':''}" data-status="ok" data-comp="ToolCallCard">${toolHead(verb,target,'ok',tid)}${body?`<div class="tool-b">${body}</div>`:''}</div>`;
+}
+function toolFail(verb,target,body){
+  const tid=verb+' '+target;
+  return `<div class="tool fail ${S.openTool===tid?'open':''}" data-status="fail" data-comp="ToolCallCard">${toolHead(verb,target,'fail',tid)}${body?`<div class="tool-b">${body}</div>`:''}</div>`;
+}
+function toolRun(verb,target){
+  const tid=verb+' '+target;
+  return `<div class="tool run" data-status="run" data-comp="ToolCallCard">${toolHead(verb,target,'run',tid)}</div>`;
+}
+function docCard(verb,target,cmd,out){
+  const tid=verb+' '+target;
+  return `<div class="tool ok ${S.openTool===tid?'open':''}" data-status="ok" data-comp="ToolCallCard">
+    ${toolHead(verb,target,'ok',tid)}
+    <div class="tool-b">
+      <div class="doc-cmd" data-comp="ToolDocCommand">${ic('term')}<b>$</b> ${esc(cmd)}</div>
+      <div style="padding:5px 9px 0" data-comp="ToolDocTitle"><span class="cap">输出（3 行）</span></div>
+      <pre class="doc-out" data-comp="ToolDocOutput">${esc(out)}</pre>
+    </div>
+  </div>`;
+}
+function diffCard(path,added,deleted,lines){
+  const body=lines.map(l=>`<div class="l ${l.k}"><span class="no">${l.no}</span><code>${esc(l.t)}</code></div>`).join('');
+  const tid='diff '+path;
+  return `<div class="diff ${S.openTool===tid?'open':''}" data-comp="DiffView">
+    <div class="diff-h" data-act="tool-toggle" data-v="${esc(tid)}">${ic('branch','tlead')}<span class="p">${esc(path)}</span><span class="n"><span class="a">+${added}</span> <span class="d">−${deleted}</span></span>${ic('chev','tchev')}</div>
+    <div class="diff-b">${body}</div>
+  </div>`;
+}
+function artGroup(rows){
+  const list=rows.map(r=>{
+    const ext=r.kind&&r.kind!=='code';
+    const act=ext?'open-external':'open-diff';
+    const title=ext?'用系统默认应用打开':'在源代码管理与编辑区打开 diff';
+    return `<div class="art-row" data-comp="ArtifactList"><span class="k">${esc(r.k)}</span><span class="n">${esc(r.n)}</span>${r.d?`<span class="dc"><span class="a">+${r.d.a}</span> <span class="d">−${r.d.d}</span></span>`:''}<span class="sz">${esc(r.sz)}</span><button type="button" class="iconbtn art-eye" data-act="${act}" data-v="${esc(r.n)}" title="${title}" aria-label="${title} ${esc(r.n)}">${ic('eye')}</button></div>`;
+  }).join('');
+  return `<div class="art-group">
+    <div class="art-h">${ic('layers')}<b>本轮交付物</b>${badge(rows.length+' 个文件')}<span class="grow" style="flex:1"></span><span class="small muted">收起</span></div>
+    <div class="art-list">${list}</div>
+  </div>`;
+}
+function gate(){
+  const waiting=S.approval==='waiting';
+  if(!waiting){
+    const ok=S.approval==='allowed';
+    return `<div class="decided ${ok?'':'no'}" data-comp="ApprovalCard" data-approval-status="${S.approval}">${ic(ok?'okc':'err')}<span>${ok?'已允许 运行 npm --prefix editors/vscode test -- panelHtml':'你拒绝了这条命令，它没有运行。'}</span></div>`;
+  }
+  return `<div class="gate" data-comp="ApprovalCard" data-approval-status="pending">
+    <div class="gate-h">${ic('shield')}<span>要运行这条命令吗？</span></div>
+    <div class="gate-facts">
+      <div class="f"><span class="k">命令</span><span class="v">npm --prefix editors/vscode test -- panelHtml</span></div>
+      <div class="f"><span class="k">目录</span><span class="v">editors/vscode</span></div>
+      <div class="f"><span class="k">发起</span><span class="v">主代理 forebrain-harness</span></div>
+    </div>
+    <div class="gate-f">
+      <button type="button" class="btn primary" data-act="approve">运行</button>
+      <button type="button" class="btn" data-act="deny">不要运行</button>
+      <span class="grow"></span>
+      <span class="cap">本会话不再问</span>
+    </div>
+    <div class="gate-f" style="padding-top:0;border-top:0">
+      <div class="words"><input type="text" placeholder="告诉它该怎么做（可不填）" data-act="refuse-words"></div>
+    </div>
+  </div>`;
+}
+function queue(){
+  if(!S.queueOpen) return '';
+  return `<div class="queue-pop" data-comp="PendingInputQueuePopover">
+    <div class="h small muted" style="display:flex;gap:6px;align-items:center;margin-bottom:3px">${ic('list')}<b style="color:var(--ink);font-weight:600">消息队列</b><span>2 条待发</span></div>
+    <div class="queue-row"><span class="n">1</span><span class="txt">顺便把 manifest.test.ts 的断言也改掉</span><span class="when">下一个工具调用之后发出</span></div>
+    <div class="queue-row"><span class="n">2</span><span class="txt">然后跑一遍全量门禁</span><span class="when">本轮结束时发出</span></div>
+  </div>`;
+}
+function statusLine(label,tail){
+  return `<div class="status-line" data-comp="RunStatusLine"><span class="spin"></span><span>${esc(label)}</span><span class="muted">${esc(tail||'')}</span></div>`;
+}
+function worked(text){return `<div class="worked" data-comp="RunWorkedLine">${ic('clock')}<span>${esc(text)}</span></div>`;}
+function hb(){return `<div class="hb" data-comp="SessionHeartbeat">${ic('zap')}<span>心跳：每 15 分钟</span><span>下次约 12:19</span></div>`;}
+function compactCard(){
+  return `<div class="compact" data-comp="CompactionCard">
+    <div class="h">${ic('layers')}<b>上下文已压缩</b><span class="grow" style="flex:1"></span><span class="cap">检查点 3</span></div>
+    <div>148k → 62k tokens（−58%）</div>
+    <div class="small muted" style="margin-top:3px">每次压缩都会丢失一些细节，开启新对话（/new）能让长任务保持准确。</div>
+  </div>`;
+}
+function goal(){
+  return `<div class="goal" data-comp="GoalLine">
+    <div class="h">${ic('target')}<span>目标</span><span class="r">第 3 轮 4m 12s</span></div>
+    <div class="d">按轮推进，每轮结束后检查工作区，直到确认达成 按 Esc 停止</div>
+  </div>`;
+}
+function acb(){
+  return `<div class="acb" data-comp="AutoContinueBanner">${ic('warn')}<span>模型服务正在限流 将在 00:42 自动继续</span><span class="grow"></span><span class="cnt">取消</span></div>`;
+}
+function mcpNotice(){
+  return `<div class="notice" data-comp="McpNotice">
+    <div class="h">${ic('plug')}<span>MCP 服务启动超时</span></div>
+    <div>MCP 服务 filesystem 启动超时（30 秒），本对话不能用它的工具。修好后新开对话即可。</div>
+    <div class="rows">
+      <div class="r"><span class="k">服务</span><span class="v">filesystem</span></div>
+      <div class="r"><span class="k">命令</span><span class="v">npx -y @modelcontextprotocol/server-filesystem .</span></div>
+    </div>
+  </div>`;
+}
+function lspCard(){
+  return `<div class="notice" data-comp="LspRecommendationCard">
+    <div class="h">${ic('code')}<span>语言服务器推荐</span></div>
+    <div>语言服务器会在编辑后为代理提供诊断，并支持按符号查找定义与引用。要启用这个语言服务器吗？</div>
+    <div class="rows">
+      <div class="r"><span class="k">服务器</span><span class="v">gopls</span></div>
+      <div class="r"><span class="k">检测</span><span class="v">未安装。安装命令：go install golang.org/x/tools/gopls@latest</span></div>
+      <div class="r"><span class="k">运行位置</span><span class="v">在受信任的项目内、沙箱之外运行</span></div>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button type="button" class="btn primary sm">安装并启用</button>
+      <button type="button" class="btn sm">暂不</button>
+      <button type="button" class="btn sm ghost">不再推荐 gopls</button>
+    </div>
+  </div>`;
+}
+function errBlock(){
+  return `<div class="err-block" data-comp="RunErrorBlock">
+    <div class="h">${ic('warn')}<span>这一轮没有跑完</span></div>
+    <div class="d">npm --prefix editors/vscode test 退出码 1：panelHtml.test.ts 期望 3 个 iframe 标记，读到 2 个。</div>
+    <div class="f"><button type="button" class="btn sm">重试</button><button type="button" class="btn sm ghost">打开日志</button></div>
+  </div>`;
+}
+function batchCard(){
+  const st=S.batchState;
+  const rows=[
+    {no:'1',t:'改 manifest.test.ts 的容器断言',s:'已完成',c:'done'},
+    {no:'2',t:'跑 editors/vscode 的 npm test',s:st==='paused'?'等待继续':'运行中',c:st==='paused'?'':'run'},
+    {no:'3',t:'更新 README 的新架构段',s:'尚未开始',c:''}
+  ].map(r=>`<div class="batch-row ${r.c}"><span class="no">${r.no}</span><span>${esc(r.t)}</span><span class="st">${r.s}</span></div>`).join('');
+  const buttons=st==='paused'
+    ? `<button type="button" class="btn sm" data-act="batch-continue">继续执行</button><button type="button" class="btn sm ghost">重新执行</button>`
+    : `<button type="button" class="btn sm" data-act="batch-stop">停止执行</button><button type="button" class="btn sm ghost">重新执行</button>`;
+  return `<div class="batch" data-comp="BatchRunActions">
+    <div class="batch-h">${ic('list')}<b>跑批任务</b><span class="cap">最近一次执行 第 2 次</span><span class="grow"></span>${badge(st==='paused'?'等待继续':'执行中')}</div>
+    <div class="batch-b">${rows}<div style="display:flex;gap:6px;margin-top:3px">${buttons}</div></div>
+  </div>`;
+}
+function planDoc(){
+  return `<div class="xp-doc" data-comp="PlanDoc">
+    <h3>${esc(PLAN_DOC.title)}</h3>
+    <div class="h4">目标</div>
+    <div>${esc(PLAN_DOC.goal)}</div>
+    <div class="h4">步骤</div>
+    <ol>${PLAN_DOC.steps.map((step)=>`<li>${step}</li>`).join('')}</ol>
+  </div>`;
+}
+/** The same plan, rendered the way VS Code's markdown preview renders it. */
+function planEditorPreview(){
+  return `<div class="ed-md" data-testid="editor-md-preview">
+    <div class="ed-md-inner">
+      <h1>${esc(PLAN_DOC.title)}</h1>
+      <div class="meta"><span class="path">${esc(PLAN_DOC.file)}</span><span>${esc(PLAN_DOC.status)}</span></div>
+      <h2>目标</h2>
+      <p>${esc(PLAN_DOC.goal)}</p>
+      <h2>步骤</h2>
+      <ol>${PLAN_DOC.steps.map((step)=>`<li>${step}</li>`).join('')}</ol>
+      <h2>闸门</h2>
+      <ul>${PLAN_DOC.gates.map((gate)=>`<li>${gate}</li>`).join('')}</ul>
+    </div>
+  </div>`;
+}
+function modelPicker(purpose){
+  const handoff=purpose==='handoff';
+  const list=EXIT_MODELS.filter(m=>matchQ(S.dockFilter,modelLabel(m)+' '+(m.endpoint||'')));
+  const rows=list.map(m=>`<button type="button" class="xp-model ${m.current?'is-on':''}"
+      data-act="${handoff?'pick-handoff-model':'pick-review-model'}" data-v="${esc(modelLabel(m))}"
+      data-testid="${handoff?'exit-plan-hand-off-model':'plan-review-model'}">
+      <span class="ml"><span class="m">${esc(modelLabel(m))}</span>${m.endpoint?`<span class="ep">${esc(m.endpoint)}</span>`:''}</span>
+    </button>`).join('');
+  return `<div class="xp-pick" data-testid="${handoff?'exit-plan-hand-off-models':'plan-review-models'}">
+    <span class="cap">${handoff?'交给哪个模型执行？':'用哪个模型评审这份计划？'}</span>
+    ${handoff?'<span class="hint">在新的 worktree 里实施，不动当前分支</span>':''}
+    <label class="picker-search">${ic('search')}<input type="search" id="dock-search" data-testid="dock-model-filter" placeholder="搜索模型" aria-label="搜索模型" value="${esc(S.dockFilter)}"></label>
+    <div class="xp-list">${rows||'<div class="pk-empty">没有匹配的模型</div>'}</div>
+  </div>`;
+}
+function effortPicker(){
+  const model=EXIT_MODELS.find((m)=>modelLabel(m)===S.handoffModel)||EXIT_MODELS[0];
+  const options=effortOptionsFor(model);
+  const picked=options.find((o)=>o.fromSetting)||options[0];
+  const rows=options.map(o=>`<button type="button" class="xp-model xp-effort ${o.id===picked.id?'is-on':''}"
+      data-act="pick-effort" data-v="${esc(o.id)}" data-testid="exit-plan-effort-option">
+      <span class="eleft">
+        <b class="elabel">${esc(o.label)}</b>
+        ${o.id&&o.label.toLowerCase()!==o.id.toLowerCase()?`<code class="ev">${esc(o.id)}</code>`:''}
+        ${o.fromSetting?`<span class="etag" role="img" title="模型设置" aria-label="模型设置">${ic('gear')}</span>`:''}
+      </span>
+    </button>`).join('');
+  return `<div class="xp-pick" data-testid="exit-plan-effort">
+    <button type="button" class="xp-back" data-testid="exit-plan-effort-back" data-act="back-models">${ic('arrowL')}返回选模型</button>
+    <span class="cap" data-testid="exit-plan-effort-question">${esc(modelLabel(model))} 用哪档思考强度？</span>
+    ${rows}
+  </div>`;
+}
+function reviewRunLine(){
+  return `<div class="xp-run" data-testid="exit-plan-review-running"><span class="spin"></span><span>${esc(S.reviewModel)} 正在评审这份计划…</span><span class="grow"></span><button type="button" class="gate-btn" data-act="stop-review">停止</button></div>`;
+}
+function planDock(){
+  const decided=S.planDecision;
+  const pick=S.dockPick;
+  let footer;
+  if(pick==='handoff-models') footer=modelPicker('handoff');
+  else if(pick==='handoff-effort') footer=effortPicker();
+  else if(pick==='review-models') footer=modelPicker('review');
+  else if(pick==='review-running') footer=reviewRunLine();
+  else if(decided==='handoff') footer=`<div class="q">已交给 ${esc(S.handoffModel)} 执行${S.handoffEffort?`，思考强度 ${esc(S.handoffEffort)}`:''}</div><div class="cap">它在新的 worktree 里实施，不动当前分支</div>`;
+  else if(decided==='approved') footer=`<div class="q">已批准，开始实施</div>`;
+  else footer=`<div class="q">要开始执行吗？</div>
+      <button type="button" class="btn primary sm" data-act="plan-approve">批准</button>
+      <button type="button" class="btn sm" data-act="plan-handoff">交给其他模型执行</button>
+      <button type="button" class="btn sm" data-act="plan-review">请其他模型评审</button>
+      <button type="button" class="btn sm ghost" data-act="plan-keep">继续规划</button>`;
+  return `<div class="xp" data-comp="PlanApprovalDock" data-plan-status="${pick||decided||'waiting'}" data-dock-pick="${pick||''}">
+    <div class="xp-h">${ic('map')}<b>计划</b><span class="p">plans/391-vscode-chat-workbench.md</span><span class="grow"></span><button type="button" class="iconbtn" data-act="open-plan-editor" title="在编辑器中打开计划" aria-label="在编辑器中打开计划">${ic('eye')}</button></div>
+    ${planDoc()}
+    ${S.verdict?`<div class="xp-verdict" data-testid="exit-plan-review-verdict"><span class="cap">anthropic/claude-sonnet-4-6 的评审结论</span><div>${REVIEW_VERDICT}</div></div>`:''}
+    <div class="xp-f" ${pick?'style="display:block"':''}>${footer}</div>
+  </div>`;
+}
+/** Counts from the session's own todo payload, so chip, header and list agree. */
+function todoCounts(){
+  const items=S.todoItems;
+  const done=items.filter((item)=>['completed','done'].includes(String(item.status||'').trim().toLowerCase())).length;
+  return {done,total:items.length,text:`${done}/${items.length}`};
+}
+/**
+ * The session's todos as a custom webview list, aligned with Claude Code's todo
+ * list: a container, one <ul>, one <li> per item, and a three-state checkbox —
+ * completed is checked, in_progress is the half (indeterminate) state, pending
+ * is empty. Completed rows are muted and struck through. Web tokens, not the
+ * workbench's: this is a webview surface, not a native tree.
+ *
+ * Updates land as unread: a changed row keeps a brand dot and bold text until
+ * the reader marks it read (a row click or 全部已读), and flashes once when it
+ * arrives. While the list is closed the composer's toggle carries an unread-count
+ * badge with a gentle pulse, so the change is not silent.
+ */
+function todoList(){
+  const counts=todoCounts();
+  const iconOf=(status)=>todoDanger(status)?'err':(status==='completed'||status==='done')?'okc':todoNow(status)?'load':'ring';
+  const rows=S.todoItems.map((item,index)=>{
+    const status=String(item.status||'').trim().toLowerCase();
+    const done=status==='completed'||status==='done';
+    const now=todoNow(status);
+    const cancelled=todoDanger(status);
+    const unread=S.todoUnread.includes(index);
+    const cls=[done?'done':'',now?'run':'',cancelled?'cancel':'',(!done&&!now&&!cancelled)?'todo':'',unread?'unread':'',S.todoFlash&&S.todoChanged.includes(index)?'flash':''].filter(Boolean).join(' ');
+    // The three states stay readable to a screen reader even though the card
+    // draws them as icons: checked, mixed (in flight), unchecked.
+    const checked=done?'true':now?'mixed':'false';
+    return `<div class="todoRow ${cls}" data-status="${esc(status)}" data-index="${index}" data-testid="todo-row"${unread?` data-act="todo-read" data-v="${index}" title="标为已读"`:''}>
+      ${unread?'<span class="unread-dot" aria-hidden="true"></span>':''}
+      <span class="todoState" role="checkbox" aria-checked="${checked}" aria-label="${esc(item.content)}">${ic(iconOf(status))}</span>
+      <span class="todoText">${esc(item.content)}</span>
+    </div>`;
+  }).join('');
+  return `<div class="todoCard" id="forebrain-todos" data-testid="todo-list" role="region" aria-label="待办">
+    <div class="todoCardHead" data-testid="todo-list-head">
+      ${ic('list')}<span class="todoCardTitle">待办</span>
+      ${S.todoUnread.length?`<button type="button" class="todo-read-all" data-act="todo-read-all" data-testid="todo-read-all">全部已读</button>`:''}
+      <span class="grow"></span>
+      <span class="todoCardCount" data-testid="todo-count">${counts.text}</span>
+      <button type="button" class="iconbtn" data-act="toggle-todos" title="收起待办" aria-label="收起待办">${ic('x')}</button>
+    </div>
+    <div class="todoCardBody">${rows}</div>
+  </div>`;
+}
+/**
+ * One session_todo update: the in-flight item finishes and the next pending one
+ * starts, exactly the pair an engine update moves. Returns how many rows changed
+ * so the caller can say it in the log.
+ */
+function simulateTodoUpdate(){
+  const items=S.todoItems;
+  const changed=[];
+  const nowIndex=items.findIndex((item)=>todoNow(item.status));
+  if(nowIndex>=0){items[nowIndex].status='completed';changed.push(nowIndex);}
+  const pendingIndex=items.findIndex((item)=>String(item.status||'').trim().toLowerCase()==='pending');
+  if(pendingIndex>=0){items[pendingIndex].status='in_progress';changed.push(pendingIndex);}
+  if(!changed.length) return 0;
+  S.todoChanged=changed;
+  S.todoFlash=true;
+  // Unread persists until the reader marks it read (a row click or 全部已读),
+  // so an update is still visible after the flash fades — like an unread mail.
+  for(const index of changed) if(!S.todoUnread.includes(index)) S.todoUnread.push(index);
+  clearTimeout(S.todoTimer);
+  S.todoTimer=setTimeout(()=>{S.todoFlash=false;render();},2600);
+  return changed.length;
+}
+function subagentCall(){
+  return `<div class="notice" data-comp="SubagentCallCard" data-act="open-subagent" style="cursor:pointer">
+    <div class="h">${ic('bot')}<span>正在运行 1 个 plan-reviewer 任务…</span><span class="grow" style="flex:1"></span><span class="small" style="color:var(--brand)">查看</span></div>
+    <div class="rows">
+      <div class="r"><span class="k">任务</span><span class="v">评审 plans/391 的实现步骤与信任分支</span></div>
+      <div class="r"><span class="k">最近</span><span class="v">已读取 chatwv/transport.md</span></div>
+    </div>
+  </div>`;
+}
+function peerMark(){return `<div class="hb" data-comp="PeerMark">${ic('users')}<span>来自 vscode-workbench 会话</span></div>`;}
+function peerMsg(){
+  return `<div class="notice" data-comp="PeerMessageCard">
+    <div class="h">${ic('msg')}<span>vscode-workbench 发来一条消息</span></div>
+    <div>MCP 服务 filesystem 在这台机器上启动超时，我先改用本地读取，别重试同一个命令。</div>
+  </div>`;
+}
+function peerDelivery(){
+  return `<div class="notice" data-comp="PeerDeliveryCard">
+    <div class="h">${ic('send')}<span>已送达</span></div>
+    <div>对方的用户放行了。</div>
+  </div>`;
+}
+function peerHeld(){
+  return `<div class="acb" data-comp="PeerHeldBanner">${ic('lock')}<span>vscode-workbench 的消息在等你放行</span><span class="grow"></span><span style="display:flex;gap:6px"><button type="button" class="btn sm" data-act="peer-release">放行</button><button type="button" class="btn sm ghost" data-act="peer-deny">拒绝</button></span></div>`;
+}
+function refusedLine(){
+  return `<div class="decided no" data-comp="ApprovalCard" data-approval-status="denied">${ic('err')}<span>你拒绝了这条命令，它没有运行。</span></div>`;
+}
+function runPausedLine(){
+  return `<div class="worked" data-comp="RunStatusLine">${ic('clock')}<span>已暂停，等你决定</span></div>`;
+}
+
+/* ============================== composer ============================== */
+function composer(o){
+  o=o||{};
+  const atts=(o.attachments||[]).map(a=>`<span class="att" data-comp="UserAttachments">${ic(a.ic||'file')}<span class="n">${esc(a.n)}</span><span class="x">${esc(a.sz||'')}</span></span>`).join('');
+  const text=o.text!==undefined?o.text:'<span class="ph">输入消息，/ 调出命令，@ 引用文件</span>';
+  const plus=S.plus?`<div class="picker" data-comp="ComposerPlusMenu" style="position:absolute;bottom:40px;left:8px;width:236px;margin:0">
+      <div class="picker-h">添加</div><div class="picker-b">
+      ${PLUS_ROWS.map(r=>`<div class="pk-row"><span style="display:flex;gap:7px;align-items:center"><b class="n" style="font-family:var(--ui);font-weight:500">${ic(r.i)} ${esc(r.n)}</b></span><span class="d">${esc(r.d)}</span></div>`).join('')}
+      </div>
+      <div class="picker-h" style="border-top:1px solid var(--line);border-bottom:0">输入 @ 引用文件，输入 / 打开命令与技能</div>
+    </div>`:'';
+  const modelMenu=S.model?`<div class="picker" data-comp="ModelChip" style="position:absolute;bottom:40px;right:8px;width:300px;margin:0">
+      <div class="picker-h">模型</div>
+      <label class="picker-search">${ic('search')}<input type="search" id="model-search" data-testid="model-filter" placeholder="搜索模型" aria-label="搜索模型" value="${esc(S.modelFilter)}"></label>
+      <div class="picker-b">
+        ${SESSION_MODELS.filter(m=>matchQ(S.modelFilter,m.n+' '+m.d)).map(m=>`<div class="pk-row ${m.n===S.modelName?'on':''}" data-act="pick-model" data-v="${esc(m.n)}" data-testid="model-option-${esc(m.n)}"><span class="n">${esc(m.n)}</span><span class="d">${esc(m.d)}</span></div>`).join('')||'<div class="pk-empty">没有匹配的模型</div>'}
+      </div>
+    </div>`:'';
+  const presetMenu=S.presetMenu?`<div class="picker" data-testid="approval-picker-menu" style="position:absolute;bottom:40px;left:8px;width:340px;margin:0">
+      <div class="picker-h">${ic('shield')}本会话的审批模式</div>
+      <div class="picker-b">
+        ${PRESETS.map(p=>`<div class="pk-row ${S.preset===p.value?'on':''}" data-act="pick-preset" data-v="${p.value}" data-testid="approval-option-${p.value}">
+          <span class="d" style="flex:1;white-space:normal"><b style="display:block;color:var(--ink);font-weight:500">${esc(p.label)}</b>${esc(p.desc)}</span>
+        </div>`).join('')}
+      </div>
+    </div>`:'';
+  return `<div class="composer-wrap" style="position:relative">
+    ${plus}${modelMenu}${presetMenu}
+    <div class="composer ${o.focus?'focus':''}">
+      ${o.pill?`<div class="ctop"><span class="pill" data-comp="ProjectPill" data-act="browse-folder" title="选择项目或文件夹">${ic('folder')}<span class="n">forebrain-harness</span>${ic('chev','caret')}</span><span class="pill">${ic('branch')}<span class="n">dev</span></span></div>`:''}
+      ${atts?`<div class="ctop" style="padding-bottom:2px">${atts}</div>`:''}
+      <div class="ctext" data-comp="ForebrainPromptTextarea">${text}</div>
+      <div class="cbar">
+        <span class="chip plain" data-act="plus" title="添加">${ic('plus')}</span>
+        <span class="chip" data-comp="ModeChip">${ic('msg')}Agent${ic('chev','caret')}</span>
+        <span class="chip" data-act="preset" data-comp="ApprovalPresetPicker" aria-haspopup="listbox" aria-expanded="${S.presetMenu}">${ic('shield')}${esc(presetLabel(S.preset))}${ic('chev','caret')}</span>
+        <span class="chip" data-comp="ViewModeChip">${ic('layers')}默认${ic('chev','caret')}</span>
+        <button type="button" class="chip ${S.todosOpen?'on':''}" data-act="toggle-todos" data-testid="todos-toggle"
+          aria-expanded="${S.todosOpen}" aria-controls="forebrain-todos" aria-label="待办${S.todoUnread.length&&!S.todosOpen?`，${S.todoUnread.length} 项未读`:''}">${ic('list')}待办<span class="chip-n">${todoCounts().text}</span>${S.todoUnread.length&&!S.todosOpen?`<span class="chip-badge" data-testid="todos-badge">${S.todoUnread.length}</span>`:''}</button>
+        <span class="grow"></span>
+        <span class="ring" data-comp="ContextRing" title="上下文已占用 42%，点开工作台查看">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5" fill="none" stroke="var(--line-2)" stroke-width="2.5"/><circle cx="12" cy="12" r="8.5" fill="none" stroke="var(--brand)" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="22.4 53.4" transform="rotate(-90 12 12)"/></svg>
+        </span>
+        <span class="chip" data-act="model" data-comp="ModelChip">${ic('cpu')}<span style="font-family:var(--mono);font-size:10.5px">${esc(S.modelName)}</span>${ic('chev','caret')}</span>
+        <span class="chip" data-comp="EffortChip">${ic('gauge')}高${ic('chev','caret')}</span>
+        <button type="button" class="send ${o.running?'stop':''}" data-act="${o.running?'stop':'send'}" aria-label="${o.running?'停止':'发送'}">${o.running?ic('sq'):ic('up')}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============================== 抽屉 / 弹窗 / 选择器 ============================== */
+function overlay(){
+  if(S.drawer==='subagent') return subagentDrawer();
+  if(S.drawer==='peer') return peerDrawer();
+  if(S.dialog==='consent') return consentDialog();
+  if(S.dialog==='folder') return folderDialog();
+  if(S.dialog==='attach') return attachDialog();
+  if(S.dialog==='rewind') return rewindDialog();
+  return '';
+}
+function subagentDrawer(){
+  return `<div class="drawer-mask" data-act="mask-drawer"><div class="drawer" data-comp="SubagentDrawer">
+    <div class="drawer-h">${ic('bot')}<b style="font-size:12px">子代理</b><span class="cap">本对话的子代理 2</span><span class="grow" style="flex:1"></span><span class="iconbtn" data-act="close-drawer">${ic('x')}</span></div>
+    <div class="tabs">
+      <span class="tab on" data-comp="SubagentTab">${ic('bot')}plan-reviewer<span class="pdot"></span></span>
+      <span class="tab" data-comp="SubagentTab">${ic('bot')}explore</span>
+    </div>
+    <div class="drawer-b">
+      <div class="sub-h">${ic('bot')}<span class="nm">plan-reviewer</span><span class="cap">工作中（1m 40s）</span><span class="pillrun"><span class="d"></span>运行中</span></div>
+      <div class="kv-mini"><span>模型 <b>claude-sonnet-4-6</b></span><span>思考强度 <b>高</b></span><span>上下文 <b>38k / 200k</b></span></div>
+      <div class="md"><p><strong>交给它的任务</strong></p><p>评审 plans/391 的 Step 1 到 Step 3，重点看传输抽象是否会让浏览器默认路径回归，以及信任三分支有没有把未判定目录静默标成 trusted。</p></div>
+      <div class="md"><p><strong>它的回答</strong></p><p>传输抽象可行：接口只需五个方法（get / post / stream / cancel / binary），浏览器实现与 webview 适配器各自成立，useChatStream 的 30 处调用点只换注入对象。</p></div>
+      <div class="cap">工具调用</div>
+      ${toolOk('已读取','plans/391-vscode-workbench.md','')}
+      ${toolOk('已搜索','deliverableGate','')}
+      ${toolOk('已读取','editors/vscode/src/deliverableGate.ts','')}
+      <div class="cap">尚未给出结论</div>
+    </div>
+    <div class="drawer-f"><span class="iconbtn">${ic('at')}</span><input class="inp" placeholder="给这个子代理发消息，/ 调出命令，@ 引用文件"><span class="iconbtn" style="color:var(--brand)">${ic('up')}</span></div>
+  </div></div>`;
+}
+function peerDrawer(){
+  return `<div class="drawer-mask" data-act="mask-drawer"><div class="drawer" data-comp="PeerDrawer">
+    <div class="drawer-h">${ic('users')}<b style="font-size:12px">其他代理</b><span class="cap">同目录 1 个 其他 2 个</span><span class="grow" style="flex:1"></span><span class="iconbtn" data-act="close-drawer">${ic('x')}</span></div>
+    <div class="drawer-b">
+      <div class="cap">同目录</div>
+      <div class="notice"><div class="h">${ic('bot')}<span>vscode-workbench</span><span class="grow" style="flex:1"></span><span class="small" style="color:var(--brand)">在等你的答复</span></div>
+        <div class="rows"><div class="r"><span class="k">会话</span><span class="v">MCP 启动超时的定位</span></div><div class="r"><span class="k">目录</span><span class="v">.worktrees/vscode-chat-workbench</span></div></div>
+      </div>
+      <div class="notice"><div class="h">${ic('file')}<span>正在编辑的文件</span></div>
+        <div class="rows"><div class="r"><span class="k">文件</span><span class="v">editors/vscode/src/panel.ts</span></div><div class="r"><span class="k">改动</span><span class="v">+42 −7</span></div></div>
+      </div>
+      <div class="cap">其他目录</div>
+      <div class="notice"><div class="h">${ic('bot')}<span>forebrain-harness-29</span></div><div class="small">plans/381 时代留下的并行会话，已空闲 42 分钟。</div></div>
+    </div>
+    <div class="drawer-f"><span class="cap">放行或拒绝只影响来信，不会打断这一轮</span></div>
+  </div></div>`;
+}
+function consentDialog(){
+  const c=S.consent||{mcp:[],lsp:[],alwaysAllow:false};
+  const row=(r,kind)=>`<div class="row">
+      <button type="button" class="cbx ${r.allow?'on':''}" data-act="consent-row" data-v="${kind}:${esc(r.name)}" aria-label="${esc(r.name)}" aria-pressed="${r.allow?'true':'false'}">${r.allow?ic('check'):''}</button>
+      <span class="two"><span class="nm">${esc(r.name)}</span><span class="dt">${esc(r.detail)}</span></span>
+    </div>`;
+  return `<div class="dlg-mask" data-act="mask-consent"><div class="dlg" data-comp="ProjectServersConsentDialog" role="dialog" aria-label="项目服务">
+    <div class="dlg-h">${ic('plug')}<span class="grow">项目服务</span><span class="iconbtn" data-act="consent-close">${ic('x')}</span></div>
+    <div class="dlg-b">
+      <div class="hintline">${c.mcp.length+c.lsp.length} 个服务要在本项目运行</div>
+      ${c.mcp.length?`<div><div class="grp">MCP</div>${c.mcp.map(r=>row(r,'mcp')).join('')}</div>`:''}
+      ${c.lsp.length?`<div><div class="grp">语言服务器</div>${c.lsp.map(r=>row(r,'lsp')).join('')}</div>`:''}
+      <div class="switch-row">
+        <button type="button" class="cbx ${c.alwaysAllow?'on':''}" data-act="consent-always" aria-pressed="${c.alwaysAllow?'true':'false'}" aria-label="总是允许本项目的服务">${c.alwaysAllow?ic('check'):''}</button>
+        <span>总是允许本项目的服务</span>
+      </div>
+      <div class="hintline">取消勾选的那一项会按同一份指纹记成不允许。改动项目文件后这里会重新问一次。</div>
+    </div>
+    <div class="dlg-f"><button type="button" class="btn sm" data-act="consent-decline">全部不允许</button><button type="button" class="btn primary sm" data-act="consent-confirm">确定</button></div>
+  </div></div>`;
+}
+function folderDialog(){
+  return `<div class="dlg-mask" data-act="mask-folder"><div class="dlg" data-comp="FolderDialog" role="dialog" aria-label="选择文件夹">
+    <div class="dlg-h">${ic('folder')}<span class="grow">选择文件夹</span><span class="iconbtn" data-act="close-folder">${ic('x')}</span></div>
+    <div class="dlg-b">
+      <div style="display:flex;gap:6px;align-items:center">
+        <button type="button" class="btn sm ghost">${ic('arrowL')}后退</button>
+        <button type="button" class="btn sm ghost">${ic('arrowR')}前进</button>
+        <span class="mono small" style="color:var(--ink-2);overflow:hidden;text-overflow:ellipsis">~/workspace/unionj-cloud</span>
+      </div>
+      <div class="tree">
+        <div class="tree-row">${ic('folder')}ai-elements-vue</div>
+        <div class="tree-row on">${ic('folder')}forebrain-harness<span class="r">项目</span></div>
+        <div class="tree-row">${ic('folder')}finance-deck</div>
+        <div class="tree-row">${ic('folder')}notes</div>
+      </div>
+      <div class="hintline">选中的目录会成为这个对话的工作目录；工作区内的目录直接可用，工作区外的目录由 VS Code 再问一次信任。</div>
+    </div>
+    <div class="dlg-f"><button type="button" class="btn sm" data-act="close-folder">取消</button><button type="button" class="btn primary sm" data-act="pick-folder">选择</button></div>
+  </div></div>`;
+}
+function attachDialog(){
+  return `<div class="dlg-mask" data-act="mask-attach"><div class="dlg" data-comp="AttachSaveDialog" role="dialog" aria-label="保存到">
+    <div class="dlg-h">${ic('clip')}<span class="grow">保存到</span><span class="iconbtn" data-act="close-attach">${ic('x')}</span></div>
+    <div class="dlg-b">
+      <div class="grp">待保存的文件</div>
+      <div class="row"><span class="cbx on">${ic('check')}</span><span class="two"><span class="nm">paste-2026-11-26.png</span><span class="dt">1.4 MB</span></span></div>
+      <div class="grp" style="margin-top:4px">保存到 ~/.forebrain/workspace/attachments/391</div>
+      <div class="hintline">保存并上传后，这张图会作为附件跟着消息发出；路径会写进消息，便于以后找回。</div>
+    </div>
+    <div class="dlg-f"><button type="button" class="btn sm" data-act="close-attach">取消</button><button type="button" class="btn primary sm" data-act="save-attach">保存并上传</button></div>
+  </div></div>`;
+}
+function rewindDialog(){
+  return `<div class="dlg-mask" data-act="mask-rewind"><div class="dlg" data-comp="RewindDialog" role="dialog" aria-label="回到这条消息之前？">
+    <div class="dlg-h">${ic('history')}<span class="grow">回到这条消息之前？</span><span class="iconbtn" data-act="close-rewind">${ic('x')}</span></div>
+    <div class="dlg-b">
+      <div class="hintline">之后的对话会移除，这条消息放回输入框。</div>
+      <div class="grp">恢复 3 个文件</div>
+      <div class="row"><span class="cbx on">${ic('check')}</span><span class="two"><span class="nm">editors/vscode/package.json</span><span class="dt">+6 −2</span></span></div>
+      <div class="row"><span class="cbx on">${ic('check')}</span><span class="two"><span class="nm">editors/vscode/src/extension.ts</span><span class="dt">+18 −4</span></span></div>
+      <div class="row"><span class="cbx on">${ic('check')}</span><span class="two"><span class="nm">editors/vscode/README.md</span><span class="dt">新建文件</span></span></div>
+      <div class="hintline">终端命令造成的改动不会撤回。之后被改过的文件会单独标出来。</div>
+    </div>
+    <div class="dlg-f"><button type="button" class="btn sm" data-act="close-rewind">取消</button><button type="button" class="btn primary sm" data-act="rewind-restore">恢复</button></div>
+  </div></div>`;
+}
+function slashPicker(){
+  const rows=SLASH_ROWS.map((r,i)=>`<div class="pk-row ${i===S.slash?'on':''}" data-act="pick-slash" data-v="${esc(r.n)}">
+      <span class="n">${esc(r.n)}</span><span class="d">${esc(r.d)}</span><span class="k">${esc(r.k)}</span></div>`).join('');
+  return `<div class="picker" data-comp="SlashPickerCard">
+    <div class="picker-h">${ic('term')}命令与技能<span class="grow" style="flex:1"></span><span>↑↓ 选择，Enter 插入</span></div>
+    <div class="picker-b">${rows}</div>
+  </div>`;
+}
+function atPicker(){
+  const rows=AT_ROWS.map(r=>`<div class="pk-row" data-act="pick-at" data-v="${esc(r.n)}">
+      <span class="n">@${esc(r.n)}</span><span class="d">${esc(r.d)}</span><span class="k">${esc(r.k)}</span></div>`).join('');
+  return `<div class="picker" data-comp="ForebrainPromptTextarea">
+    <div class="picker-h">${ic('at')}引用文件<span class="grow" style="flex:1"></span><span>Tab 补全</span></div>
+    <div class="picker-b">${rows}</div>
+  </div>`;
+}
+
+/* ============================== Sessions 独立视图 ============================== */
+const BRANDS={
+  navy:{light:{b:'#1F4A9E',s:'#EBF0F9',l:'#C3D2EC',h:'#173B80'},dark:{b:'#7EA2EA',s:'#1B2A46',l:'#2C4573',h:'#9BB8F0'}},
+  teal:{light:{b:'#0E6E7E',s:'#E7F3F4',l:'#B7DDE2',h:'#0A5A67'},dark:{b:'#4FB3C2',s:'#0E2A2F',l:'#1D4A52',h:'#6FC5D2'}},
+  graphite:{light:{b:'#1C1C1F',s:'#F1F1F2',l:'#D4D4D8',h:'#3A3A40'},dark:{b:'#C8C9CE',s:'#26262A',l:'#3E3E44',h:'#E0E1E5'}}
+};
+/**
+ * The brand scheme is the accent family of the whole app (main.css 80-82), so
+ * it lands on the window root and every webview inside inherits it: switching
+ * recolours the content area and the sidebar in unison, never one of them.
+ */
+function brandVars(){
+  const p=BRANDS[S.brand][S.theme==='dark'?'dark':'light'];
+  return `--brand:${p.b};--brand-soft:${p.s};--brand-line:${p.l};--brand-hover:${p.h};--ab-accent:${p.b}`;
+}
+function visibleSessions(){
+  const t=(S.search||'').trim().toLowerCase();
+  if(!t) return SESSIONS.slice();
+  return SESSIONS.filter(s=>(s.title+' '+s.project).toLowerCase().includes(t));
+}
+function sessionsView(){
+  const rows=visibleSessions();
+  const list=rows.length?rows.map(s=>`<button type="button" class="sess-row ${s.id===S.selected?'on':''}" data-act="pick-session" data-v="${s.id}">
+      <span class="ttl">${s.live?'<span class="dot"></span>':''}<span class="n">${esc(s.title)}</span></span>
+      <span class="meta"><span class="p">${esc(s.project)}</span><span class="tm">${esc(s.time)}</span></span>
+    </button>`).join('')
+    : `<div class="sess-empty">没有匹配的对话。<br>换一个标题或项目名，或者点右上角新建一个。</div>`;
+  return `<div class="sess" data-comp="SessionsList">
+    <div class="sess-h"><span class="t">Sessions</span><span class="grow"></span>
+      <button type="button" class="iconbtn" data-act="new-session" title="新建对话">${ic('plus')}</button>
+    </div>
+    <label class="sess-search">${ic('search')}<input type="search" id="sess-search" aria-label="搜索对话" placeholder="搜索对话" value="${esc(S.search)}"></label>
+    <div class="sess-list">${list}</div>
+    <div class="sess-f">${ic('history')}<span>${rows.length} 个对话</span><span>1 个在运行</span><span style="margin-left:auto">${esc(S.brand)}</span></div>
+  </div>`;
+}
+
+/* ============================== 聊天 webview ============================== */
+function chatHeader(){
+  const title=S.scene==='empty'?'新对话':SESSION_TITLES[S.selected]||'对话';
+  return `<div class="wv-h">
+    <span class="t">${esc(title)}</span>
+    <span class="grow"></span>
+    <button type="button" class="iconbtn" data-act="new-session" title="新建对话">${ic('plus')}</button>
+    <button type="button" class="iconbtn" data-act="open-subagent" title="子代理">${ic('bot')}</button>
+    <button type="button" class="iconbtn" data-act="open-peer" title="其他代理">${ic('users')}</button>
+    <button type="button" class="iconbtn" title="显示范围">${ic('panel')}</button>
+  </div>`;
+}
+function thread(scene){
+  if(scene==='empty') return `<div class="thread"><div class="empty-hero">
+      <span class="bm">${ic('spark')}</span>
+      <h3>要说点什么？</h3>
+      <p>这个对话在 forebrain-harness 里运行：能读文件、跑命令、写计划。第一次发送前，会先问你是否信任这个目录。</p>
+      <div class="starters">
+        <button type="button" class="starter">生成 FOREBRAIN.md</button>
+        <button type="button" class="starter">先出计划再动手</button>
+        <button type="button" class="starter">做一个技能</button>
+        <button type="button" class="starter">设一个定时任务</button>
+      </div>
+    </div></div>`;
+  if(scene==='todos-unread'){
+    return `<div class="thread">
+      ${uMsg('按这份计划推进，做完一步更新一步待办。')}
+      ${think('t1','先确认传输抽象的接缝，再动宿主 RPC，最后搭 webview 脚手架。')}
+      ${act([{l:'已读取 editors/vscode/src/extension.ts',t:'0.2s'},{l:'已编辑 editors/vscode/src/panelHtml.ts',t:'0.5s'}])}
+      ${md('<p>传输抽象与宿主 RPC 已完成，正在搭 webview 脚手架。下方待办卡里刚更新的两行是未读态。</p>')}
+    </div>`;
+  }
+  if(scene==='thread'){
+    return `<div class="thread">
+      ${uMsg('@<span class="mention">editors/vscode/package.json</span> 这个 <strong>secondarySidebar</strong> 的贡献为什么在 1.105 里不生效？帮我确认闸门到底在哪。',[
+        {n:'package.json',sz:'2.1 KB'},{n:'extension-host.log',sz:'18 KB',ic:'file'}])}
+      ${think('t1','先读 package.json 的贡献点，再去 <code>@types/vscode</code> 里找 secondarySidebar 的闸门。如果 1.105 还在 proposed API 后面，那「不生效」就是预期行为，不是我们的 bug。')}
+      ${md('<p>它没有失效，是 <strong>1.105 还在闸门后面</strong>。</p><p><code>viewsContainers.secondarySidebar</code> 在 1.105 的源码里会先走 <code>checkProposedApiEnabled(\'contribSecondarySidebar\')</code>，只有带 proposed API 的扩展能声明它；1.106 才公开。</p><p>所以能力探测按 <strong>≥1.106</strong> 判，<code>engines</code> 保持 <code>^1.100.0</code>，旧版回退到活动栏容器，旧版只是忽略这个键，不会拒绝整个 manifest。</p>')}
+      ${think('t2','贡献点确认无误，接下来核对 1.105 的 proposed API 闸门与能力探测分支，再决定 engines 与回退容器怎么写。')}
+      ${act([{l:'已读取 editors/vscode/package.json',t:'0.3s'},{l:'已搜索 contribSecondarySidebar',t:'1.1s'},{l:'已读取 editors/vscode/src/extension.ts',t:'0.2s'}])}
+      ${docCard('已运行','grep -rn contribSecondarySidebar','grep -rn contribSecondarySidebar node_modules/@types/vscode/ | head','vscode/index.d.ts:18422: * Secondary sidebar is proposed in 1.105 (contribSecondarySidebar)\nvscode/index.d.ts:18423: * @proposed\nvscode/index.d.ts:18431: secondarySidebar?: SecondarySidebar[];')}
+      ${toolOk('已读取','editors/vscode/src/extension.ts','<div style="padding:6px 9px" class="small muted">412 行，注册了 1 个 webview view provider，focus 走 <span class="mono">forebrain.chat.focus</span>。</div>')}
+      ${toolRun('正在运行','npm --prefix editors/vscode test -- panelHtml')}
+      ${diffCard('editors/vscode/package.json',6,2,[
+        {k:'',no:'38',t:'   "viewsContainers": {'},
+        {k:'add',no:'39',t:'+    "secondarySidebar": [{"'},{k:'add',no:'40',t:'+      "id": "forebrain-sidebar-secondary",'},
+        {k:'add',no:'41',t:'+      "title": "Forebrain",'},{k:'',no:'42',t:'       "icon": "assets/forebrain.svg"'},
+        {k:'del',no:'',t:'-      "when": "vscode >= 1.106"'},{k:'add',no:'',t:'+      "when": "!forebrain.doesNotSupportSecondarySidebar"'}])}
+      ${artGroup([
+        {k:'改动',n:'editors/vscode/package.json',sz:'2.1 KB',d:{a:6,d:2}},
+        {k:'改动',n:'editors/vscode/src/extension.ts',sz:'7.4 KB',d:{a:12,d:4}},
+        {k:'新建',n:'editors/vscode/src/panelHtml.ts',sz:'4.8 KB',d:{a:48,d:0}},
+        {k:'新建',n:'docs/auth-review.pdf',sz:'240 KB',kind:'pdf'}])}
+      ${gate()}
+    </div>`;
+  }
+  if(scene==='fail'){
+    return `<div class="thread">
+      ${uMsg('跑一遍 editors/vscode 的测试，红了就把原因贴出来。')}
+      ${toolOk('已运行','npm --prefix editors/vscode test','<pre class="doc-out">  panelHtml\n    ✓ renders the waiting state (12 ms)\n    ✓ keeps the nonce out of the frame src (9 ms)\n\n  2 passing (21ms)</pre>')}
+      ${toolFail('运行失败','npm --prefix editors/vscode test','<pre class="doc-out">  manifest\n    1) declares three webview views\n\n  1 failing\n\n  1) manifest.test.ts:41\n     expected [ secondarySidebar ] to have 3 items, got 2</pre>')}
+      ${md('<p>红的是 <code>manifest.test.ts:41</code>：它还在断言 383 之前的两个容器。这条断言要跟着贡献结构改，不是代码错。</p>')}
+      ${errBlock()}
+      ${refusedLine()}
+      ${act([{l:'已读取 editors/vscode/src/manifest.test.ts',t:'0.2s',st:'ok'},{l:'等待批准 修改 manifest.test.ts',t:'',st:'run'}])}
+      ${worked('已工作 1m 06s')}
+    </div>`;
+  }
+  if(scene==='runtime'){
+    return `<div class="thread">
+      ${md('<p>这一轮在跑长任务，下面这些是运行态卡片族的全部形态。</p>')}
+      ${statusLine('工作中（1m 12s Esc 中断）','已用 42%')}
+      ${compactCard()}
+      ${goal()}
+      ${acb()}
+      ${mcpNotice()}
+      ${lspCard()}
+      ${batchCard()}
+      ${hb()}
+      ${worked('已工作 4m 21s')}
+    </div>`;
+  }
+  if(scene==='plan'){
+    return `<div class="thread">
+      ${uMsg('把这份计划过一遍，没问题就按它执行。')}
+      ${S.dockPick==='review-running'?subagentCall():''}
+      ${planDock()}
+      <div style="display:flex;gap:6px;align-items:center">
+        <button type="button" class="btn sm" data-act="open-rewind">${ic('history')}回到这里</button>
+        <span class="cap">回到这条消息之前，代码与对话一起回退</span>
+      </div>
+      ${worked('已工作 3m 02s')}
+    </div>`;
+  }
+  if(scene==='handoff-models'||scene==='handoff-effort'||scene==='review-models'||scene==='review-running'||scene==='review-verdict'){
+    // The dock alone: these screens are about the footer's own two steps, and a
+    // thread scrolled under the composer would hide the rows being reviewed.
+    return `<div class="thread">
+      ${S.dockPick==='review-running'?subagentCall():''}
+      ${planDock()}
+    </div>`;
+  }
+  if(scene==='subagent'){
+    return `<div class="thread">
+      ${md('<p>评审在后台跑，卡片挂着它的进度；点进去是这个子代理自己的对话。</p>')}
+      ${subagentCall()}
+      ${toolOk('已运行','plan-reviewer 评审 plans/391','')}
+      ${worked('已工作 2m 10s')}
+    </div>`;
+  }
+  if(scene==='peer'){
+    return `<div class="thread">
+      ${peerMark()}
+      ${peerHeld()}
+      ${peerMsg()}
+      ${peerDelivery()}
+      ${md('<p>放行后才进到这个对话的上下文；拒绝只影响这一条来信。</p>')}
+    </div>`;
+  }
+  if(scene==='consent'){
+    return `<div class="thread">
+      ${uMsg('这个项目里有两个 MCP 服务和一个语言服务器，第一次用之前先确认一下。')}
+      ${md('<p>弹窗会在面板内出现，逐项勾选，提交体与网页端同形。</p>')}
+      ${toolOk('已读取','.forebrain/mcp.json','')}
+    </div>`;
+  }
+  if(scene==='slash'){
+    return `<div class="thread">
+      ${uMsg('用 /compact 压一下上下文，再继续。')}
+      ${md('<p>输入框里打 <code>/</code> 出命令与技能，打 <code>@</code> 引用文件；两者都是同一套键盘操作。</p>')}
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <button type="button" class="btn sm" data-act="show-slash">${ic('term')}输入 /</button>
+        <button type="button" class="btn sm" data-act="show-at">${ic('at')}输入 @</button>
+        <button type="button" class="btn sm" data-act="open-attach">${ic('clip')}保存并上传附件</button>
+      </div>
+      <span class="cap">两套键盘操作落在同一个输入框；附件先落盘再随消息发出</span>
+    </div>`;
+  }
+  if(scene==='sessions'||scene==='fallback'){
+    return `<div class="thread">
+      ${uMsg('@<span class="mention">editors/vscode/src/panel.ts</span> 这个视图注册为什么在 1.105 上不生效？')}
+      ${md('<p>因为 1.105 把 <code>secondarySidebar</code> 放在 proposed API 后面，<code>checkProposedApiEnabled(\'contribSecondarySidebar\')</code> 会先拦住它。能力探测按 ≥1.106 判，旧版回退活动栏。</p>')}
+      ${worked('已工作 18s')}
+    </div>`;
+  }
+  return `<div class="thread">${md('<p>这一屏留给宿主边界。</p>')}</div>`;
+}
+function composerFor(scene){
+  if(scene==='thread') return composer({running:true,text:'把 manifest.test.ts 的容器断言也改成三个，然后跑一遍 <span class="slash">/</span> 全量门禁'});
+  if(scene==='fail') return composer({text:'<span class="ph">输入消息，/ 调出命令，@ 引用文件</span>'});
+  if(scene==='runtime') return composer({running:true,text:'<span class="ph">这一轮还在跑，输入的内容会进队列</span>'});
+  if(scene==='plan') return composer({text:'继续规划：把信任三分支的单测也写进计划。'})
+  if(scene==='handoff-models'||scene==='handoff-effort'||scene==='review-models'||scene==='review-running'||scene==='review-verdict')
+    return composer({text:'<span class="ph">计划待决定，输入框先留着</span>'});
+  if(scene==='subagent') return composer({text:'<span class="ph">给这个对话发消息，/ 调出命令，@ 引用文件</span>'});
+  if(scene==='peer') return composer({text:'<span class="ph">输入消息，/ 调出命令，@ 引用文件</span>'});
+  if(scene==='consent') return composer({text:'<span class="ph">等这个项目的服务确认完再发</span>'});
+  if(scene==='slash') return composer({focus:true,text:'<span class="slash">/compact</span> ',attachments:[{n:'panelHtml.test.ts',sz:'6.2 KB',ic:'file'}]});
+  if(scene==='empty') return composer({pill:true,text:'<span class="ph">输入消息，/ 调出命令，@ 引用文件</span>'});
+  if(scene==='fallback'||scene==='sessions') return composer({text:'<span class="ph">输入消息，/ 调出命令，@ 引用文件</span>'});
+  return composer({});
+}
+function chatWebview(scene){
+  const running=scene==='thread'||scene==='runtime';
+  return `<div class="wv" data-comp="ChatWorkbench">
+    ${chatHeader()}
+    ${thread(scene)}
+    ${scene==='thread'?`<div style="padding:0 12px">${queue()}</div>`:''}
+    ${scene==='thread'?`<div style="padding:0 12px">${statusLine('工作中（1m 12s Esc 中断）','已用 42%')}</div>`:''}
+    ${scene==='slash'?`<div style="padding:6px 10px 0">${S.atOpen?atPicker():slashPicker()}</div>`:''}
+    ${S.todosOpen?todoList():''}
+    ${composerFor(scene)}
+    ${overlay()}
+  </div>`;
+}
+
+/* ============================== 宿主边界（api 场景） ============================== */
+function boards(){
+  const rpc=[
+    ['webview → 宿主','rest.request','按白名单转发到网关，Bearer 只在宿主'],
+    ['webview → 宿主','ws.open / ws.close','宿主持有 SessionSocket，另开一条给会话事件'],
+    ['宿主 → webview','run_event','合帧，同一帧内的多个事件保序'],
+    ['宿主 → webview','theme','activeColorTheme 变了，加或撤 html.dark'],
+    ['webview → 宿主','bind','按会话 id 绑定，取代 relay 嗅探'],
+    ['webview → 宿主','askTrust','三分支：工作区内自动写记录，之外原生模态，未信任不发'],
+    ['webview → 宿主','projectServersConsent','逐行 allow 与 alwaysAllow，提交后重绑会话'],
+    ['webview → 宿主','deliverables.open','交付物打开与二进制下载，可取消']
+  ];
+  const rows=rpc.map(r=>`<div class="rpc-row"><span class="m">${r[0]}</span><span class="k">${r[1]}</span><span class="d">${r[2]}</span></div>`).join('');
+  return `<div style="display:flex;flex-direction:column;gap:12px">
+    <div class="hoststates">
+      <div class="hostcard"><h4>Forebrain 需要网关 token。</h4><p>扩展没有拿到网关 token，聊天面先不加载。输入后会自动重连，token 只留在宿主。</p><button type="button" class="btn sm primary">输入网关 token</button></div>
+      <div class="hostcard"><h4>Forebrain 网关没有应答。</h4><p>宿主连不上网关（进程没起或端口不通）。重连会重新探测，不会把旧页面留在屏幕上。</p><button type="button" class="btn sm">重新连接</button></div>
+      <div class="hostcard"><h4>Forebrain 无法连接。</h4><p>这次没能连上网关。浏览器里仍可打开整站作为退路。</p><button type="button" class="btn sm">重新连接</button><button type="button" class="btn sm ghost">在浏览器打开 Web UI</button></div>
+    </div>
+    <div>
+      <div class="inspect-title">未信任工作区的三视图（capabilities: untrustedWorkspaces supported: false）</div>
+      <div class="untrusted">
+        <div class="ph">${ic('lock')}<b>Forebrain</b><span>工作区未受信任</span></div>
+        <div class="ph">${ic('lock')}<b>Sessions</b><span>工作区未受信任</span></div>
+        <div class="ph">${ic('lock')}<b>Forebrain（活动栏回退）</b><span>工作区未受信任</span></div>
+      </div>
+    </div>
+    <div>
+      <div class="inspect-title">RPC 面（白名单，其余方法一律忽略）</div>
+      <div class="rpc">
+        <div class="rpc-row hd"><span>方向</span><span>方法</span><span>说明</span></div>
+        ${rows}
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ============================== 窗口外壳 ============================== */
+const EDITOR_LINES=[
+  ['import * as vscode from \'vscode\';',''],
+  ['import { ChatPanel } from \'./panel\';',''],
+  ['import { Connection } from \'./connection\';',''],
+  ['import { statusBarItem } from \'./statusBar\';',''],
+  ['',''],
+  ['// The chat surface is a webview built by vite; the host only carries the',''],
+  ['// RPC the page may make and the token it must never see.',''],
+  ['export function registerPanel(ctx: vscode.ExtensionContext, connection: Connection) {',''],
+  ['  const panel = new ChatPanel(ctx, connection);',''],
+  ['  const secondary = vscode.window.registerWebviewViewProvider(',''],
+  ['    \'forebrain.chatSecondary\',',''],
+  ['    panel,',''],
+  ['    { webviewOptions: { retainContextWhenHidden: true } },',''],
+  ['  );',''],
+  ['  const sidebar = vscode.window.registerWebviewViewProvider(',''],
+  ['    \'forebrain.chatSidebar\',',''],
+  ['    panel,',''],
+  ['    { webviewOptions: { retainContextWhenHidden: true } },',''],
+  ['  );',''],
+  ['  ctx.subscriptions.push(secondary, sidebar, panel);',''],
+  ['}',''],
+  ['',''],
+  ['/**',''],
+  [' * The capability probe: secondarySidebar sits behind the proposed API',''],
+  [' * until 1.106, so this stays true on everything older and the',''],
+  [' * activity-bar container keeps carrying the same app.',''],
+  [' */',''],
+  ['function doesNotSupportSecondarySidebar(): boolean {',''],
+  ['  const [major, minor] = vscode.version.split(\'.\').map(Number);',''],
+  ['  return major < 1 || (major === 1 && minor < 106);',''],
+  ['}','']
+];
+const DIFF_LINES={
+  'editors/vscode/package.json':[
+    {k:'',no:'38',t:'   "viewsContainers": {'},
+    {k:'add',no:'39',t:'+    "secondarySidebar": [{"'},
+    {k:'add',no:'40',t:'+      "id": "forebrain-sidebar-secondary",'},
+    {k:'add',no:'41',t:'+      "title": "Forebrain",'},
+    {k:'',no:'42',t:'       "icon": "assets/forebrain.svg"'},
+    {k:'del',no:'',t:'-      "when": "vscode >= 1.106"'},
+    {k:'add',no:'',t:'+      "when": "!forebrain.doesNotSupportSecondarySidebar"'}],
+  'editors/vscode/src/extension.ts':[
+    {k:'',no:'12',t:' export function activate(ctx: vscode.ExtensionContext) {'},
+    {k:'del',no:'',t:'-  registerChatView(ctx);'},
+    {k:'add',no:'',t:'+  registerPanel(ctx, connection);'},
+    {k:'add',no:'',t:'+  ctx.subscriptions.push(statusBarItem(connection));'},
+    {k:'',no:'13',t:' }'}],
+  'editors/vscode/src/panelHtml.ts':[
+    {k:'add',no:'1',t:'+export function panelHtml(csp: string, nonce: string): string {'},
+    {k:'add',no:'2',t:'+  return `<!DOCTYPE html><html lang="zh">…`;'},
+    {k:'add',no:'3',t:'+}'}]
+};
+function editorDiff(){
+  const path=S.diffFile||'editors/vscode/package.json';
+  const lines=DIFF_LINES[path]||DIFF_LINES['editors/vscode/package.json'];
+  let body='';
+  if(S.collapseUnchanged){
+    let i=0;
+    while(i<lines.length){
+      if(lines[i].k===''){
+        let j=i;while(j<lines.length&&lines[j].k==='')j++;
+        body+=`<div class="diff-fold" data-act="toggle-collapse" title="展开未更改区域">${ic('chev')}<span>${j-i} 行未更改</span></div>`;
+        i=j;
+      }else{
+        const l=lines[i];body+=`<div class="l ${l.k}"><span class="no">${l.no}</span><code>${esc(l.t)}</code></div>`;i++;
+      }
+    }
+  }else{
+    body=lines.map(l=>`<div class="l ${l.k}"><span class="no">${l.no}</span><code>${esc(l.t)}</code></div>`).join('');
+  }
+  return `<div class="ed-diff" data-comp="DiffView">
+    <div class="ed-diff-h">${ic('branch')}<span class="p">${esc(path)}</span><span class="cap">HEAD ↔ 工作区</span><span class="grow"></span>
+      <span class="ed-diff-tools">
+        <button type="button" class="iconbtn" title="上一个更改" aria-label="上一个更改">${ic('up')}</button>
+        <button type="button" class="iconbtn" title="下一个更改" aria-label="下一个更改">${ic('chev')}</button>
+        <button type="button" class="iconbtn ${S.collapseUnchanged?'on':''}" data-act="toggle-collapse" data-testid="diff-collapse-toggle" title="折叠未更改区域" aria-label="折叠未更改区域" aria-pressed="${S.collapseUnchanged}">${ic('map')}</button>
+      </span>
+    </div>
+    <div class="diff-b ed-diff-b">${body}</div>
+  </div>`;
+}
+function scmView(){
+  const rows=[
+    {n:'editors/vscode/package.json',k:'M'},
+    {n:'editors/vscode/src/extension.ts',k:'M'},
+    {n:'editors/vscode/src/panelHtml.ts',k:'U'}
+  ];
+  return `<div class="scm">
+    <div class="scm-h">源代码管理</div>
+    <div class="scm-msg"><input type="text" placeholder="消息（Ctrl+Enter 提交）" aria-label="提交消息"></div>
+    <button type="button" class="btn primary sm scm-commit">提交</button>
+    <div class="scm-grp">更改<span class="scm-n">3</span></div>
+    <div class="scm-list">
+      ${rows.map(r=>`<div class="scm-row ${S.diffFile===r.n?'on':''}" data-act="open-diff" data-v="${esc(r.n)}" title="${esc(r.n)}"><span class="n">${esc(r.n.split('/').pop())}</span><span class="k">${r.k}</span></div>`).join('')}
+    </div>
+  </div>`;
+}
+function editorCode(){
+  return EDITOR_LINES.map((parts,i)=>{
+    const ln=String(i+41).padStart(3,' ');
+    return `<div class="ln"><span>${ln}</span><code>${esc(parts.join(''))}</code></div>`;
+  }).join('');
+}
+/**
+ * The centre pane: VS Code's editor area, not a webview. The code file is the
+ * page's scenery; the plan card's eye opens the plan itself here as a markdown
+ * preview, the way VS Code shows a .md preview tab (italic title, 预览 badge,
+ * one more tab beside the code ones).
+ */
+function editorTabs(){
+  const codeActive=S.editorTab==='code';
+  // No colour dots on tabs: VS Code has none, and the four titles fit the
+  // narrow centre pane without them (the plan tab keeps its 预览 badge).
+  const tab=(label,active,act,v)=>`<span class="ed-tab ${active?'on':''}" ${act?`data-act="${act}" data-v="${v}"`:''}><span class="tl">${label}</span></span>`;
+  const planTab=S.planTabOpen
+    ? `<span class="ed-tab md ${S.editorTab==='plan'?'on':''}" data-act="ed-tab" data-v="plan" data-testid="editor-tab-plan"><span class="tl">${esc(PLAN_DOC.tab)}</span><span class="prev">预览</span></span>`
+    : '';
+  const diffTab=S.diffFile
+    ? `<span class="ed-tab md ${S.editorTab==='diff'?'on':''}" data-act="ed-tab" data-v="diff" data-testid="editor-tab-diff"><span class="tl">${esc(S.diffFile.split('/').pop())}</span><span class="prev">diff</span></span>`
+    : '';
+  return `<div class="ed-tabs">
+    ${tab('panel.ts',codeActive,'ed-tab','code')}
+    ${tab('package.json',false,'ed-tab','code')}
+    ${tab('relay.ts',false,'ed-tab','code')}
+    ${planTab}
+    ${diffTab}
+  </div>`;
+}
+function editorPane(){
+  const body=S.editorTab==='diff'&&S.diffFile?editorDiff():(S.editorTab==='plan'&&S.planTabOpen?planEditorPreview():`<div class="ed-code">${editorCode()}</div>`);
+  return `<div class="ed" data-testid="editor-area">
+      ${editorTabs()}
+      ${body}
+    </div>`;
+}
+function windowHTML(){
+  const scene=S.scene;
+  const fallback=scene==='fallback';
+  const apiScene=scene==='api';
+  const sideInner=S.scmOpen?scmView():sessionsView();
+  const side=fallback
+    ? `<div class="side" style="width:420px">${chatWebview('fallback')}</div>`
+    : `<div class="side">${sideInner}</div>`;
+  const middle=apiScene
+    ? `<div class="ed" style="background:var(--alt);padding:12px;overflow:auto;border-right:0">${boards()}</div>`
+    : editorPane();
+  // The tree is a second view in the same container as the chat webview — a
+  // native view cannot live inside a webview, and this is the pair VS Code
+  // itself stacks. It sits above the conversation so the composer keeps the
+  // bottom of the column, the way the toggle's own panel does in Claude Code.
+  const sec=(apiScene||fallback)?'':`<div class="sec">${chatWebview(scene)}</div>`;
+  const ab=`<div class="ab">
+      <span class="i">${ic('file')}</span>
+      <span class="i">${ic('search')}</span>
+      <span class="i ${S.scmOpen?'on':''}" title="源代码管理">${ic('branch')}</span>
+      <span class="i">${ic('play')}</span>
+      <span class="i ${scene==='sessions'?'on':''}" title="Sessions">${ic('history')}</span>
+      <span class="grow"></span>
+      <span class="i ${apiScene?'':'on'}" title="Forebrain">${ic('spark')}</span>
+      <span class="i brand" title="Forebrain 品牌标">${ic('spark')}</span>
+    </div>`;
+  const statusLeft=fallback?'Forebrain chat（活动栏容器）':'Forebrain chat（secondarySidebar）';
+  return `<div class="vsc-tb">
+      <span style="font-size:11px;opacity:.8">forebrain-harness</span>
+      <span class="cc"><span>${esc(SESSION_TITLES[S.selected]||'对话')}</span></span>
+      <span class="lights"><i></i><i></i><i></i></span>
+    </div>
+    <div class="vsc-body">${ab}${side}${middle}${sec}</div>
+    <div class="vsc-status"><span>${ic('spark')} ${statusLeft}</span><span>${S.theme==='dark'?'Dark':'Light'}</span><span class="grow"></span><span>${esc(S.brand)}</span><span>UTF-8</span></div>`;
+}
+
+/* ============================== 场景说明 ============================== */
+const CAPTIONS={
+  thread:['主对话线程','用户消息带附件与 <code>@</code> 引用；思考是可展开收起的「深度思考」行（展开后左竖线缩进渲染思考正文），工具调用是扁平折叠行（图标按工具类型 file/search/term/code 区分，文件读取带品牌蓝链，chevron 展开输出），进行中图标旋转、完成/失败静态（失败用 danger 图标色），不写「完成」状态字；本轮交付物带 +/− 计数，代码文件点小眼睛在左侧源代码管理面板与编辑区 diff 视图打开（可折叠未更改区域），非代码交付物（PDF/图片等）交系统默认应用外部打开；内联审批（待决定）、消息队列两条、运行状态行与 composer 全芯片。'],
+  fail:['失败与拒绝','运行失败的工具行用静态 danger 图标（不旋转、不写状态字）；错误块给重试与日志入口；被拒绝的调用不留假句子，只留终端说过的那一行。'],
+  runtime:['运行态卡片','压缩卡（148k → 62k）、目标行、自动继续横幅、MCP 超时、语言服务器推荐、跑批三行与继续/停止、心跳行。跑批卡片的按钮在暂停与执行两态互换。'],
+  plan:['计划与检查点','计划更新卡挂在时间线上；输入框位置换成 plan dock：标题、计划正文、评审结论、四个去向（批准 / 交给其他模型执行 / 请其他模型评审 / 继续规划）；session_todo 在插件里只有一面：输入框上方那张待办卡（样式取自之前那张任务清单卡；标题与计数用 web 自己的词，见 OverviewTab 的待办卡）。会话里的「待办」芯片按开/收起。它更新时不再沉默：收起时芯片挂未读角标，展开时变化的行闪一下并保持未读标记（品牌点＋加粗），点行或「全部已读」才转已读。web 端那张会自己渲染的消息卡在插件里不显示。'],
+  'todos-unread':['待办未读/已读','默认就停在未读态：刚更新的两行带品牌点＋加粗＋浅底，头部有「全部已读」。点某行读某行，点「全部已读」全清；收起卡片时「待办」芯片挂未读角标（角标自带脉冲动效）。未读持续到显式已读，闪一下只是落地提醒，不是唯一信号。'],
+  'handoff-models':['交给其他模型执行：选模型','点「交给其他模型执行」后，dock 的页脚换成模型清单。标题说明要选什么，下面一行说清后果（在新的 worktree 里实施，不动当前分支）；每一行是 provider/model，第二行是它真正打过去的 endpoint，当前模型那一行高亮（is-on），不另写「当前」二字也不加勾（高亮即选中）。顶部搜索框按名字/endpoint 过滤，行多时列表滚动。Enter 取开头那一行，Esc 折回。'],
+  'handoff-effort':['交给其他模型执行：选思考强度','选了模型之后的第二屏：返回上一屏、指名这个模型的问题、以及这个模型真正提供的档位。模型行自己配好的那档就是打开的选中项并带齿轮（悬停写「模型设置」），行里还写着档位的 id；选中一档即提交。'],
+  'review-models':['请其他模型评审：选模型','同一块页脚、同一套行，只是标题换成「用哪个模型评审这份计划？」并且没有 worktree 那句（评审不动文件）。高亮与搜索的规则与上面一致。'],
+  'review-running':['评审进行中','选完评审模型，页脚收成一行：转圈、「&lt;模型&gt; 正在评审这份计划…」和「停止」。评审自己的进度在时间线里的子代理卡上，点进去能看到它在做什么；上面那条结论是上一次已完成评审的。'],
+  'review-verdict':['评审结论','最近一次完成的评审留一行结论（「&lt;模型&gt; 的评审结论」加上它自己的话），规划模型已经吸收它并重新提交；人是在结论在眼前的情况下做决定的，页脚回到四个去向。'],
+  subagent:['子代理抽屉','点会话里的子代理卡打开右侧抽屉：标签页列出本对话的子代理，正文是交给它的任务、它的回答、工具调用，底部是给它发消息的输入框。'],
+  peer:['peer 消息','同目录其他代理的来信：等放行的横幅（放行 / 拒绝）、来信卡、回执卡、来源标记。拒绝只影响这一条，不打断这一轮。'],
+  consent:['项目服务同意','面板内复用网页端同一个弹窗：先列 MCP 再列语言服务器，逐行勾选；「总是允许本项目的服务」勾上等于全选，取消任一行它自己会落下去；确定提交逐行 allow 与 alwaysAllow，全部不允许等于全拒，关掉弹窗也是全拒。'],
+  slash:['composer 展开','输入 <code>/</code> 出命令与技能列表（内置在前、项目技能在后），输入 <code>@</code> 出文件引用；附件芯片、添加菜单、带搜索框的模型菜单（标题「模型」）、上下文环、思考强度、模式与显示范围芯片都在同一行。模型菜单与审批菜单的选中行都用高亮，不写「当前」也不加勾。'],
+  sessions:['Sessions 独立视图','左侧是独立 webview：标题、搜索、行（标题、项目、时间，正在跑的带圆点）、底部计数。选中行用品牌浅底，聊天面切到那一条对话。三 scheme 与聊天面一起换强调色：换 Navy 时这里和那边的按钮、选中态、衬线同时换。'],
+  empty:['新会话空态','新对话：问候、四个起步命令、composer 顶部的项目与分支药丸。第一次发送前会确认目录信任，因此这一屏没有任何「未信任」的界面，信任交给 VS Code 自己。'],
+  api:['宿主边界与三态','左中三张宿主状态卡：缺 token、网关不应答、连接失败（各自带动作）。下面是未信任工作区的三视图占位，以及 webview 与宿主之间的 RPC 白名单。token 不出宿主，webview 里读不到。'],
+  fallback:['活动栏回退','1.105 及更早：<code>doesNotSupportSecondarySidebar</code> 为真，聊天面落在活动栏容器里，宽度换成窄侧栏，内容与副作用都不变。']
+};
+
+/* ============================== 渲染 ============================== */
+function facts(){
+  const rows=[
+    ['场景',S.scene],['主题',S.theme],['品牌 scheme',S.brand],['选中会话',S.selected],
+    ['可视对话',visibleSessions().length],['搜索',S.search||'（空）'],
+    ['内联审批',S.approval],['plan dock',S.planDecision||'waiting'],['dock 屏',S.dockPick||'四去向'],['待办卡',(S.todosOpen?'展开':'收起')+(S.todoUnread.length?` 未读 ${S.todoUnread.length}`:'')],['编辑区',S.editorTab==='plan'&&S.planTabOpen?'计划预览（.md）':'panel.ts'],
+    ['消息队列',S.queueOpen?'2 条待发':'已收起'],['抽屉',S.drawer||'无'],['弹窗',S.dialog||'无'],
+    ['覆盖组件',comps().filter(n=>n!=='SessionsList').length]
+  ];
+  q('facts').innerHTML=rows.map(r=>`<dt>${esc(r[0])}</dt><dd>${esc(String(r[1]))}</dd>`).join('');
+}
+function eventsHTML(){
+  q('events').innerHTML=S.events.length?S.events.map(e=>`<div class="e ${e.tone}"><span class="tm">${esc(e.at)}</span><span>${esc(e.text)}</span></div>`).join('')
+    :'<div class="e"><span>还没有交互。点卡片上的按钮、勾选框或场景切换都会记在这里。</span></div>';
+}
+function consentJSON(){
+  const c=S.consent;
+  if(!c) return '（这个场景没有待确认的项目服务）';
+  const body={mcp:c.mcp.map(r=>({name:r.name,fingerprint:'9f3a'+r.name.length+'c1',allow:r.allow})),
+              lsp:c.lsp.map(r=>({name:r.name,fingerprint:'41be'+r.name.length+'7d',allow:r.allow})),
+              alwaysAllow:c.alwaysAllow};
+  return JSON.stringify(S.consentAnswer?{submitted:S.consentAnswer.body,note:S.consentAnswer.note}:body,null,2);
+}
+function comps(){
+  const seen=new Set();
+  document.querySelectorAll('#vsc [data-comp]').forEach(el=>{seen.add(el.dataset.comp);});
+  return [...seen];
+}
+function render(){
+  q('vsc').classList.toggle('dark',S.theme==='dark');
+  q('vsc').innerHTML=windowHTML();
+  // The scheme is set as attributes on the window root, so both webviews read
+  // one accent family: chat content area and sidebar switch together.
+  q('vsc').setAttribute('style',brandVars());
+  q('cap').innerHTML=`<b>${esc(CAPTIONS[S.scene][0])}</b> ${CAPTIONS[S.scene][1]}`;
+  facts();eventsHTML();q('consent-body').textContent=consentJSON();
+  document.querySelectorAll('#scenes [data-scene]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scene===S.scene)));
+  document.querySelectorAll('#opts [data-theme]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.theme===S.theme)));
+  document.querySelectorAll('#opts [data-brand]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.brand===S.brand)));
+}
+
+/* ============================== 交互 ============================== */
+function consentFromData(){
+  return {mcp:CONSENT_MCP.map(r=>({...r,allow:true})),lsp:CONSENT_LSP.map(r=>({...r,allow:true})),alwaysAllow:false};
+}
+function goScene(id){
+  const theme=S.theme,brand=S.brand;
+  S=fresh();S.theme=theme;S.brand=brand;S.scene=id;
+  if(id==='subagent') S.drawer='subagent';
+  if(id==='peer') S.drawer='peer';
+  if(id==='consent'){S.dialog='consent';S.consent=consentFromData();}
+  if(id==='handoff-models') S.dockPick='handoff-models';
+  if(id==='handoff-effort') S.dockPick='handoff-effort';
+  if(id==='review-models') S.dockPick='review-models';
+  if(id==='review-running') S.dockPick='review-running';
+  if(id==='review-verdict'){S.dockPick=null;S.verdict=true;}
+  if(id==='todos-unread'){
+    // Open on the unread state itself: two rows just changed and stay unread
+    // until read, so the effect is visible without driving a simulated update.
+    S.todosOpen=true;
+    S.todoItems[2].status='completed';
+    S.todoItems[3].status='in_progress';
+    S.todoChanged=[2,3];
+    S.todoUnread=[2,3];
+  }
+  log('切到场景 '+id);
+  render();
+}
+function handle(act,v,el,e){
+  switch(act){
+    case 'approve':S.approval='allowed';log('允许 运行 npm --prefix editors/vscode test -- panelHtml','ok');break;
+    case 'deny':S.approval='denied';log('拒绝 运行 npm --prefix editors/vscode test -- panelHtml','err');break;
+    case 'refuse-words':return;
+    case 'plan-approve':S.planDecision='approved';log('exit 计划：批准','ok');break;
+    case 'plan-handoff':S.dockPick='handoff-models';S.dockFilter='';S.verdict=true;log('exit 计划：打开要交给哪个模型');break;
+    case 'pick-handoff-model':S.handoffModel=v;S.dockPick='handoff-effort';log('交给 '+v+'，选它的思考强度');break;
+    case 'back-models':S.dockPick='handoff-models';log('返回到选模型');break;
+    case 'pick-effort':S.handoffEffort=v?EFFORT_LABEL[v]||v:'默认';S.planDecision='handoff';S.dockPick=null;log('交给 '+S.handoffModel+' 执行，思考强度 '+S.handoffEffort,'ok');break;
+    case 'stop-review':S.dockPick=null;log('已停止这次评审','warn');break;
+    case 'plan-review':S.dockPick='review-models';S.dockFilter='';log('exit 计划：打开用哪个模型评审');break;
+    case 'pick-review-model':S.reviewModel=v;S.dockPick='review-running';log('已请 '+v+' 评审这份计划','ok');break;
+    case 'plan-keep':S.planDecision='keep';log('exit 计划：继续规划');break;
+    case 'open-subagent':S.drawer='subagent';log('打开子代理抽屉');break;
+    case 'open-plan-editor':
+      if(S.editorTab==='plan'&&S.planTabOpen) log('计划已经在编辑器里打开');
+      else {S.planTabOpen=true;S.editorTab='plan';log('在编辑器中打开计划文件 '+PLAN_DOC.file,'ok');}
+      break;
+    case 'ed-tab':S.editorTab=v==='plan'?'plan':v==='diff'?'diff':'code';log(v==='plan'?'切到计划预览':v==='diff'?'切到 diff':'切回代码');break;
+    case 'open-rewind':S.dialog='rewind';log('打开回到这里');break;
+    case 'open-attach':S.dialog='attach';log('打开保存附件');break;
+    case 'open-peer':S.drawer='peer';log('打开其他代理抽屉');break;
+    case 'close-drawer':S.drawer=null;log('收起抽屉');break;
+    case 'mask-drawer':if(!e.target.closest('.drawer')){S.drawer=null;log('点遮罩收起抽屉');}break;
+    case 'peer-release':log('放行 vscode-workbench 的来信','ok');break;
+    case 'peer-deny':log('拒绝 vscode-workbench 的来信','warn');break;
+    case 'batch-continue':S.batchState='running';log('跑批：继续执行','ok');break;
+    case 'batch-stop':S.batchState='paused';log('跑批：停止执行','warn');break;
+    case 'plus':S.plus=!S.plus;S.model=false;S.presetMenu=false;break;
+    case 'preset':S.presetMenu=!S.presetMenu;S.plus=false;S.model=false;log('打开审批模式菜单');break;
+    case 'pick-preset':S.preset=v;S.presetMenu=false;log('本会话的审批模式：'+presetLabel(v));break;
+    case 'model':S.model=!S.model;S.plus=false;S.presetMenu=false;break;
+    case 'pick-model':S.modelName=v;S.model=false;log('本会话的模型：'+v);break;
+    case 'tool-toggle':S.openTool=S.openTool===v?null:v;break;
+    case 'think-toggle':S.openThink=S.openThink===v?null:v;break;
+    case 'open-diff':S.scmOpen=true;S.diffFile=v;S.editorTab='diff';S.planTabOpen=false;log('在源代码管理与编辑区打开 '+v+' 的 diff');break;
+    case 'toggle-collapse':S.collapseUnchanged=!S.collapseUnchanged;break;
+    case 'open-external':log('交给系统默认应用打开 '+v,'ok');break;
+    case 'consent-row':{
+      const kind=v.split(':')[0],name=v.split(':')[1];
+      const row=(S.consent?S.consent[kind]:[]).find(r=>r.name===name);
+      if(row){
+        row.allow=!row.allow;
+        if(!row.allow) S.consent.alwaysAllow=false;
+        if(S.consent.mcp.concat(S.consent.lsp).every(r=>r.allow)) S.consent.alwaysAllow=true;
+        log('项目服务 '+name+'：'+(row.allow?'允许':'不允许'));
+      }
+      S.consentAnswer=null;
+      break;
+    }
+    case 'consent-always':{
+      const next=!(S.consent&&S.consent.alwaysAllow);
+      if(S.consent){S.consent.alwaysAllow=next;S.consent.mcp.concat(S.consent.lsp).forEach(r=>{r.allow=next?true:r.allow;});}
+      log('总是允许本项目的服务：'+(next?'开':'关'));
+      S.consentAnswer=null;
+      break;
+    }
+    case 'consent-confirm':{
+      const c=S.consent;
+      S.consentAnswer={body:{mcp:c.mcp.map(r=>({name:r.name,allow:r.allow})),lsp:c.lsp.map(r=>({name:r.name,allow:r.allow})),alwaysAllow:c.alwaysAllow},note:'提交后重新读一次待确认列表，并重绑会话'};
+      S.dialog=null;log('项目服务：已确定，重绑会话','ok');break;
+    }
+    case 'consent-decline':case 'consent-close':case 'mask-consent':{
+      if(act==='mask-consent'&&e.target.closest('.dlg')) break;
+      const c=S.consent;
+      if(c){c.mcp.concat(c.lsp).forEach(r=>{r.allow=false});c.alwaysAllow=false;}
+      S.consentAnswer={body:{mcp:c.mcp.map(r=>({name:r.name,allow:false})),lsp:c.lsp.map(r=>({name:r.name,allow:false})),alwaysAllow:false},note:'全部不允许'};
+      S.dialog=null;log('项目服务：全部不允许','warn');break;
+    }
+    case 'pick-session':S.selected=v;log('选中会话 '+v);break;
+    case 'new-session':S.scene='empty';S.selected='';log('新建对话');break;
+    case 'close-folder':case 'mask-folder':if(act==='mask-folder'&&e.target.closest('.dlg'))break;S.dialog=null;break;
+    case 'browse-folder':S.dialog='folder';log('打开选择文件夹');break;
+    case 'pick-folder':S.dialog=null;log('选中目录 ~/workspace/unionj-cloud/forebrain-harness');break;
+    case 'close-attach':case 'mask-attach':if(act==='mask-attach'&&e.target.closest('.dlg'))break;S.dialog=null;break;
+    case 'save-attach':S.dialog=null;log('附件已保存并上传','ok');break;
+    case 'close-rewind':case 'mask-rewind':if(act==='mask-rewind'&&e.target.closest('.dlg'))break;S.dialog=null;break;
+    case 'rewind-restore':S.dialog=null;S.rewound=true;log('已回到这条消息之前，恢复 3 个文件','ok');break;
+    case 'show-at':S.atOpen=true;log('输入 @ 引用文件');break;
+    case 'show-slash':S.atOpen=false;log('输入 / 打开命令');break;
+    case 'pick-slash':log('插入命令 '+v);break;
+    case 'pick-at':log('引用文件 @'+v);break;
+    case 'send':log('发送消息（模拟，不联网）');break;
+    case 'stop':log('停止本轮（模拟）','warn');break;
+    case 'toggle-todos':
+      S.todosOpen=!S.todosOpen;
+      log(S.todosOpen?'展开待办卡':'收起待办卡');
+      break;
+    case 'todo-read-all':S.todoUnread=[];log('待办全部标为已读');break;
+    case 'todo-read':S.todoUnread=S.todoUnread.filter((i)=>i!==Number(v));break;
+    default:break;
+  }
+  render();
+}
+
+/* ============================== 对外接口 ============================== */
+window.chatWorkbenchPrototype={
+  scene:goScene,
+  setTheme(t){S.theme=t==='dark'?'dark':'light';log('主题 '+S.theme);render();},
+  setBrand(b){if(BRANDS[b]){S.brand=b;log('品牌 scheme '+b);render();}},
+  updateTodos(){const changed=simulateTodoUpdate();log(changed?`session_todo 更新：${changed} 项变化`:'没有可推进的项',changed?'ok':'warn');render();return changed;},
+  open(dialog){S.dialog=dialog;if(dialog==='consent')S.consent=consentFromData();render();},
+  snapshot(){
+    return {
+      scene:S.scene,theme:S.theme,brand:S.brand,selected:S.selected,search:S.search,
+      approval:S.approval,planDecision:S.planDecision,editorTab:S.editorTab,planTabOpen:S.planTabOpen,scmOpen:S.scmOpen,diffFile:S.diffFile,collapseUnchanged:S.collapseUnchanged,openTool:S.openTool,openThink:S.openThink,modelName:S.modelName,todosOpen:S.todosOpen,todoCount:todoCounts().text,todoUnseen:S.todoUnread.length,todoUnread:S.todoUnread.slice(),todoFlash:S.todoFlash,todoChanged:S.todoChanged.slice(),dockPick:S.dockPick,handoffModel:S.handoffModel,handoffEffort:S.handoffEffort,reviewModel:S.reviewModel,verdict:S.verdict,queueOpen:S.queueOpen,
+      drawer:S.drawer,dialog:S.dialog,plus:S.plus,model:S.model,preset:S.preset,presetMenu:S.presetMenu,batchState:S.batchState,rewound:S.rewound,atOpen:S.atOpen,
+      consent:S.consent?{mcp:S.consent.mcp.map(r=>({name:r.name,allow:r.allow})),lsp:S.consent.lsp.map(r=>({name:r.name,allow:r.allow})),alwaysAllow:S.consent.alwaysAllow}:null,
+      consentAnswer:S.consentAnswer,
+      sessions:visibleSessions().map(s=>s.id),
+      title:q('vsc').querySelector('.wv-h .t')?q('vsc').querySelector('.wv-h .t').textContent.trim():'',
+      caption:CAPTIONS[S.scene][0],
+      comps:comps(),
+      events:S.events.slice()
+    };
+  }
+};
+
+/* ============================== 启动 ============================== */
+q('scenes').insertAdjacentHTML('beforeend',SCENES.map(s=>`<button type="button" data-scene="${s.id}" aria-pressed="false">${s.title}</button>`).join(''));
+q('scenes').addEventListener('click',e=>{const b=e.target.closest('[data-scene]');if(b)goScene(b.dataset.scene);});
+q('opts').addEventListener('click',e=>{
+  const t=e.target.closest('[data-theme]'),b=e.target.closest('[data-brand]');
+  if(t) window.chatWorkbenchPrototype.setTheme(t.dataset.theme);
+  if(b) window.chatWorkbenchPrototype.setBrand(b.dataset.brand);
+});
+q('reset').addEventListener('click',()=>goScene(S.scene));
+q('sim-update').addEventListener('click',()=>{
+  const changed=simulateTodoUpdate();
+  log(changed?`session_todo 更新：${changed} 项变化${S.todosOpen?'（列表已开，逐行高亮）':'（列表收起，芯片挂角标）'}`:'这一份待办已经没有可推进的项了',changed?'ok':'warn');
+  render();
+});
+q('vsc').addEventListener('click',e=>{
+  const el=e.target.closest('[data-act]');
+  if(!el) return;
+  handle(el.dataset.act,el.dataset.v||'',el,e);
+});
+q('vsc').addEventListener('input',e=>{
+  const id=e.target.id;
+  if(id==='sess-search') S.search=e.target.value;
+  else if(id==='model-search') S.modelFilter=e.target.value;
+  else if(id==='dock-search') S.dockFilter=e.target.value;
+  else return;
+  const pos=e.target.selectionStart;
+  render();
+  const next=q(id);
+  if(next){next.focus();try{next.setSelectionRange(pos,pos);}catch(err){/* search inputs reject ranges in some engines */}}
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Escape') return;
+  if(S.dialog){S.dialog=null;log('Escape 关闭弹窗');render();}
+  else if(S.drawer){S.drawer=null;log('Escape 收起抽屉');render();}
+  else if(S.plus||S.model||S.presetMenu){S.plus=false;S.model=false;S.presetMenu=false;render();}
+});
+goScene('thread');
+</script>
+</body>
+</html>

@@ -108,9 +108,16 @@ const frozen = computed(() => !presetsVisible.value || presetFixed.value)
 const draft = ref<string | null>(null)
 
 const disabled = computed(() => switching.value)
+/**
+ * The chip names a preset, never a third word: before the read lands — or when
+ * it could not be made — it echoes the concrete preset this machine would start
+ * a conversation under, so whichever the default is, that is the one selected
+ * and read back here (owner 2026-11-26). The menu lists the same two ids, so the
+ * fallback is always one of its rows; a pinned gateway has exactly one row.
+ */
 const currentLabel = computed(() => {
   const preset = presets.value.find((item) => item.id === current.value)
-  return preset ? preset.label : t('approval.followDefault')
+  return (preset ?? presets.value[0]).label
 })
 
 // The read is per conversation: an answer that arrives after the page has

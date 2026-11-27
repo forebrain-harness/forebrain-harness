@@ -63,15 +63,17 @@ export class Approvals {
     const text = detail ? `${headline}\n${detail}` : headline;
     // Only a tool approval can be answered with two buttons here; a question
     // (`user_interaction` and the like) needs the card in the panel.
+    const approve = vscode.l10n.t('Approve');
+    const openPanel = vscode.l10n.t('Open panel');
     const choice = pending.toolName
-      ? await vscode.window.showWarningMessage(text, 'Approve', 'Deny', 'Open panel')
-      : await vscode.window.showInformationMessage(text, 'Open panel');
-    if (choice === 'Open panel') {
+      ? await vscode.window.showWarningMessage(text, approve, vscode.l10n.t('Deny'), openPanel)
+      : await vscode.window.showInformationMessage(text, openPanel);
+    if (choice === openPanel) {
       this.deps.focusPanel();
       return;
     }
     if (choice === undefined) return; // dismissed: the card in the panel still stands
-    await this.decide(pending.actionId, choice === 'Approve' ? 'accept' : 'deny');
+    await this.decide(pending.actionId, choice === approve ? 'accept' : 'deny');
   }
 
   private async decide(actionId: string, decision: 'accept' | 'deny'): Promise<void> {
@@ -81,8 +83,11 @@ export class Approvals {
         decision,
       });
     } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
       void vscode.window.showErrorMessage(
-        `Forebrain could not ${verb} that action: ${err instanceof Error ? err.message : String(err)}`,
+        decision === 'accept'
+          ? vscode.l10n.t('Forebrain could not approve that action: {0}', detail)
+          : vscode.l10n.t('Forebrain could not deny that action: {0}', detail),
       );
     }
   }

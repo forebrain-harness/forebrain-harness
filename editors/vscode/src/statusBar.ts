@@ -23,16 +23,18 @@ export class StatusBar {
     if (state.pending.length > 0) text += ` $(bell) ${state.pending.length}`;
     this.item.text = text;
 
-    const lines = [connected ? 'Forebrain: connected' : 'Forebrain: not connected'];
+    const lines = [connected ? vscode.l10n.t('Forebrain: connected') : vscode.l10n.t('Forebrain: not connected')];
     const session = this.session();
-    if (session) lines.push(`Session: ${session}`);
-    if (state.runActive) lines.push('A turn is running');
-    if (state.toolsInFlight > 0) lines.push(`Tools in flight: ${state.toolsInFlight}`);
-    if (state.subagents > 0) lines.push(`Subagents: ${state.subagents}`);
+    if (session) lines.push(vscode.l10n.t('Session: {0}', session));
+    if (state.runActive) lines.push(vscode.l10n.t('A turn is running'));
+    if (state.toolsInFlight > 0) lines.push(vscode.l10n.t('Tools in flight: {0}', state.toolsInFlight));
+    if (state.subagents > 0) lines.push(vscode.l10n.t('Subagents: {0}', state.subagents));
     if (progress) {
-      lines.push(`Checklist: ${progress.done}/${progress.total}${progress.active ? ` — ${progress.active}` : ''}`);
+      lines.push(progress.active
+        ? vscode.l10n.t('Checklist: {0}/{1} — {2}', progress.done, progress.total, progress.active)
+        : vscode.l10n.t('Checklist: {0}/{1}', progress.done, progress.total));
     }
-    if (state.pending.length > 0) lines.push(`Approvals waiting: ${state.pending.length}`);
+    if (state.pending.length > 0) lines.push(vscode.l10n.t('Approvals waiting: {0}', state.pending.length));
     this.item.tooltip = lines.join('\n');
     this.item.show();
   }

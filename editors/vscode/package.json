@@ -1,40 +1,41 @@
 {
   "name": "forebrain-vscode",
-  "displayName": "Forebrain",
-  "description": "The full Forebrain Harness Web UI in VS Code's side bar, plus native checklist, approvals and editor-to-chat commands.",
+  "displayName": "%displayName%",
+  "description": "%description%",
   "version": "0.2.1",
   "publisher": "forebrain",
   "license": "Apache-2.0",
   "engines": { "vscode": "^1.100.0" },
+  "l10n": "./l10n",
   "categories": ["Other"],
   "extensionKind": ["ui"],
   "activationEvents": ["onView:forebrain.chat", "onView:forebrain.checklist"],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
-      "secondarySidebar": [{ "id": "forebrain", "title": "Forebrain", "icon": "assets/forebrain.svg" }]
+      "secondarySidebar": [{ "id": "forebrain", "title": "%container.forebrain%", "icon": "assets/forebrain.svg" }]
     },
     "views": {
       "forebrain": [
-        { "id": "forebrain.chat", "name": "Chat", "type": "webview", "contextualTitle": "Forebrain" },
-        { "id": "forebrain.checklist", "name": "Checklist", "contextualTitle": "Forebrain" }
+        { "id": "forebrain.chat", "name": "%view.chat%", "type": "webview", "contextualTitle": "%container.forebrain%" },
+        { "id": "forebrain.checklist", "name": "%view.checklist%", "contextualTitle": "%container.forebrain%" }
       ]
     },
     "viewsWelcome": [
       {
         "view": "forebrain.checklist",
-        "contents": "No checklist yet. It fills in as the agent calls session_todo.",
+        "contents": "%view.checklistWelcome%",
         "when": "forebrain.checklistEmpty"
       }
     ],
     "commands": [
-      { "command": "forebrain.openPanel", "title": "Forebrain: Open Chat Panel" },
-      { "command": "forebrain.enterGatewayToken", "title": "Forebrain: Enter Gateway Token" },
-      { "command": "forebrain.openWebUiInBrowser", "title": "Forebrain: Open Web UI in Browser", "icon": "$(link-external)" },
-      { "command": "forebrain.reconnect", "title": "Forebrain: Reconnect to Gateway" },
-      { "command": "forebrain.askAboutSelection", "title": "Forebrain: Ask About Selection", "icon": "$(comment-discussion)" },
-      { "command": "forebrain.askAboutFile", "title": "Forebrain: Ask About File", "icon": "$(comment-discussion)" },
-      { "command": "forebrain.openDeliveredFile", "title": "Forebrain: Open Delivered File" }
+      { "command": "forebrain.openPanel", "title": "%command.openPanel%" },
+      { "command": "forebrain.enterGatewayToken", "title": "%command.enterGatewayToken%" },
+      { "command": "forebrain.openWebUiInBrowser", "title": "%command.openWebUiInBrowser%", "icon": "$(link-external)" },
+      { "command": "forebrain.reconnect", "title": "%command.reconnect%" },
+      { "command": "forebrain.askAboutSelection", "title": "%command.askAboutSelection%", "icon": "$(comment-discussion)" },
+      { "command": "forebrain.askAboutFile", "title": "%command.askAboutFile%", "icon": "$(comment-discussion)" },
+      { "command": "forebrain.openDeliveredFile", "title": "%command.openDeliveredFile%" }
     ],
     "keybindings": [
       { "command": "forebrain.askAboutSelection", "key": "ctrl+alt+k", "mac": "ctrl+cmd+k", "when": "editorHasSelection" }
@@ -52,35 +53,36 @@
       ]
     },
     "configuration": {
-      "title": "Forebrain",
+      "title": "%config.title%",
       "properties": {
         "forebrain.gatewayUrl": {
           "type": "string", "default": "http://127.0.0.1:6060",
-          "description": "The Forebrain gateway's HTTP(S) origin, without a path (e.g. http://127.0.0.1:6060)."
+          "description": "%config.gatewayUrl%"
         },
         "forebrain.binaryPath": {
           "type": "string", "default": "",
-          "description": "Path of the forebrain binary used to start a gateway when none is running. Empty: look up `forebrain` on PATH."
+          "description": "%config.binaryPath%"
         },
         "forebrain.autoStartGateway": {
           "type": "boolean", "default": true,
-          "description": "Start a gateway when the configured origin does not answer and no token is stored yet."
+          "description": "%config.autoStartGateway%"
         },
         "forebrain.relayLogRequests": {
           "type": "boolean", "default": false,
-          "description": "Write every relayed request's method and path to the Forebrain output channel (never headers)."
+          "description": "%config.relayLogRequests%"
         },
         "forebrain.selectionTarget": {
           "type": "string", "enum": ["current", "always-new"], "default": "current",
-          "description": "Where Ask About Selection/File sends: the session the panel is showing, or always a new one."
+          "enumDescriptions": ["%config.selectionTarget.current%", "%config.selectionTarget.alwaysNew%"],
+          "description": "%config.selectionTarget%"
         },
         "forebrain.includeDiagnostics": {
           "type": "boolean", "default": true,
-          "description": "Append the file's current diagnostics to the prompt of Ask About Selection/File."
+          "description": "%config.includeDiagnostics%"
         },
         "forebrain.approvalNotifications": {
           "type": "boolean", "default": true,
-          "description": "Show a VS Code notification for an approval that arrives while the chat panel is not visible."
+          "description": "%config.approvalNotifications%"
         }
       }
     }

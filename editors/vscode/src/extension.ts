@@ -81,11 +81,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     client,
     observedSession: () => observed,
     showSession: async (id) => {
-      if (!active) throw new Error('the panel is not connected');
+      if (!active) throw new Error(vscode.l10n.t('the panel is not connected'));
       await active.showSession(id);
     },
     startTurn: async (sessionId, content) => {
-      if (!link) throw new Error('the gateway link is not up');
+      if (!link) throw new Error(vscode.l10n.t('the gateway link is not up'));
       if (link.boundSession !== sessionId) await link.bind(sessionId, 0);
       return link.startRun(sessionId, content);
     },
@@ -213,20 +213,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('forebrain.askAboutFile', (uri?: vscode.Uri) => commands.askAboutFile(uri)),
     vscode.commands.registerCommand('forebrain.openDeliveredFile', () => deliverables.openDeliveredFile()),
     vscode.commands.registerCommand('forebrain.enterGatewayToken', async () => {
-      const entered = await vscode.window.showInputBox({ prompt: 'Forebrain gateway token', password: true, ignoreFocusOut: true });
+      const entered = await vscode.window.showInputBox({ prompt: vscode.l10n.t('Forebrain gateway token'), password: true, ignoreFocusOut: true });
       if (entered === undefined) return;
       if (!active) {
-        void vscode.window.showInformationMessage('Forebrain: not connected yet — run "Forebrain: Reconnect" first.');
+        void vscode.window.showInformationMessage(vscode.l10n.t('Forebrain: not connected yet. Run the reconnect command first.'));
         return;
       }
       const verdict = await active.enterToken(entered);
-      if (verdict === 'rejected') void vscode.window.showErrorMessage('Forebrain: the gateway rejected that token.');
-      else if (verdict === 'unreachable') void vscode.window.showWarningMessage('Forebrain: the gateway is not answering.');
+      if (verdict === 'rejected') void vscode.window.showErrorMessage(vscode.l10n.t('Forebrain: the gateway rejected that token.'));
+      else if (verdict === 'unreachable') void vscode.window.showWarningMessage(vscode.l10n.t('Forebrain: the gateway is not answering.'));
     }),
     vscode.commands.registerCommand('forebrain.openWebUiInBrowser', () => {
       if (!active) return;
       const current = active.currentToken();
-      if (!current) { void vscode.window.showInformationMessage('Forebrain: connect the panel first.'); return; }
+      if (!current) { void vscode.window.showInformationMessage(vscode.l10n.t('Forebrain: connect the panel first.')); return; }
       // The sign-in link the gateway's own banner prints (the Web UI reads the
       // fragment once and wipes it). The token leaves the extension only into
       // the person's own browser, the way the banner already does.

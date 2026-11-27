@@ -139,4 +139,27 @@ describe('ApprovalPresetPicker', () => {
       expect((wrapper.vm as unknown as { takeDraft: () => string | null }).takeDraft()).toBeNull()
     })
   })
+
+  // The chip names a preset at every moment, including the two when the server
+  // has not spoken: the read is still in flight, or it failed. It echoes the
+  // concrete preset the conversation would start under — never a third word
+  // that is not on the menu (owner 2026-11-26).
+  describe('before the state is read', () => {
+    it('echoes the concrete default preset while the read is in flight', () => {
+      vi.spyOn(forebrainApi, 'sessionPresetCurrent').mockReturnValue(new Promise(() => {}))
+      const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: 's1' } })
+      expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Workspace write')
+      expect(wrapper.text()).not.toContain('Follow default')
+      wrapper.unmount()
+    })
+
+    it('keeps the concrete preset when the read fails, and says why', async () => {
+      vi.spyOn(forebrainApi, 'sessionPresetCurrent').mockRejectedValue(new Error('HTTP 503'))
+      const wrapper = mount(ApprovalPresetPicker, { props: { sessionId: 's1' } })
+      await vi.waitFor(() => expect(wrapper.find('[data-testid="approval-picker-error"]').exists()).toBe(true))
+      expect(wrapper.get('[data-testid="approval-picker"]').text()).toBe('Workspace write')
+      expect(wrapper.text()).not.toContain('Follow default')
+      wrapper.unmount()
+    })
+  })
 })
