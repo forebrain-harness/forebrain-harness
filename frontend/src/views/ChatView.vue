@@ -707,6 +707,12 @@
             :key="tab.id"
             :artifact="tab.artifact"
           />
+          <FileDoc
+            v-else-if="tab.kind === 'file' && tab.file"
+            v-show="tab.id === docActive && !planActive"
+            :key="tab.id"
+            :file="tab.file"
+          />
         </template>
         <SubagentTab
           v-for="record in drawerRecords"
@@ -825,7 +831,7 @@
 </template>
 
 <script setup lang="ts">
-import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectives } from 'vue'
+import { h, ref, computed, nextTick, onMounted, onUnmounted, watch, withDirectives, provide } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { CheckCircle, CircleAlert, Bot, ImageOff, PanelRight, FolderGit2, FolderPlus, FileText, Map, Hammer, Clock, History, Copy, ListChecks, Lock, ChevronRight } from 'lucide-vue-next'
 import { Alert, AlertDescription, AlertTitle } from '@repo/shadcn-vue/components/ui/alert'
@@ -946,6 +952,11 @@ import { sessionTitleFromContent } from '@/lib/sessionTitle'
 import { sessionModelOptionInForce } from '@/lib/sessionModel'
 import { useI18n } from '@/locales'
 import type { I18nKey } from '@/locales'
+import { captureHostParam, isVscodeHost, openFileLineKey, postFileRangeToHost } from '@/lib/fileLineLinks'
+import FileDoc from '@/components/chat/FileDoc.vue'
+// The panel's iframe URL names the host once; write it down before any
+// navigation drops the query, so every later page still knows it is embedded.
+captureHostParam()
 const { lastSessionId } = useLastSession()
 const workbench = useWorkbench()
 
@@ -2416,11 +2427,15 @@ function outputSourceOf(tab: DocTab): { sessionId: string; agentId?: string; ret
  * Opens one document a card head worded: a whole command, a whole title. The
  * same content is the same tab, so opening it again only brings it to the
  * front. It opens in the conversation's own drawer — from the conversation's
- * cards and from a subagent's alike.
+ * cards and from a subagent's alike. A file link re-opening its tab moves the
+ * tab's range instead of opening a second one.
  */
 function openDocTab(tab: DocTab) {
-  if (!docTabs.value.some((open) => open.id === tab.id)) {
+  const index = docTabs.value.findIndex((open) => open.id === tab.id)
+  if (index < 0) {
     docTabs.value = [...docTabs.value, tab]
+  } else if (tab.kind === 'file') {
+    docTabs.value = docTabs.value.map((open) => (open.id === tab.id ? tab : open))
   }
   if (!drawerOrder.value.includes(tab.id)) drawerOrder.value = [...drawerOrder.value, tab.id]
   docActive.value = tab.id
@@ -2428,6 +2443,19 @@ function openDocTab(tab: DocTab) {
   drawerOpen.value = true
   scheduleBrowsePersist()
 }
+
+// The prose file:line links of this conversation's whole subtree: inside the
+// VS Code panel the range goes to the host, which opens the editor; in a
+// browser it opens as a read-only tab of this drawer, at the lines named.
+provide(openFileLineKey, (ref) => {
+  if (isVscodeHost()) {
+    postFileRangeToHost(ref)
+    return
+  }
+  openDocTab(docTabFor('file', '', {
+    file: { path: ref.path, lineFrom: ref.from, lineTo: ref.to, scope: workbenchScope.value },
+  }))
+})
 
 /** Brings an already open document tab to the front. */
 function selectDocTab(id: string) {

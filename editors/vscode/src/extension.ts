@@ -245,6 +245,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
     }),
     panel.onCommand((id) => void vscode.commands.executeCommand(id)),
+    panel.onFileRange((range) => void deliverables.openRange(range)),
     {
       dispose: () => {
         // `Connection.dispose()` emits nothing, so nothing else would ever

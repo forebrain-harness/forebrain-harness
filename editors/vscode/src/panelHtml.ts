@@ -17,13 +17,15 @@ const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 /**
  * The URL the panel's iframe loads: the relay origin, the boot secret the relay
  * insists on for a navigation, and (from plan 379 on) the session the Web UI
- * should open. Throws on anything that does not match its shape, so no
- * unvalidated text ever reaches an attribute.
+ * should open. `host=vscode` tells the Web UI it is embedded, so a file:line
+ * link posts its range back to this panel instead of opening a drawer tab.
+ * Throws on anything that does not match its shape, so no unvalidated text
+ * ever reaches an attribute.
  */
 export function panelUrl(relayOrigin: string, boot: string, session?: string): string {
   if (!RELAY_ORIGIN.test(relayOrigin)) throw new Error('not a relay origin');
   if (!SECRET.test(boot)) throw new Error('boot secret must be 32 hex characters');
-  let url = `${relayOrigin}/?boot=${boot}`;
+  let url = `${relayOrigin}/?boot=${boot}&host=vscode`;
   if (session !== undefined) {
     if (!SESSION_ID.test(session)) throw new Error('session id has an unexpected shape');
     url += `&session=${session}`;
@@ -49,7 +51,7 @@ export function renderPanelHtml(state: PanelState, nonce: string = randomBytes(3
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';${frame}">
 <title>Forebrain</title></head>
 <body>${body}
-<script nonce="${nonce}">${PANEL_SCRIPT}</script>
+<script nonce="${nonce}">${panelScript(state.kind === 'ready' ? state.relayOrigin : undefined)}</script>
 </body></html>`;
 }
 
@@ -123,17 +125,26 @@ function statusBody(state: PanelState): string {
 </div>`;
 }
 
-// The only script the panel runs: forward a whitelisted button to the host and
-// show a status line the host may push. It never sees the token.
-const PANEL_SCRIPT = `const vscode = acquireVsCodeApi();
+// The only script the panel runs: forward a whitelisted button to the host,
+// and — while the relay frame is up — forward a file range the Web UI posts.
+// It never sees the token. A range is admitted only from the relay origin,
+// only from the panel's own iframe, only of the one whitelisted type, and only
+// in shape; the host re-checks all of it before it opens anything.
+function panelScript(relayOrigin?: string): string {
+  const relay = relayOrigin === undefined ? '' : `
+window.addEventListener('message', (e) => {
+  const frame = document.getElementById('panel');
+  if (!frame || e.origin !== ${JSON.stringify(relayOrigin)} || e.source !== frame.contentWindow) return;
+  const m = e.data;
+  if (!m || m.type !== 'openFileRange') return;
+  if (typeof m.path !== 'string' || m.path.length === 0) return;
+  if (!Number.isInteger(m.startLine) || m.startLine < 1) return;
+  if (!Number.isInteger(m.endLine) || m.endLine < m.startLine) return;
+  vscode.postMessage({ type: 'openFileRange', path: m.path, startLine: m.startLine, endLine: m.endLine });
+});`;
+  return `const vscode = acquireVsCodeApi();
 for (const b of document.querySelectorAll('button[data-command]')) {
   b.addEventListener('click', () => vscode.postMessage({ type: 'command', id: b.dataset.command }));
-}
-window.addEventListener('message', (e) => {
-  const m = e.data;
-  if (m && m.type === 'status' && typeof m.text === 'string') {
-    const s = document.getElementById('status');
-    if (s) { s.hidden = false; s.textContent = m.text; }
-  }
-});
+}${relay}
 vscode.postMessage({ type: 'ready' });`;
+}

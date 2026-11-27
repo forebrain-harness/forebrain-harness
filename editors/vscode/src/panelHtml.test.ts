@@ -25,8 +25,8 @@ function buttons(html: string): string[] {
 }
 
 test('panelUrl carries the boot secret, an optional session, and refuses anything else', () => {
-  assert.equal(panelUrl(ORIGIN, BOOT), `${ORIGIN}/?boot=${BOOT}`);
-  assert.equal(panelUrl(ORIGIN, BOOT, 's1'), `${ORIGIN}/?boot=${BOOT}&session=s1`);
+  assert.equal(panelUrl(ORIGIN, BOOT), `${ORIGIN}/?boot=${BOOT}&host=vscode`);
+  assert.equal(panelUrl(ORIGIN, BOOT, 's1'), `${ORIGIN}/?boot=${BOOT}&host=vscode&session=s1`);
   assert.throws(() => panelUrl('http://127.0.0.1:6060', BOOT), /not a relay origin/);
   assert.throws(() => panelUrl(ORIGIN, 'not-a-secret'), /boot secret/);
   assert.throws(() => panelUrl(ORIGIN, BOOT, 'a/b'), /session id/);
@@ -34,7 +34,7 @@ test('panelUrl carries the boot secret, an optional session, and refuses anythin
 
 test('the ready panel frames the relay origin under a CSP that allows exactly it', () => {
   const html = renderPanelHtml({ kind: 'ready', relayOrigin: ORIGIN, boot: BOOT }, NONCE);
-  assert.ok(html.includes(`<iframe id="panel" src="${ORIGIN}/?boot=${BOOT}"`), html);
+  assert.ok(html.includes(`<iframe id="panel" src="${ORIGIN}/?boot=${BOOT}&host=vscode"`), html);
   assert.ok(html.includes(`frame-src ${ORIGIN};`), 'the CSP names the relay origin');
   assert.ok(!html.includes('#token='), 'no sign-in link in the panel');
 });
@@ -83,14 +83,42 @@ test('a nonce that is not 64 hex characters is refused', () => {
 });
 test('a ready panel with a session frames that conversation through the relay', () => {
   const html = renderPanelHtml({ kind: 'ready', relayOrigin: ORIGIN, boot: BOOT, session: 's1' }, NONCE);
-  assert.ok(html.includes(`<iframe id="panel" src="${ORIGIN}/?boot=${BOOT}&session=s1"`), html);
+  assert.ok(html.includes(`<iframe id="panel" src="${ORIGIN}/?boot=${BOOT}&host=vscode&session=s1"`), html);
   assert.ok(html.includes(`frame-src ${ORIGIN};`));
 });
 
 test('a session id of the wrong shape is dropped, not thrown: the panel still renders', () => {
   for (const session of ['../x', 'a/b', '', 'a'.repeat(129)]) {
     const html = renderPanelHtml({ kind: 'ready', relayOrigin: ORIGIN, boot: BOOT, session }, NONCE);
-    assert.ok(html.includes(`<iframe id="panel" src="${ORIGIN}/?boot=${BOOT}"`), `${JSON.stringify(session)}: ${html}`);
+    assert.ok(html.includes(`<iframe id="panel" src="${ORIGIN}/?boot=${BOOT}&host=vscode"`), `${JSON.stringify(session)}: ${html}`);
     assert.ok(!html.includes('session='), `${JSON.stringify(session)} carries no session`);
+  }
+});
+
+test('the ready script relays only a shaped openFileRange from the relay frame itself', () => {
+  const html = renderPanelHtml({ kind: 'ready', relayOrigin: ORIGIN, boot: BOOT }, NONCE);
+  // The origin is interpolated as a quoted literal, never as raw text.
+  assert.ok(html.includes(`e.origin !== ${JSON.stringify(ORIGIN)}`), html);
+  assert.ok(html.includes("e.source !== frame.contentWindow"), 'only the panel iframe may post');
+  assert.ok(html.includes("m.type !== 'openFileRange'"), 'one whitelisted type');
+  assert.ok(html.includes("typeof m.path !== 'string'"), html);
+  assert.ok(html.includes('!Number.isInteger(m.startLine) || m.startLine < 1'), html);
+  assert.ok(html.includes('!Number.isInteger(m.endLine) || m.endLine < m.startLine'), html);
+  assert.ok(html.includes("vscode.postMessage({ type: 'openFileRange', path: m.path, startLine: m.startLine, endLine: m.endLine })"), html);
+});
+
+test('the dead status listener is gone and no other type is relayed', () => {
+  for (const state of STATES) {
+    const html = renderPanelHtml(state, NONCE);
+    assert.ok(!html.includes("m.type === 'status'"), 'no listener for a message nothing sends');
+    assert.ok(!html.includes('s.textContent = m.text'), 'the status line is never written from a message');
+  }
+});
+
+test('a panel without a relay frame runs no relay listener at all', () => {
+  for (const state of STATES.filter((s) => s.kind !== 'ready')) {
+    const html = renderPanelHtml(state, NONCE);
+    assert.ok(!html.includes("window.addEventListener('message'"), `${state.kind} listens for nothing`);
+    assert.ok(html.includes("vscode.postMessage({ type: 'ready' })"), 'the ready handshake stays');
   }
 });

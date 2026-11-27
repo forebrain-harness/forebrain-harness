@@ -3957,7 +3957,7 @@ export const forebrainApi = {
   workspaceFile(scope: WorkspaceScope, path: string) {
     const params = new URLSearchParams({ path, ...workspaceScopeParams(scope) })
     return gatewayFetch(`/api/workspace/file?${params.toString()}`).then(async (r) => {
-      if (!r.ok) throw new Error(await r.text())
+      if (!r.ok) throw new GatewayHttpError(r.status, await r.text())
       return (await r.json()) as { path: string; content: string }
     })
   },

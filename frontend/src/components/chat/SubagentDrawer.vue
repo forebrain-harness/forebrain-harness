@@ -203,7 +203,7 @@
  * same way: a column on a wide screen, an overlay on a narrow one.
  */
 import { computed, onUnmounted, ref, watch, type Component } from 'vue'
-import { Ban, CheckCircle2, CirclePause, Download, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
+import { Ban, CheckCircle2, CirclePause, Download, FileText, Loader2, Map as MapIcon, PanelRightClose, Plus, ScrollText, Terminal, Text as TextIcon, X, XCircle } from 'lucide-vue-next'
 import { usePanelWidth } from '@/composables/usePanelWidth'
 import { formatRuntimeDuration, type SubagentTranscript } from '@/composables/useChatStream'
 import type { DocTab } from '@/composables/useDocTabs'
@@ -301,6 +301,7 @@ const orderedTabs = computed(() => {
 function docIcon(tab: DocTab): Component {
   if (tab.kind === 'command') return Terminal
   if (tab.kind === 'output') return ScrollText
+  if (tab.kind === 'file') return FileText
   if (tab.kind === 'artifact' && tab.artifact) return artifactKindIcon(tab.artifact.kind)
   return TextIcon
 }

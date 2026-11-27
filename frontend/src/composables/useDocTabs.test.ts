@@ -58,3 +58,34 @@ describe('docTabFor', () => {
     expect(one.command).toBe('go test ./pkg/gateway/...')
   })
 })
+
+describe('docTabFor file tabs', () => {
+  const file = { path: 'pkg/config/llm_models.go', lineFrom: 338, lineTo: 343, scope: { sessionId: 's1' } }
+
+  it('names the tab by the file and identifies it by scope and path', () => {
+    const tab = docTabFor('file', '', { file })
+    expect(tab.kind).toBe('file')
+    expect(tab.label).toBe('llm_models.go')
+    expect(tab.id).toBe('doc:file:s:s1:pkg/config/llm_models.go')
+    expect(tab.file).toEqual(file)
+    expect(tab.text).toBe('')
+  })
+
+  it('a second link into the same file is the same tab, whatever the range', () => {
+    const first = docTabFor('file', '', { file })
+    const again = docTabFor('file', '', { file: { ...file, lineFrom: 1, lineTo: 2 } })
+    expect(again.id).toBe(first.id)
+    expect(again.file?.lineFrom).toBe(1)
+  })
+
+  it('keeps the same path in two conversations apart, and two paths apart', () => {
+    const one = docTabFor('file', '', { file })
+    expect(docTabFor('file', '', { file: { ...file, scope: { sessionId: 's2' } } }).id).not.toBe(one.id)
+    expect(docTabFor('file', '', { file: { ...file, scope: { projectId: 'p1' } } }).id).not.toBe(one.id)
+    expect(docTabFor('file', '', { file: { ...file, path: 'pkg/other.go' } }).id).not.toBe(one.id)
+  })
+
+  it('a file tab without its target is refused', () => {
+    expect(() => docTabFor('file', '')).toThrow(/file tab needs its target/)
+  })
+})

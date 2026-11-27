@@ -8,11 +8,16 @@ import ArtifactPreview from './ArtifactPreview.vue'
 
 // jsdom cannot run CodeMirror (no layout), so the text page mounts a recorder;
 // what this suite proves is that the text page is what the file dispatches to.
+// The recorder carries the two members ReadonlyCode itself touches: the
+// decorations facet the highlight field resolves at definition, and dispatch
+// for the (empty) highlight effect the view clears on mount.
 vi.mock('codemirror', () => {
   class EditorView {
     static editable = { of: () => 'editable' }
     static lineWrapping = 'line-wrapping'
+    static decorations = { from: (field: unknown) => ({ decorations: field }) }
     constructor(public config: { extensions: unknown[] }) {}
+    dispatch() {}
     destroy() {}
   }
   return { EditorView, basicSetup: 'basic-setup' }

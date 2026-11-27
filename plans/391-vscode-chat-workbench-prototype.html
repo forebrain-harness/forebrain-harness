@@ -96,7 +96,8 @@ code,pre,.mono{font-family:var(--mono)}
 .ed-tab.on{background:var(--ch-ed);opacity:1}
 .ed-tab .dot{width:7px;height:7px;border-radius:50%;background:#3A67C6}
 .ed-code{padding:10px 0 0;font-family:var(--mono);font-size:11.5px;line-height:1.85;overflow:hidden;flex:1;opacity:.85}
-.ed-code .ln{display:flex;padding:0 14px}
+.ed-code .ln{display:flex;padding:0 14px;transition:background-color 1.1s ease}
+.ed-code .ln.hl{background:var(--brand-soft);transition:none}
 .ed-code .ln span{width:30px;flex:none;text-align:right;padding-right:14px;opacity:.45}
 .ed-code .ln code{white-space:pre;color:inherit}
 .ed-code .k{color:#A626A4}
@@ -155,6 +156,9 @@ body.dark .ed-code .s{color:#CE9178}
 .md ul{margin:0 0 7px;padding-left:18px}
 .md li{margin:1px 0}
 .md code{background:var(--code-soft);border-radius:4px;padding:1px 4px;font-size:11.5px;color:var(--code-ink)}
+.md a.flink{color:var(--brand);text-decoration:none;cursor:pointer;border-radius:3px}
+.md a.flink:hover{background:var(--brand-soft);text-decoration:underline}
+.md a.flink:focus-visible{outline:2px solid var(--brand);outline-offset:1px}
 .md pre{margin:0 0 7px;background:var(--code-bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;overflow-x:auto;font-size:11.5px;line-height:1.7;color:var(--code-ink)}
 
 /* 思考卡 */
@@ -847,7 +851,8 @@ function fresh(){
     consent:null,consentAnswer:null,approval:'waiting',queueOpen:true,
     drawer:null,dialog:null,picker:null,slash:0,plus:false,model:false,effort:false,modelFilter:'',dockFilter:'',modelName:'claude-sonnet-4-6',openTool:null,openThink:null,scmOpen:false,diffFile:null,collapseUnchanged:true,
     planDock:'waiting',planDecision:null,verdict:true,dockPick:null,handoffModel:modelLabel(EXIT_MODELS[0]),handoffEffort:'',reviewModel:modelLabel(EXIT_MODELS[0]),batchState:'paused',rewound:false,
-    composer:'',composerFocus:false,atOpen:false,preset:DEFAULT_PRESET,presetMenu:false,editorTab:'code',planTabOpen:false,todosOpen:false,todoItems:SESSION_TODO.items.map((item)=>({...item})),todoChanged:[],todoFlash:false,todoUnread:[],todoTimer:null,events:[]
+    composer:'',composerFocus:false,atOpen:false,preset:DEFAULT_PRESET,presetMenu:false,editorTab:'code',planTabOpen:false,todosOpen:false,todoItems:SESSION_TODO.items.map((item)=>({...item})),todoChanged:[],todoFlash:false,todoUnread:[],todoTimer:null,events:[],
+    fileRange:null,fileRangeTimer:null
   };
 }
 let S=fresh();
@@ -1463,7 +1468,7 @@ function thread(scene){
       ${uMsg('@<span class="mention">editors/vscode/package.json</span> 这个 <strong>secondarySidebar</strong> 的贡献为什么在 1.105 里不生效？帮我确认闸门到底在哪。',[
         {n:'package.json',sz:'2.1 KB'},{n:'extension-host.log',sz:'18 KB',ic:'file'}])}
       ${think('t1','先读 package.json 的贡献点，再去 <code>@types/vscode</code> 里找 secondarySidebar 的闸门。如果 1.105 还在 proposed API 后面，那「不生效」就是预期行为，不是我们的 bug。')}
-      ${md('<p>它没有失效，是 <strong>1.105 还在闸门后面</strong>。</p><p><code>viewsContainers.secondarySidebar</code> 在 1.105 的源码里会先走 <code>checkProposedApiEnabled(\'contribSecondarySidebar\')</code>，只有带 proposed API 的扩展能声明它；1.106 才公开。</p><p>所以能力探测按 <strong>≥1.106</strong> 判，<code>engines</code> 保持 <code>^1.100.0</code>，旧版回退到活动栏容器，旧版只是忽略这个键，不会拒绝整个 manifest。</p>')}
+      ${md('<p>它没有失效，是 <strong>1.105 还在闸门后面</strong>。</p><p><code>viewsContainers.secondarySidebar</code> 在 1.105 的源码里会先走 <code>checkProposedApiEnabled(\'contribSecondarySidebar\')</code>，只有带 proposed API 的扩展能声明它；1.106 才公开。</p><p>面板注册的入口在 <a class="flink" data-act="open-file-range" data-v="panel.ts:49-54" role="button" tabindex="0" title="打开 panel.ts 第 49-54 行">panel.ts:49-54</a>，先看它再动 manifest。</p><p>所以能力探测按 <strong>≥1.106</strong> 判，<code>engines</code> 保持 <code>^1.100.0</code>，旧版回退到活动栏容器，旧版只是忽略这个键，不会拒绝整个 manifest。</p>')}
       ${think('t2','贡献点确认无误，接下来核对 1.105 的 proposed API 闸门与能力探测分支，再决定 engines 与回退容器怎么写。')}
       ${act([{l:'已读取 editors/vscode/package.json',t:'0.3s'},{l:'已搜索 contribSecondarySidebar',t:'1.1s'},{l:'已读取 editors/vscode/src/extension.ts',t:'0.2s'}])}
       ${docCard('已运行','grep -rn contribSecondarySidebar','grep -rn contribSecondarySidebar node_modules/@types/vscode/ | head','vscode/index.d.ts:18422: * Secondary sidebar is proposed in 1.105 (contribSecondarySidebar)\nvscode/index.d.ts:18423: * @proposed\nvscode/index.d.ts:18431: secondarySidebar?: SecondarySidebar[];')}
@@ -1739,9 +1744,12 @@ function scmView(){
   </div>`;
 }
 function editorCode(){
+  const range=S.fileRange;
   return EDITOR_LINES.map((parts,i)=>{
-    const ln=String(i+41).padStart(3,' ');
-    return `<div class="ln"><span>${ln}</span><code>${esc(parts.join(''))}</code></div>`;
+    const no=i+41;
+    const on=range&&no>=range.from&&no<=range.to;
+    const ln=String(no).padStart(3,' ');
+    return `<div class="ln${on?' hl':''}"><span>${ln}</span><code>${esc(parts.join(''))}</code></div>`;
   }).join('');
 }
 /**
@@ -1814,7 +1822,7 @@ function windowHTML(){
 
 /* ============================== 场景说明 ============================== */
 const CAPTIONS={
-  thread:['主对话线程','用户消息带附件与 <code>@</code> 引用；思考是可展开收起的「深度思考」行（展开后左竖线缩进渲染思考正文），工具调用是扁平折叠行（图标按工具类型 file/search/term/code 区分，文件读取带品牌蓝链，chevron 展开输出），进行中图标旋转、完成/失败静态（失败用 danger 图标色），不写「完成」状态字；本轮交付物带 +/− 计数，代码文件点小眼睛在左侧源代码管理面板与编辑区 diff 视图打开（可折叠未更改区域），非代码交付物（PDF/图片等）交系统默认应用外部打开；内联审批（待决定）、消息队列两条、运行状态行与 composer 全芯片。'],
+  thread:['主对话线程','用户消息带附件与 <code>@</code> 引用；思考是可展开收起的「深度思考」行（展开后左竖线缩进渲染思考正文），工具调用是扁平折叠行（图标按工具类型 file/search/term/code 区分，文件读取带品牌蓝链，chevron 展开输出），进行中图标旋转、完成/失败静态（失败用 danger 图标色），不写「完成」状态字；本轮交付物带 +/− 计数，代码文件点小眼睛在左侧源代码管理面板与编辑区 diff 视图打开（可折叠未更改区域），非代码交付物（PDF/图片等）交系统默认应用外部打开；内联审批（待决定）、消息队列两条、运行状态行与 composer 全芯片。正文里的文件行引用（panel.ts:49-54）可点：切到编辑区代码页，那几行落中并高亮，2.5 秒后淡去；键盘 Enter/Space 同样能打开。'],
   fail:['失败与拒绝','运行失败的工具行用静态 danger 图标（不旋转、不写状态字）；错误块给重试与日志入口；被拒绝的调用不留假句子，只留终端说过的那一行。'],
   runtime:['运行态卡片','压缩卡（148k → 62k）、目标行、自动继续横幅、MCP 超时、语言服务器推荐、跑批三行与继续/停止、心跳行。跑批卡片的按钮在暂停与执行两态互换。'],
   plan:['计划与检查点','计划更新卡挂在时间线上；输入框位置换成 plan dock：标题、计划正文、评审结论、四个去向（批准 / 交给其他模型执行 / 请其他模型评审 / 继续规划）；session_todo 在插件里只有一面：输入框上方那张待办卡（样式取自之前那张任务清单卡；标题与计数用 web 自己的词，见 OverviewTab 的待办卡）。会话里的「待办」芯片按开/收起。它更新时不再沉默：收起时芯片挂未读角标，展开时变化的行闪一下并保持未读标记（品牌点＋加粗），点行或「全部已读」才转已读。web 端那张会自己渲染的消息卡在插件里不显示。'],
@@ -1880,6 +1888,7 @@ function consentFromData(){
   return {mcp:CONSENT_MCP.map(r=>({...r,allow:true})),lsp:CONSENT_LSP.map(r=>({...r,allow:true})),alwaysAllow:false};
 }
 function goScene(id){
+  clearTimeout(S.fileRangeTimer);
   const theme=S.theme,brand=S.brand;
   S=fresh();S.theme=theme;S.brand=brand;S.scene=id;
   if(id==='subagent') S.drawer='subagent';
@@ -1922,6 +1931,22 @@ function handle(act,v,el,e){
       else {S.planTabOpen=true;S.editorTab='plan';log('在编辑器中打开计划文件 '+PLAN_DOC.file,'ok');}
       break;
     case 'ed-tab':S.editorTab=v==='plan'?'plan':v==='diff'?'diff':'code';log(v==='plan'?'切到计划预览':v==='diff'?'切到 diff':'切回代码');break;
+    case 'open-file-range':{
+      // A prose file:line reference (plan file-line-range-links): land on the
+      // editor's code tab, centre the named lines, hold the mark 2.5s, then
+      // let the line's own transition fade it.
+      const m=/^([\w./-]+):(\d+)(?:[-–—](\d+))?$/.exec(v||'');
+      if(!m) break;
+      clearTimeout(S.fileRangeTimer);
+      S.editorTab='code';S.planTabOpen=false;
+      S.fileRange={path:m[1],from:+m[2],to:m[3]?+m[3]:+m[2]};
+      log('打开 '+m[1]+'，定位第 '+S.fileRange.from+(S.fileRange.to>S.fileRange.from?'-'+S.fileRange.to:'')+' 行');
+      render();
+      const first=q('vsc').querySelector('.ed-code .ln.hl');
+      if(first) first.scrollIntoView({block:'center'});
+      S.fileRangeTimer=setTimeout(()=>{S.fileRange=null;S.fileRangeTimer=null;render();},2500);
+      break;
+    }
     case 'open-rewind':S.dialog='rewind';log('打开回到这里');break;
     case 'open-attach':S.dialog='attach';log('打开保存附件');break;
     case 'open-peer':S.drawer='peer';log('打开其他代理抽屉');break;
@@ -2016,6 +2041,7 @@ window.chatWorkbenchPrototype={
       title:q('vsc').querySelector('.wv-h .t')?q('vsc').querySelector('.wv-h .t').textContent.trim():'',
       caption:CAPTIONS[S.scene][0],
       comps:comps(),
+      fileRange:S.fileRange,
       events:S.events.slice()
     };
   }
@@ -2052,10 +2078,17 @@ q('vsc').addEventListener('input',e=>{
   if(next){next.focus();try{next.setSelectionRange(pos,pos);}catch(err){/* search inputs reject ranges in some engines */}}
 });
 document.addEventListener('keydown',e=>{
-  if(e.key!=='Escape') return;
-  if(S.dialog){S.dialog=null;log('Escape 关闭弹窗');render();}
-  else if(S.drawer){S.drawer=null;log('Escape 收起抽屉');render();}
-  else if(S.plus||S.model||S.presetMenu){S.plus=false;S.model=false;S.presetMenu=false;render();}
+  if(e.key==='Escape'){
+    if(S.dialog){S.dialog=null;log('Escape 关闭弹窗');render();}
+    else if(S.drawer){S.drawer=null;log('Escape 收起抽屉');render();}
+    else if(S.plus||S.model||S.presetMenu){S.plus=false;S.model=false;S.presetMenu=false;render();}
+  }
+  // A prose reference is keyboard reachable: Enter or Space opens it, the way
+  // the click does.
+  else if((e.key==='Enter'||e.key===' ')&&e.target instanceof Element&&e.target.matches('a[data-act]')){
+    e.preventDefault();
+    handle(e.target.dataset.act,e.target.dataset.v||'',e.target,e);
+  }
 });
 goScene('thread');
 </script>

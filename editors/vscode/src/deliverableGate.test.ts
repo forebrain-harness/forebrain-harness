@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { deliverableOpenKind, openableDeliverables } from './deliverableGate';
+import { clampLineRange, deliverableOpenKind, fileRangeRequestOf, openableDeliverables, resolveWorkspaceFile } from './deliverableGate';
 
 const ROOT = path.resolve('/ws/repo');
 const OTHER = path.resolve('/ws/other');
@@ -59,4 +59,56 @@ test('the extension match ignores case and a missing extension reads as text', (
   assert.equal(deliverableOpenKind(`${ROOT}/REPORT.PDF`), 'external');
   assert.equal(deliverableOpenKind(`${ROOT}/PHOTO.PNG`), 'image');
   assert.equal(deliverableOpenKind(`${ROOT}/README`), 'editor');
+});
+
+test('a relative link path resolves under the first folder that holds it', () => {
+  const present = new Set([`${OTHER}/pkg/a.go`, `${ROOT}/pkg/b.go`]);
+  const exists = (p: string) => present.has(p);
+  assert.equal(resolveWorkspaceFile('pkg/a.go', [ROOT, OTHER], exists), `${OTHER}/pkg/a.go`);
+  assert.equal(resolveWorkspaceFile('pkg/b.go', [ROOT, OTHER], exists), `${ROOT}/pkg/b.go`);
+  // Folder order decides: the first hit wins, not the last.
+  present.add(`${ROOT}/pkg/a.go`);
+  assert.equal(resolveWorkspaceFile('pkg/a.go', [ROOT, OTHER], exists), `${ROOT}/pkg/a.go`);
+  assert.equal(resolveWorkspaceFile('pkg/missing.go', [ROOT, OTHER], exists), null);
+});
+
+test('an absolute link path still must land inside a workspace folder', () => {
+  const exists = () => true;
+  assert.equal(resolveWorkspaceFile(`${ROOT}/pkg/a.go`, [ROOT], exists), `${ROOT}/pkg/a.go`);
+  assert.equal(resolveWorkspaceFile('/etc/passwd', [ROOT], exists), null);
+  assert.equal(resolveWorkspaceFile(`${ROOT}/../secret.go`, [ROOT], exists), null);
+  assert.equal(resolveWorkspaceFile('pkg/../../secret.go', [ROOT], exists), null);
+  assert.equal(resolveWorkspaceFile('', [ROOT], exists), null);
+  assert.equal(resolveWorkspaceFile('pkg/a.go', [], exists), null);
+});
+
+test('a range request is admitted only in shape', () => {
+  assert.deepEqual(fileRangeRequestOf({ type: 'openFileRange', path: 'a.go', startLine: 3, endLine: 7 }), {
+    path: 'a.go',
+    startLine: 3,
+    endLine: 7,
+  });
+  for (const bad of [
+    null,
+    'a.go:3',
+    {},
+    { path: '', startLine: 1, endLine: 1 },
+    { path: 'a\0.go', startLine: 1, endLine: 1 },
+    { path: 3, startLine: 1, endLine: 1 },
+    { path: 'a.go', startLine: 0, endLine: 1 },
+    { path: 'a.go', startLine: 1.5, endLine: 2 },
+    { path: 'a.go', startLine: 5, endLine: 3 },
+    { path: 'a.go', startLine: 1, endLine: '2' },
+    { path: 'a.go', startLine: 1 },
+  ]) {
+    assert.equal(fileRangeRequestOf(bad), null, JSON.stringify(bad));
+  }
+});
+
+test('a range clamps to the document, start first, end never before it', () => {
+  assert.deepEqual(clampLineRange(3, 7, 100), { startLine: 3, endLine: 7 });
+  assert.deepEqual(clampLineRange(10, 20, 5), { startLine: 5, endLine: 5 });
+  assert.deepEqual(clampLineRange(2, 99, 5), { startLine: 2, endLine: 5 });
+  assert.deepEqual(clampLineRange(0, 0, 5), { startLine: 1, endLine: 1 });
+  assert.deepEqual(clampLineRange(1, 1, 0), { startLine: 1, endLine: 1 });
 });

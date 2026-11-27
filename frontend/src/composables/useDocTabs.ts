@@ -7,11 +7,21 @@
  */
 import { t } from '@/locales'
 import type { ArtifactView } from '@/lib/artifacts'
+import type { WorkspaceScope } from '@/lib/api'
+
+/** A workspace file a prose link opened, at the lines it named (plan
+ *  file-line-range-links). Lines are 1-based; the view clamps them. */
+export interface FileDocTarget {
+  path: string
+  lineFrom: number
+  lineTo: number
+  scope: WorkspaceScope
+}
 
 /** One document open as a tab of the drawer. */
 export interface DocTab {
   id: string
-  kind: 'command' | 'title' | 'output' | 'artifact'
+  kind: 'command' | 'title' | 'output' | 'artifact' | 'file'
   /** What the tab says: 命令 <第一行> / 标题 <标题> (or its English word) /
    *  the delivered file's own name. */
   label: string
@@ -24,6 +34,8 @@ export interface DocTab {
   /** The delivered file this tab previews (plan 153): what to render, and
    *  the URLs to render it from. */
   artifact?: ArtifactView
+  /** The workspace file this tab reads at a line range, when kind is 'file'. */
+  file?: FileDocTarget
 }
 
 /** A short stable digest, so the same content is the same tab. */
@@ -43,12 +55,14 @@ function digest(text: string): string {
  * A delivered file (kind 'artifact') is identified by what it *is* — its
  * conversation and its artifact id — never by a digest: two files can hold
  * the same bytes, and presenting a revised version must still focus the one
- * tab the reader opened.
+ * tab the reader opened. A workspace file (kind 'file') is identified the same
+ * way — its scope and its path — so a second link into the same file focuses
+ * the one tab and moves its range, never opens a second one.
  */
 export function docTabFor(
-  kind: 'command' | 'title' | 'artifact',
+  kind: 'command' | 'title' | 'artifact' | 'file',
   text: string,
-  extra: { command?: string; source?: DocTab['source']; artifact?: ArtifactView } = {},
+  extra: { command?: string; source?: DocTab['source']; artifact?: ArtifactView; file?: FileDocTarget } = {},
 ): DocTab {
   if (kind === 'artifact') {
     const artifact = extra.artifact
@@ -59,6 +73,22 @@ export function docTabFor(
       label: artifact.name || artifact.title,
       text: '',
       artifact,
+    }
+  }
+  if (kind === 'file') {
+    const file = extra.file
+    if (!file) throw new Error('docTabFor: a file tab needs its target')
+    const scopeKey = file.scope.sessionId
+      ? `s:${file.scope.sessionId}`
+      : file.scope.projectId
+        ? `p:${file.scope.projectId}`
+        : ''
+    return {
+      id: `doc:file:${scopeKey}:${file.path}`,
+      kind,
+      label: file.path.split('/').pop() || file.path,
+      text: '',
+      file,
     }
   }
   const firstLine = String(text ?? '').split('\n').map((line) => line.trim()).find(Boolean) ?? ''

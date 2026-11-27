@@ -166,6 +166,36 @@ const EXPECTED = {
       assert.match(await text('[data-comp="ApprovalCard"]'), /你拒绝了这条命令，它没有运行/);
     });
 
+    await check('A prose file:line reference lands in the editor code tab and fades', async () => {
+      await scene('thread');
+      const link = page.locator('[data-act="open-file-range"]');
+      assert.equal(await link.count(), 1, 'the thread answer carries one file:line reference');
+      assert.match(await text('[data-act="open-file-range"]'), /panel\.ts:49-54/);
+      assert.equal(await link.evaluate(el => el.getAttribute('role')), 'button', 'the reference is a button-shaped anchor');
+      assert.equal(await link.evaluate(el => el.getAttribute('tabindex')), '0', 'the reference is keyboard reachable');
+      await click('[data-act="open-file-range"]');
+      const s = await snap();
+      assert.equal(s.editorTab, 'code', 'the click takes the editor code tab');
+      assert.deepEqual(s.fileRange, { path: 'panel.ts', from: 49, to: 54 });
+      assert.equal(await page.locator('.ed-code .ln.hl').count(), 6, 'each named line carries the landing mark');
+      const marked = await page.locator('.ed-code .ln.hl').first().evaluate(el => getComputedStyle(el).backgroundColor);
+      assert.notEqual(marked, 'rgba(0, 0, 0, 0)', 'the landing mark paints in the brand soft');
+      assert(s.events.some(e => /panel\.ts/.test(e.text)), 'the event log names the jump');
+      // The mark holds ~2.5s, then the class leaves and the line's own
+      // transition fades the background back.
+      await page.waitForTimeout(2700);
+      assert.equal(await page.locator('.ed-code .ln.hl').count(), 0, 'the landing mark has faded');
+      assert.equal((await snap()).fileRange, null);
+      // Keyboard: Enter opens the reference the way the click does.
+      await scene('thread');
+      await page.locator('[data-act="open-file-range"]').focus();
+      await page.keyboard.press('Enter');
+      await frame();
+      assert.deepEqual((await snap()).fileRange, { path: 'panel.ts', from: 49, to: 54 }, 'Enter opens the reference');
+      await page.waitForTimeout(2700);
+      assert.deepEqual(errors, [], 'Browser console errors');
+    });
+
     await check('Inline approval records the decision and the scene resets it', async () => {
       await scene('thread');
       assert.equal((await snap()).approval, 'waiting');

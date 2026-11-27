@@ -6,7 +6,14 @@
 // deliverableGate.ts, which is pure and tested; this is the thin part that
 // draws it.
 import * as vscode from 'vscode';
-import { deliverableOpenKind, openableDeliverables } from './deliverableGate';
+import * as fs from 'node:fs';
+import {
+  clampLineRange,
+  deliverableOpenKind,
+  fileRangeRequestOf,
+  openableDeliverables,
+  resolveWorkspaceFile,
+} from './deliverableGate';
 import type { DeliveredFile, SessionState } from './sessionState';
 
 /** One row of `GET /api/chat/sessions/<id>/artifacts`. */
@@ -120,5 +127,40 @@ export class Deliverables {
       default:
         await vscode.window.showTextDocument(uri, { preview: false });
     }
+  }
+
+  /**
+   * A file:line link the Web UI posted (plan file-line-range-links): resolve
+   * the path against the workspace folders, stat it before anything opens,
+   * then show the source with the named lines selected and centred. Every
+   * extension the link whitelist admits reads as source here — md and html
+   * included, the way workbuddy's own editor shows them; the delivery command
+   * above keeps its kind routes, this path has none. The selection is the
+   * highlight: VS Code's own, gone on the first click, no decoration.
+   */
+  async openRange(raw: unknown): Promise<void> {
+    const request = fileRangeRequestOf(raw);
+    if (!request) return;
+    const roots = (vscode.workspace.workspaceFolders ?? []).map((folder) => folder.uri.fsPath);
+    const resolved = resolveWorkspaceFile(request.path, roots, (candidate) => {
+      try {
+        return fs.statSync(candidate).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (!resolved) {
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t('Forebrain: no file to open at {0} in the workspace.', request.path),
+      );
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(resolved));
+    const { startLine, endLine } = clampLineRange(request.startLine, request.endLine, document.lineCount);
+    const editor = await vscode.window.showTextDocument(document, { preview: false });
+    const from = new vscode.Position(startLine - 1, 0);
+    const to = new vscode.Position(endLine - 1, document.lineAt(endLine - 1).text.length);
+    editor.selection = new vscode.Selection(from, to);
+    editor.revealRange(new vscode.Range(from, to), vscode.TextEditorRevealType.InCenter);
   }
 }

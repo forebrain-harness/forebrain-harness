@@ -12,4 +12,13 @@ export { default as MessageBranchPrevious } from './MessageBranchPrevious.vue'
 export { default as MessageBranchSelector } from './MessageBranchSelector.vue'
 export { default as MessageContent } from './MessageContent.vue'
 export { default as MessageResponse } from './MessageResponse.vue'
+export {
+  fileLineRenderers,
+  fileLineRefOf,
+  openFileLineKey,
+  splitFileLineLinks,
+  type FileLineRef,
+  type FileLineSegment,
+  type OpenFileLine,
+} from './fileLineLinks'
 export { default as MessageToolbar } from './MessageToolbar.vue'

@@ -231,7 +231,7 @@
  * draft against the current version. The conversation is a workshop session
  * (source=workshop); the skill it works on is named on the route.
  */
-import { computed, h, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, h, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Conversation,
@@ -288,9 +288,16 @@ import forebrainApi, {
 import { parseSkillCandidates } from '@/lib/skillCandidates'
 import { parseWorkshopTarget } from '@/lib/workshopTarget'
 import { sessionModelOptionInForce } from '@/lib/sessionModel'
+import { captureHostParam, isVscodeHost, openFileLineKey, postFileRangeToHost } from '@/lib/fileLineLinks'
 import { useI18n, type I18nKey } from '@/locales'
 
 const { t } = useI18n()
+// The panel's iframe URL names the host once; write it down before any
+// navigation drops the query. The workshop has no document drawer, so in a
+// browser its file references stay plain text; inside the VS Code panel the
+// range goes to the host, which opens the editor.
+captureHostParam()
+if (isVscodeHost()) provide(openFileLineKey, postFileRangeToHost)
 const route = useRoute()
 const router = useRouter()
 const stream = useChatStream()

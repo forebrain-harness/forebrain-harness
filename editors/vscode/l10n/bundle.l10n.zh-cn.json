@@ -21,6 +21,7 @@
   "Reveal": "在资源管理器中显示",
   "Forebrain delivered {0} file(s)": "Forebrain 交付了 {0} 个文件",
   "Forebrain: this delivery is outside the workspace: {0}": "Forebrain：这个交付物在工作区之外：{0}",
+  "Forebrain: no file to open at {0} in the workspace.": "Forebrain：工作区里没有可打开的 {0} 文件。",
   "Forebrain gateway token": "Forebrain 网关 token",
   "Forebrain: not connected yet. Run the reconnect command first.": "Forebrain：尚未连接。请先运行重新连接命令。",
   "Forebrain: the gateway rejected that token.": "Forebrain：网关拒绝了这个 token。",
