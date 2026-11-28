@@ -5880,9 +5880,10 @@ func TestOtherContinuationHangsUnderTextColumn(t *testing.T) {
 	line := prefix + overlayHangMarker + text + otherCaretCell
 	buf := []rune(text) // the field stores the text only, never the caret cell
 	prefixPlain := stripAnsi(prefix)
-	// cont mirrors softWrapOverlayLine: the prefix hangs when contentWidth >= 1.
+	// cont mirrors softWrapOverlayLine: the prefix hangs when contentWidth >= 2
+	// (a wide rune needs two cells; below that the hang is dropped).
 	contFor := func(width int) string {
-		if width-pw >= 1 {
+		if width-pw >= 2 {
 			return strings.Repeat(" ", pw)
 		}
 		return ""
@@ -5931,6 +5932,27 @@ func TestOtherContinuationHangsUnderTextColumn(t *testing.T) {
 			want := starts[i] - len([]rune(prefixPlain))
 			if got := caretIndexAroundBlock(buf, len(buf), pw, 1, refs[i].logicalCol); got != want {
 				t.Fatalf("width=%d row%d click first cell: rune %d want %d", width, i, got, want)
+			}
+		}
+	}
+}
+
+// A wide (CJK) rune needs two cells; before the contentWidth<2 fallback a
+// one-cell budget made xansi.WrapWc emit an over-width row (the pristine tree
+// overflowed too). No overlay row may exceed the terminal width at any width
+// that can hold a wide rune (owner 2026-11-28: pre-existing overflow fixed).
+func TestOverlayNarrowWidthDoesNotOverflow(t *testing.T) {
+	cases := []string{
+		strings.Repeat(" ", 12) + "移abc 既可以新建主代理又可以新建子代理",
+		"\x1b[36m❯\x1b[0m \x1b[2m4.\x1b[0m Other: " + overlayHangMarker + "移到 Agents & tools – Agent definitions节，既可以新建主代理又可以新建子代理",
+		"     轮询间隔 2 秒，最多 60 秒。兼顾安装耗时与网关等待",
+	}
+	for _, line := range cases {
+		for width := 2; width <= 40; width++ {
+			for _, row := range softWrapOverlayLine(line, width) {
+				if w := lipgloss.Width(row); w > width {
+					t.Fatalf("width=%d row overflows (w=%d): %q\nline=%q", width, w, row, line)
+				}
 			}
 		}
 	}

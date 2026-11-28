@@ -6839,8 +6839,8 @@ func overlaySoftWrapRefs(logical string, rows []string, lineIdx, width int) []ov
 	// exactly as that function takes it, so a row that carries none is not
 	// mistakenly stripped.
 	prefix, continuation := overlayWrapPrefix(logical)
-	if width-displayLineWidth(prefix) < 1 {
-		continuation = "" // match softWrapOverlayLine's contentWidth<1 fallback
+	if width-displayLineWidth(prefix) < 2 {
+		continuation = "" // match softWrapOverlayLine's contentWidth<2 fallback
 	}
 	plain := stripAnsi(strings.ReplaceAll(logical, overlayHangMarker, ""))
 	contents := make([]string, len(rows))
@@ -6897,7 +6897,11 @@ func softWrapOverlayLine(line string, width int) []string {
 	// falls out of the gutter nor jumps back under its bullet.
 	prefix, continuation := overlayWrapPrefix(line)
 	contentWidth := width - displayLineWidth(prefix)
-	if contentWidth < 1 {
+	// A wide (CJK) rune needs two cells, so a one-cell content budget cannot
+	// hold it and xansi.WrapWc would emit an over-width row. Below two cells,
+	// drop the hang prefix and wrap the whole line at the full width instead
+	// (owner 2026-11-28: the pre-existing narrow-width overflow, fixed here).
+	if contentWidth < 2 {
 		prefix, continuation, contentWidth = "", "", width
 	}
 

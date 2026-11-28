@@ -271,6 +271,11 @@ MEMORY_AGENT_MARK = "Memory Writing Agent"
 COMPACTION_SUMMARY_MARK = "Reply with the summary itself as plain text. Do not call any tools."
 TOOL_SCRIPT = TOOL_SCRIPTS.get(MODE, [])
 REQUESTS = itertools.count()
+# The turn counter is separate from the request counter on purpose: the
+# background passes (the memory pipeline's own agents) share this provider, and
+# a request counter would let one of them take the turn's scripted answer (the
+# ask-mode race: a background unary request consumed the user_interaction call).
+TOOL_SCRIPT_TURNS = itertools.count()
 DUMPS = itertools.count(1)
 
 LIMIT_SECONDS = float(os.environ.get("FAKE_LIMIT_SECONDS") or 20)
@@ -568,7 +573,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         if MODE in TOOL_SCRIPTS:
-            self.serve_tool_script(next(REQUESTS))
+            # The script is picked per turn, not per request: a background pass
+            # (memory/compaction) must not consume the turn's scripted answer.
+            if not _is_turn_request(body):
+                self.serve_background(body)
+                return
+            self.serve_tool_script(next(TOOL_SCRIPT_TURNS))
             return
 
         if MODE == "multishell":
