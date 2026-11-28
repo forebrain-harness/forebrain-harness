@@ -5845,3 +5845,126 @@ func TestPlanReviewListReservesOneCellAfterTheMark(t *testing.T) {
 		t.Fatalf("endsAt = %d, want the name column plus the gap (%d)", got, want)
 	}
 }
+
+func TestOtherCaretCellSurvivesSoftWrap(t *testing.T) {
+	prefix := "\x1b[36m❯\x1b[0m \x1b[2m4.\x1b[0m Other: "
+	text := "移到 Agents & tools – Agents – Agent definitions节，既可以新建主代理又可以新建子代理，配置项是完全一致的，只通过primary配置项区分主代理还是子代理，primary为true表示主代理，primary为false表示子代理"
+	runes := []rune(text)
+	for ci := 0; ci <= len(runes); ci++ {
+		line := prefix + overlayHangMarker + string(runes[:ci]) + otherCaretCell + string(runes[ci:])
+		for width := 40; width <= 220; width++ {
+			rows := selfContainedRows(softWrapOverlayLine(line, width))
+			caret := false
+			for _, row := range rows {
+				if strings.HasSuffix(row, "\x1b[7m") {
+					t.Fatalf("caret=%d width=%d: dangling reverse-video escape:\n%q", ci, width, row)
+				}
+				if w := lipgloss.Width(row); w > width {
+					t.Fatalf("caret=%d width=%d: row wider than width (%d):\n%q", ci, width, w, row)
+				}
+				if strings.Contains(row, "\x1b[7m\u00A0") {
+					caret = true
+				}
+			}
+			if !caret {
+				t.Fatalf("caret=%d width=%d: caret cell lost:\n%q", ci, width, rows)
+			}
+		}
+	}
+}
+
+func TestOtherContinuationHangsUnderTextColumn(t *testing.T) {
+	prefix := "\x1b[36m❯\x1b[0m \x1b[2m4.\x1b[0m Other: "
+	pw := lipgloss.Width(prefix)
+	text := "移到 Agents & tools – Agents – Agent definitions节，既可以新建主代理又可以新建子代理，配置项是完全一致的，只通过primary配置项区分主代理还是子代理，primary为true表示主代理，primary为false表示子代理"
+	line := prefix + overlayHangMarker + text + otherCaretCell
+	buf := []rune(text) // the field stores the text only, never the caret cell
+	prefixPlain := stripAnsi(prefix)
+	// cont mirrors softWrapOverlayLine: the prefix hangs when contentWidth >= 1.
+	contFor := func(width int) string {
+		if width-pw >= 1 {
+			return strings.Repeat(" ", pw)
+		}
+		return ""
+	}
+	// Narrow widths (4..pw+1): only rows/refs agreement is guaranteed. No
+	// hang/overflow/click claim below contentWidth 2 (pre-existing wide-rune
+	// overflow in xansi.WrapWc).
+	for width := 4; width <= pw+1; width++ {
+		rows := softWrapOverlayLine(line, width)
+		refs := overlaySoftWrapRefs(line, rows, 0, width)
+		cont := contFor(width)
+		for i := 1; i < len(rows); i++ {
+			if refs[i].rowCol != lipgloss.Width(cont) {
+				t.Fatalf("narrow width=%d row%d rows/refs disagree: rowCol=%d cont=%q", width, i, refs[i].rowCol, cont)
+			}
+		}
+	}
+	// width >= pw+2: hang under the text column, no overflow, clicks map.
+	for width := pw + 2; width <= 220; width++ {
+		rows := softWrapOverlayLine(line, width)
+		if len(rows) < 2 {
+			continue
+		}
+		cont := contFor(width) // == spaces(pw) here
+		if !strings.HasPrefix(rows[0], prefix) || lipgloss.Width(rows[0]) > width {
+			t.Fatalf("width=%d row0 bad: %q", width, rows[0])
+		}
+		refs := overlaySoftWrapRefs(line, rows, 0, width)
+		plain := stripAnsi(strings.ReplaceAll(line, overlayHangMarker, ""))
+		contents := make([]string, len(rows))
+		for i, row := range rows {
+			c := stripAnsi(row)
+			if i > 0 {
+				c = strings.TrimPrefix(c, cont)
+			}
+			contents[i] = c
+		}
+		starts := plainWrapRowStarts(plain, contents)
+		for i := 1; i < len(rows); i++ {
+			if !strings.HasPrefix(rows[i], cont) || lipgloss.Width(rows[i]) > width {
+				t.Fatalf("width=%d row%d hang/overflow: %q", width, i, rows[i])
+			}
+			if refs[i].rowCol != pw {
+				t.Fatalf("width=%d row%d rowCol=%d want %d", width, i, refs[i].rowCol, pw)
+			}
+			want := starts[i] - len([]rune(prefixPlain))
+			if got := caretIndexAroundBlock(buf, len(buf), pw, 1, refs[i].logicalCol); got != want {
+				t.Fatalf("width=%d row%d click first cell: rune %d want %d", width, i, got, want)
+			}
+		}
+	}
+}
+
+func TestOverlayDescriptionWrapUnchangedByHangMarker(t *testing.T) {
+	desc := "     轮询间隔 2 秒，最多 60 秒。兼顾安装耗时与网关等待，请求快但较慢的安装会超时等待充分但请求长时间占用连接"
+	for width := 20; width <= 120; width++ {
+		rows := softWrapOverlayLine(desc, width)
+		for i := 1; i < len(rows); i++ {
+			if !strings.HasPrefix(rows[i], "     ") {
+				t.Fatalf("width=%d row%d lost its 5-space hang: %q", width, i, rows[i])
+			}
+		}
+	}
+}
+
+func TestQuestionOverlayFallbackStripsReflowMarkers(t *testing.T) {
+	o := newTestOverlay(twoQuestionForm())
+	o.handleKey(parsedKey{kind: rawKeyDown})
+	o.handleKey(parsedKey{kind: rawKeyDown})
+	for _, r := range "dddd" {
+		o.handleKey(parsedKey{kind: rawKeyRune, r: r})
+	}
+	buf := &bytes.Buffer{}
+	o.out = buf
+	o.render()
+	s := buf.String()
+	if !strings.Contains(s, "Other: dddd"+otherCaretCell) {
+		t.Fatalf("Other row rendered without a caret:\n%s", s)
+	}
+	for _, tok := range []string{"\x00HANG\x00", "HANG", "\x00QSEP\x00", "QSEP", "\x00"} {
+		if strings.Contains(s, tok) {
+			t.Fatalf("reflow marker leaked %q:\n%s", tok, s)
+		}
+	}
+}

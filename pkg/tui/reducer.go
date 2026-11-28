@@ -6819,7 +6819,7 @@ func (r *Renderer) overlayContentLinesLocked(width int) ([]string, []overlayRowR
 	for i, line := range r.overlayComposer.lines {
 		wrapped := softWrapOverlayLine(line, width)
 		lines = append(lines, wrapped...)
-		refs = append(refs, overlaySoftWrapRefs(line, wrapped, i)...)
+		refs = append(refs, overlaySoftWrapRefs(line, wrapped, i, width)...)
 	}
 	// Normalise after the refs: they are derived from plain text, and the
 	// inserted carry/reset sequences are zero-width, so the line↔ref mapping
@@ -6834,12 +6834,15 @@ func (r *Renderer) overlayContentLinesLocked(width int) ([]string, []overlayRowR
 // wrapping consumes the whitespace it breaks at and re-indents continuation
 // rows, so the columns are recovered by walking the line's plain text alongside
 // the rows that were emitted rather than by summing row widths.
-func overlaySoftWrapRefs(logical string, rows []string, lineIdx int) []overlayRowRef {
+func overlaySoftWrapRefs(logical string, rows []string, lineIdx, width int) []overlayRowRef {
 	// The prefix softWrapOverlayLine re-adds is taken from the raw line
 	// exactly as that function takes it, so a row that carries none is not
 	// mistakenly stripped.
-	_, continuation := overlayWrapPrefix(logical)
-	plain := stripAnsi(logical)
+	prefix, continuation := overlayWrapPrefix(logical)
+	if width-displayLineWidth(prefix) < 1 {
+		continuation = "" // match softWrapOverlayLine's contentWidth<1 fallback
+	}
+	plain := stripAnsi(strings.ReplaceAll(logical, overlayHangMarker, ""))
 	contents := make([]string, len(rows))
 	for i, row := range rows {
 		content := stripAnsi(row)
@@ -6861,12 +6864,24 @@ func overlaySoftWrapRefs(logical string, rows []string, lineIdx int) []overlayRo
 	return refs
 }
 
+// overlaySepMarker is the question overlay's separator line, expanded to a
+// full-width rule by softWrapOverlayLine at the current terminal width.
+const overlaySepMarker = "\x00QSEP\x00"
+
+// overlayHangMarker separates a wrapped overlay line's styled label prefix from
+// its wrappable text. The prefix before it sets the column continuation rows
+// hang under (its display width); the marker itself is dropped from the content.
+// Emitted by the question overlay's Other field, whose line begins with an
+// ANSI-styled pointer that overlayWrapPrefix's plain leading-space scan cannot
+// measure. Like overlaySepMarker it must be stripped by every c.lines consumer.
+const overlayHangMarker = "\x00HANG\x00"
+
 func softWrapOverlayLine(line string, width int) []string {
 	if width < 1 {
 		return []string{line}
 	}
 	// Expand special markers for dynamic-width content.
-	if line == "\x00QSEP\x00" {
+	if line == overlaySepMarker {
 		// Question overlay separator: generate a full-width rule at the current
 		// terminal width, minus right padding. This allows the separator to
 		// adapt to terminal resizes without re-rendering the entire overlay.
@@ -6881,14 +6896,15 @@ func softWrapOverlayLine(line string, width int) []string {
 	// and the indentation and bullet become spaces, so a wrapped row neither
 	// falls out of the gutter nor jumps back under its bullet.
 	prefix, continuation := overlayWrapPrefix(line)
-	contentWidth := width - runewidth.StringWidth(prefix)
+	contentWidth := width - displayLineWidth(prefix)
 	if contentWidth < 1 {
 		prefix, continuation, contentWidth = "", "", width
 	}
 
 	// WrapWc is ANSI-aware, respects terminal-cell widths (including CJK),
 	// prefers whitespace boundaries, and hard-wraps a single long token.
-	wrapped := strings.Split(xansi.WrapWc(line[len(prefix):], contentWidth, ""), "\n")
+	content := strings.ReplaceAll(line[len(prefix):], overlayHangMarker, "")
+	wrapped := strings.Split(xansi.WrapWc(content, contentWidth, ""), "\n")
 	for i := range wrapped {
 		if i == 0 {
 			wrapped[i] = prefix + wrapped[i]
@@ -6904,6 +6920,10 @@ func softWrapOverlayLine(line string, width int) []string {
 // prefix those rows carry instead: spaces as wide as it. A line that is
 // nothing but its prefix has none, so a blank row is left alone.
 func overlayWrapPrefix(line string) (prefix, continuation string) {
+	if i := strings.Index(line, overlayHangMarker); i >= 0 {
+		prefix = line[:i]
+		return prefix, strings.Repeat(" ", displayLineWidth(prefix))
+	}
 	i := 0
 	for i < len(line) && line[i] == ' ' {
 		i++

@@ -3096,8 +3096,12 @@ func (o *questionOverlay) toggleAt(idx int) {
 
 // otherCaretCell is the reverse-video cell the Other field draws at its caret.
 // It is one column of decoration inside the text, which is why a click past it
-// is shifted back by its width before it is resolved to a rune offset.
-const otherCaretCell = "\x1b[7m \x1b[0m"
+// is shifted back by its width before it is resolved to a rune offset. The glyph
+// is a no-break space, not a plain space: the soft-wrap reflow (xansi.WrapWc)
+// consumes breakable whitespace at a line break, so a plain space here was
+// dropped whenever the break landed on the caret and the caret vanished (owner
+// 2026-11-27). nbsp is non-breaking, so the cell survives every wrap position.
+const otherCaretCell = "\x1b[7m\u00A0\x1b[0m"
 
 // placeOtherCaret moves the Other field's caret to the cell the user clicked.
 // line and col are overlay-relative, as the renderer resolved them through the
@@ -3438,7 +3442,7 @@ func (o *questionOverlay) renderOtherRow(c *qlineCollector, q *state.AskQuestion
 		}
 		o.otherRow = len(c.lines)
 		o.otherPrefixWidth = lipgloss.Width(prefix)
-		c.writeLine(prefix + before + otherCaretCell + after)
+		c.writeLine(prefix + overlayHangMarker + before + otherCaretCell + after)
 		// The field draws its own caret cell rather than the hardware one, so
 		// the paint is told where it is: the row is the one just written — the
 		// buffer holds no newline, since the only bulk insertion path folds one
@@ -3669,6 +3673,8 @@ func (o *questionOverlay) finishCollector(c *qlineCollector, top int) {
 	}
 	// Non-viewport fallback: write lines directly.
 	for _, line := range c.lines {
+		line = strings.ReplaceAll(line, overlayHangMarker, "")
+		line = strings.ReplaceAll(line, overlaySepMarker, "")
 		_, _ = fmt.Fprintln(o.out, line)
 	}
 }
@@ -3688,7 +3694,7 @@ func (o *questionOverlay) termSize() (width, height int) {
 // full-width separator during soft wrapping. This allows the separator to
 // adapt to terminal resizes.
 func (c *qlineCollector) questionSeparatorLine() string {
-	return "\x00QSEP\x00"
+	return overlaySepMarker
 }
 
 // --- held peer messages (plan 199 §3.3) ---
